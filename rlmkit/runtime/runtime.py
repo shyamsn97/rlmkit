@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from rlmkit.utils import get_tool_metadata
+from ..utils import get_tool_metadata
+from ..utils import tool as tool_decorator
 
 
 @dataclass
@@ -70,15 +71,38 @@ class Runtime(ABC):
 
     # ── file I/O (override for sandboxed runtimes) ───────────────────
 
+    @tool_decorator(
+        """Read a file and return its contents as a string.
+Args:
+- path (str): File path, relative to workspace or absolute.
+Returns:
+- str: The file contents."""
+    )
     def read_file(self, path: str) -> str:
         return self._resolve(path).read_text()
 
+    @tool_decorator(
+        """Write content to a file, creating parent directories if needed.
+Args:
+- path (str): File path, relative to workspace or absolute.
+- content (str): The full text to write.
+Returns:
+- str: Confirmation with byte count."""
+    )
     def write_file(self, path: str, content: str) -> str:
         resolved = self._resolve(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content)
         return f"Wrote {len(content)} bytes to {path}"
 
+    @tool_decorator(
+        """Append content to the end of a file, creating it if needed.
+Args:
+- path (str): File path, relative to workspace or absolute.
+- content (str): The text to append.
+Returns:
+- str: Confirmation with byte count."""
+    )
     def append_file(self, path: str, content: str) -> str:
         resolved = self._resolve(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +110,14 @@ class Runtime(ABC):
             f.write(content)
         return f"Appended {len(content)} bytes to {path}"
 
+    @tool_decorator(
+        """Apply find-and-replace edits to a file. Each edit is an (old, new) pair.
+Args:
+- path (str): File path, relative to workspace or absolute.
+- *edits (tuple[str, str]): One or more (old_string, new_string) pairs. Each replaces the first occurrence.
+Returns:
+- str: Summary of how many edits were applied."""
+    )
     def edit_file(self, path: str, *edits: tuple[str, str]) -> str:
         resolved = self._resolve(path)
         text = resolved.read_text()
@@ -97,12 +129,28 @@ class Runtime(ABC):
         resolved.write_text(text)
         return f"Applied {count}/{len(edits)} edits to {path}"
 
-    def ls(self, path: str = ".") -> list[str]:
+    @tool_decorator(
+        """List files and directories at a path.
+Args:
+- path (str): Directory (or file) path, relative to workspace or absolute.
+Returns:
+- list[str]: Sorted list of entry names."""
+    )
+    def ls(self, path) -> list[str]:
         resolved = self._resolve(path)
         if resolved.is_file():
             return [resolved.name]
         return sorted(p.name for p in resolved.iterdir())
 
+    @tool_decorator(
+        """Search file contents for lines matching a regex pattern.
+Args:
+- pattern (str): A Python regex pattern.
+- path (str): File or directory to search (default: workspace root).
+- max_results (int): Stop after this many matches (default: 50).
+Returns:
+- str: Matching lines as "relpath:lineno: line", or "(no matches)"."""
+    )
     def grep(self, pattern: str, path: str = ".", *, max_results: int = 50) -> str:
         resolved = self._resolve(path)
         regex = re.compile(pattern)
@@ -152,21 +200,25 @@ class Runtime(ABC):
             def shell(cmd: str) -> str:
                 ...
         """
+
         def decorator(fn: Callable) -> Callable:
-            from rlmkit.utils import tool as tool_decorator
             fn = tool_decorator(description, name=name)(fn)
             self.register_tool(fn, core=core)
             return fn
+
         return decorator
 
     def register_builtins(self) -> None:
         """Register the file I/O tools. Call in subclass __init__."""
-        self.register_tool(self.read_file, "Read a file's contents.")
-        self.register_tool(self.write_file, "Write content to a file.")
-        self.register_tool(self.append_file, "Append content to a file.")
-        self.register_tool(self.edit_file, "Apply find-and-replace edits to a file.")
-        self.register_tool(self.ls, "List files and directories.")
-        self.register_tool(self.grep, "Search file contents with a regex.")
+        for method in (
+            self.read_file,
+            self.write_file,
+            self.append_file,
+            self.edit_file,
+            self.ls,
+            self.grep,
+        ):
+            self.register_tool(method)
 
     def get_tool_defs(self) -> list[ToolDef]:
         return [

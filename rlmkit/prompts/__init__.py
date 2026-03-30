@@ -6,14 +6,20 @@ from .builder import (
     markdown_heading,
     markdown_section,
 )
-from .default import DEFAULT_SYSTEM_PROMPT
+from .default import (
+    DEFAULT_SECTIONS,
+    build_default_prompt,
+    make_default_builder,
+)
 
 __all__ = [
-    "DEFAULT_SYSTEM_PROMPT",
+    "DEFAULT_SECTIONS",
     "PromptBuilder",
     "Section",
     "SectionBody",
     "SectionBodyConstructFn",
+    "build_default_prompt",
+    "make_default_builder",
     "markdown_heading",
     "markdown_section",
 ]

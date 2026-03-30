@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from .builder import PromptBuilder, Section, SectionBody
 
-
 PROMPT_ORDER = """
 {identity}
 

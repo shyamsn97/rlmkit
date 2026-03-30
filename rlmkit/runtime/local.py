@@ -19,9 +19,8 @@ class LocalRuntime(Runtime):
     def __init__(
         self,
         workspace: Path | str = ".",
-        context_path: Path | str | None = None,
     ) -> None:
-        super().__init__(workspace=workspace, context_path=context_path)
+        super().__init__(workspace=workspace)
         self._namespace: dict[str, Any] = {"__builtins__": __builtins__}
         self.register_builtins()
 

@@ -8,6 +8,8 @@ Shows how to override the prompt, add custom tools, and use lifecycle hooks.
 import time
 from pathlib import Path
 
+from rlmkit.llm import LLMClient
+from rlmkit.logging.rich import RichLogger
 from rlmkit.prompts.default import (
     IDENTITY_TEXT,
     RECURSION_TEXT,
@@ -120,7 +122,7 @@ def main():
     try:
         import anthropic
 
-        class Client:
+        class Client(LLMClient):
             def __init__(self):
                 self.client = anthropic.Anthropic()
             def chat(self, messages):
@@ -146,6 +148,7 @@ def main():
         llm_client=Client(),
         runtime=runtime,
         config=RLMConfig(max_depth=3, max_iterations=15),
+        logger=RichLogger(),
         review_focus="bugs, missing error handling, and type safety",
     )
 

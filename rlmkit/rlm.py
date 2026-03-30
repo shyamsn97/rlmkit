@@ -10,15 +10,13 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from itertools import count
-from typing import Any, Protocol
+from typing import Any
 
-from .prompts.default import make_default_builder, TOOLS_TEXT
+from .llm import LLMClient
+from .logging import Logger
+from .prompts.default import TOOLS_TEXT, make_default_builder
 from .runtime import Runtime
 from .utils import find_code_blocks, tool
-
-
-class LLMClient(Protocol):
-    def chat(self, messages: list[dict[str, str]]) -> str: ...
 
 
 class DelegateHandle:
@@ -78,6 +76,7 @@ class RLM:
         llm_client: LLMClient,
         runtime: Runtime,
         config: RLMConfig | None = None,
+        logger: Logger | None = None,
         agent_id: str = "root",
         depth: int = 0,
         pool: AgentPool | None = None,
@@ -86,6 +85,7 @@ class RLM:
         self.llm_client = llm_client
         self.runtime = runtime
         self.config = config or RLMConfig()
+        self.logger = logger or Logger()
         self.agent_id = agent_id
         self.depth = depth
         self.pool = pool or AgentPool()
@@ -109,11 +109,11 @@ class RLM:
         if self.config.system_prompt:
             return self.config.system_prompt
         tools_body = TOOLS_TEXT.format(tool_summary=self._tool_summary())
-        depth_note = (
-            f"You are at recursion depth **{self.depth}** of max **{self.config.max_depth}**."
-        )
+        depth_note = f"You are at recursion depth **{self.depth}** of max **{self.config.max_depth}**."
         if self.depth >= self.config.max_depth - 1:
-            depth_note += " You are near the depth limit — work directly, do not delegate."
+            depth_note += (
+                " You are near the depth limit — work directly, do not delegate."
+            )
         elif self.depth > 0:
             depth_note += " Be more conservative with delegation the deeper you are."
         default_builder = make_default_builder()
@@ -168,6 +168,19 @@ class RLM:
             ),
         }
 
+    # ── LLM interaction (override this) ─────────────────────────────
+
+    def call_llm(self, messages: list[dict[str, str]]) -> str:
+        """Call the LLM client, emitting tokens through the logger."""
+        self.logger.on_llm_start(self.agent_id, 0, len(messages))
+        chunks: list[str] = []
+        for chunk in self.llm_client.stream(messages):
+            chunks.append(chunk)
+            self.logger.on_llm_token(self.agent_id, chunk)
+        text = "".join(chunks)
+        self.logger.on_llm_end(self.agent_id, text)
+        return text
+
     # ── execution (override these) ───────────────────────────────────
 
     def execute_code(self, code: str) -> str:
@@ -182,6 +195,7 @@ class RLM:
     def truncate_after_first_block(self, text: str) -> str:
         """Cut the response after the first ```repl``` block's closing fence."""
         import re
+
         m = re.search(r"```repl\s*\n.*?\n```", text, re.DOTALL)
         if m:
             return text[: m.end()]
@@ -193,6 +207,7 @@ class RLM:
         return {
             "llm_client": self.llm_client,
             "config": replace(self.config),
+            "logger": self.logger,
             "depth": self.depth + 1,
             "pool": self.pool,
             "runtime_factory": self.runtime_factory,
@@ -239,7 +254,9 @@ class RLM:
             return
         current = self.runtime.read_file(self.config.context_path)
         if reset or not current.strip():
-            self.runtime.write_file(self.config.context_path, self.build_initial_context(task))
+            self.runtime.write_file(
+                self.config.context_path, self.build_initial_context(task)
+            )
 
     # ── lifecycle hooks (override these) ─────────────────────────────
 
@@ -268,6 +285,7 @@ Returns:
         cleaned = message.strip()
         self._done = True
         self._final_result = cleaned or "Done."
+        self.logger.on_done(self.agent_id, cleaned)
         return f"Done.{(' ' + cleaned) if cleaned else ''}"
 
     @tool(
@@ -287,8 +305,10 @@ Returns:
         max_iterations: int | None = None,
     ) -> str | DelegateHandle:
         if self.depth >= self.config.max_depth:
+            self.logger.on_delegate_refused(self.agent_id, self.config.max_depth)
             return f"[delegation refused: at max depth {self.config.max_depth}] Do this directly."
         agent_id = f"{self.agent_id}.{next(self._delegate_ids)}"
+        self.logger.on_delegate(self.agent_id, agent_id, task, wait)
         child = self.create_child(agent_id, task, max_iterations=max_iterations)
 
         def _run() -> str:
@@ -344,11 +364,14 @@ Returns:
         invalid_count = 0
         recovered = False
         last_reply = ""
+        iteration = -1
 
         system_msg = {"role": "system", "content": self.build_system_prompt()}
+        self.logger.on_run_start(self.agent_id, task, iters)
 
         for iteration in range(iters):
             self.on_iteration_start(task, iteration)
+            self.logger.on_iter_start(self.agent_id, iteration)
 
             messages = [system_msg]
             for turn in recent_turns:
@@ -358,14 +381,14 @@ Returns:
                 pending = []
             messages.append(self.next_action_message(task, iteration=iteration))
 
-            text = self.llm_client.chat(messages)
-            text = text if isinstance(text, str) else str(text)
+            text = self.call_llm(messages)
             last_reply = text
             assistant_msg = {"role": "assistant", "content": text}
 
             blocks = self.extract_code_blocks(text)
             if not blocks:
                 invalid_count += 1
+                self.logger.on_no_code_block(self.agent_id, iteration)
                 self.last_messages = messages + [assistant_msg]
                 if invalid_count <= 1:
                     pending = [assistant_msg, self.no_code_block_message()]
@@ -379,7 +402,10 @@ Returns:
                 text = self.truncate_after_first_block(text)
                 assistant_msg = {"role": "assistant", "content": text}
             invalid_count = 0
+            self.logger.on_exec_start(self.agent_id, code)
             output = self.execute_code(code)
+            self.logger.on_exec_end(self.agent_id, output)
+
             exec_msg = self.execution_output_message(output)
 
             norm = code.strip()
@@ -390,6 +416,7 @@ Returns:
                 repeat_count = 1
 
             if repeat_count >= 3:
+                self.logger.on_stall(self.agent_id, iteration)
                 self.last_messages = messages + [assistant_msg, exec_msg]
                 if not recovered:
                     recovered = True
@@ -411,5 +438,6 @@ Returns:
                 break
 
         result = self._final_result or last_reply.strip()
+        self.logger.on_run_end(self.agent_id, result, iteration + 1)
         self.on_run_end(task, result)
         return result

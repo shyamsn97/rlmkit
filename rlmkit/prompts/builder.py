@@ -9,12 +9,11 @@ Override points for subclasses:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from pathlib import Path
 import re
 import textwrap
+from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any, Optional
-
 
 SectionBody = Optional[str]
 SectionBodyConstructFn = Callable[[Mapping[str, Any]], Optional[str]]
@@ -79,11 +78,13 @@ class PromptBuilder:
     def __init__(
         self,
         order: str = "",
-        sections: Mapping[str, Section | SectionBody | SectionBodyConstructFn] | None = None,
+        sections: (
+            Mapping[str, Section | SectionBody | SectionBodyConstructFn] | None
+        ) = None,
     ) -> None:
         self._order = textwrap.dedent(order).strip()
-        self._sections: dict[str, Section | SectionBody | SectionBodyConstructFn] = dict(
-            sections or {}
+        self._sections: dict[str, Section | SectionBody | SectionBodyConstructFn] = (
+            dict(sections or {})
         )
 
     @property
@@ -108,11 +109,17 @@ class PromptBuilder:
         level: int = 2,
     ) -> "PromptBuilder":
         self._sections[name] = Section(
-            name, body, body_construct_fn=body_construct_fn, title=title, level=level,
+            name,
+            body,
+            body_construct_fn=body_construct_fn,
+            title=title,
+            level=level,
         )
         return self
 
-    def raw(self, name: str, value: SectionBody | SectionBodyConstructFn) -> "PromptBuilder":
+    def raw(
+        self, name: str, value: SectionBody | SectionBodyConstructFn
+    ) -> "PromptBuilder":
         self._sections[name] = value
         return self
 
@@ -130,7 +137,9 @@ class PromptBuilder:
             resolved = Path(base_dir) / path if base_dir else Path(path)
             return resolved.read_text(encoding=encoding).strip()
 
-        return self.section(name, body_construct_fn=_read_file, title=title, level=level)
+        return self.section(
+            name, body_construct_fn=_read_file, title=title, level=level
+        )
 
     def update(
         self,
@@ -177,6 +186,7 @@ class PromptBuilder:
     def _render_order(self, rendered: Mapping[str, str]) -> str:
         def _replace(match: re.Match[str]) -> str:
             return rendered.get(match.group(1), "").strip()
+
         return re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", _replace, self._order)
 
     @classmethod

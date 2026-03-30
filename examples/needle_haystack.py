@@ -10,6 +10,8 @@ import string
 import tempfile
 from pathlib import Path
 
+from rlmkit.llm import LLMClient
+from rlmkit.logging.rich import RichLogger
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 
@@ -19,7 +21,7 @@ from rlmkit.runtime.local import LocalRuntime
 try:
     from openai import OpenAI
 
-    class OpenAIClient:
+    class OpenAIClient(LLMClient):
         def __init__(self, model: str = "gpt-4o"):
             self.client = OpenAI()
             self.model = model
@@ -36,7 +38,7 @@ except ImportError:
 try:
     import anthropic
 
-    class AnthropicClient:
+    class AnthropicClient(LLMClient):
         def __init__(self, model: str = "claude-sonnet-4-20250514"):
             self.client = anthropic.Anthropic()
             self.model = model
@@ -141,6 +143,7 @@ def main():
             llm_client=llm,
             runtime=runtime,
             config=RLMConfig(max_depth=3, max_iterations=15),
+            logger=RichLogger(),
             runtime_factory=lambda: setup_runtime(workspace),
         )
 

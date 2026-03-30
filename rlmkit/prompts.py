@@ -8,7 +8,6 @@ from .prompts.builder import (
 )
 from .prompts.default import (
     DEFAULT_SECTIONS,
-    DEFAULT_SYSTEM_PROMPT,
     PROMPT_ORDER,
     build_default_prompt,
     make_default_builder,
@@ -16,7 +15,6 @@ from .prompts.default import (
 
 __all__ = [
     "DEFAULT_SECTIONS",
-    "DEFAULT_SYSTEM_PROMPT",
     "PROMPT_ORDER",
     "PromptBuilder",
     "Section",
