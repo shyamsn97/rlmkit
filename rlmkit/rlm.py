@@ -32,7 +32,7 @@ class DelegateHandle:
         return self._future.result(timeout=timeout)
 
 
-class AgentPool:
+class ThreadPool:
     """Shared thread pool for all agents in a recursive tree.
 
     Every RLM in the tree submits to the same pool, so `max_workers`
@@ -79,7 +79,7 @@ class RLM:
         logger: Logger | None = None,
         agent_id: str = "root",
         depth: int = 0,
-        pool: AgentPool | None = None,
+        pool: ThreadPool | None = None,
         runtime_factory: Callable[[], Runtime] | None = None,
     ) -> None:
         self.llm_client = llm_client
@@ -88,7 +88,7 @@ class RLM:
         self.logger = logger or Logger()
         self.agent_id = agent_id
         self.depth = depth
-        self.pool = pool or AgentPool()
+        self.pool = pool or ThreadPool()
         self.runtime_factory = runtime_factory or self._default_runtime_factory
         self._delegate_ids = count(1)
         self._done = False
