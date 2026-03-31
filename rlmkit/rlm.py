@@ -1,102 +1,124 @@
-"""Core RLM agent loop.
-
-Subclass `RLM` and override any of these to customize behavior:
-"""
+"""Core RLM engine — step-based execution with thread suspension."""
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass, replace
 from itertools import count
+from pathlib import PurePosixPath
+from threading import Event, Thread
 from typing import Any
 
 from .llm import LLMClient
-from .logging import Logger
 from .prompts.default import TOOLS_TEXT, make_default_builder
 from .runtime import Runtime
+from .state import (
+    ChildHandle,
+    ChildStep,
+    CodeExec,
+    LLMReply,
+    NoCodeBlock,
+    RLMState,
+    Status,
+)
 from .utils import find_code_blocks, tool
 
-
-class DelegateHandle:
-    def __init__(self, agent_id: str, task: str, future: Future[str]) -> None:
-        self.agent_id = agent_id
-        self.task = task
-        self._future = future
-
-    def done(self) -> bool:
-        return self._future.done()
-
-    def result(self, timeout: float | None = None) -> str:
-        return self._future.result(timeout=timeout)
+# ── exec thread helper ───────────────────────────────────────────────
 
 
-class ThreadPool:
-    """Shared thread pool for all agents in a recursive tree.
+class ExecThread:
+    """Runs code in a background thread with suspend/resume for delegation."""
 
-    Every RLM in the tree submits to the same pool, so `max_workers`
-    is the global concurrency limit across all depths. Tasks queue up
-    when all workers are busy.
-    """
+    def __init__(self):
+        self._phase = Event()
+        self._resume = Event()
+        self.suspended = False
+        self.output = ""
 
-    def __init__(self, max_workers: int = 8) -> None:
-        self.max_workers = max_workers
-        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+    def run(self, fn: Callable[[str], str], code: str) -> tuple[bool, str]:
+        """Execute code via fn. Returns (suspended, output)."""
+        self._phase = Event()
+        self._resume = Event()
+        self.suspended = False
+        self.output = ""
+        Thread(target=self._target, args=(fn, code), daemon=True).start()
+        self._phase.wait()
+        return self.suspended, self.output
 
-    def submit(self, agent_id: str, task: str, fn: Callable[[], str]) -> DelegateHandle:
-        return DelegateHandle(agent_id, task, self._executor.submit(fn))
+    def resume(self) -> str | None:
+        """Resume after children finish. Returns output or None if re-suspended."""
+        self._phase.clear()
+        self._resume.set()
+        self._phase.wait()
+        return None if self.suspended else self.output
 
-    def shutdown(self, wait: bool = True) -> None:
-        self._executor.shutdown(wait=wait)
+    def suspend(self):
+        """Called from the exec thread to yield control back to the stepper."""
+        self.suspended = True
+        self._phase.set()
+        self._resume.wait()
+        self._resume.clear()
+        self.suspended = False
+
+    def _target(self, fn, code):
+        self.output = fn(code)
+        self._phase.set()
+
+
+# ── config ───────────────────────────────────────────────────────────
 
 
 @dataclass
 class RLMConfig:
-    """All tuning knobs for an RLM agent."""
-
     max_depth: int = 5
     max_iterations: int = 30
     max_output_length: int = 12_000
-    replay_last_n_turns: int = 0
+    max_messages: int | None = None
+    max_concurrent_children: int = 8
+    child_max_iterations: int | None = None
     single_block: bool = True
     context_path: str | None = None
     system_prompt: str | None = None
 
 
-class RLM:
-    """Recursive Language Model agent.
+# ── engine ───────────────────────────────────────────────────────────
 
-    Override `build_system_prompt()` to customize the prompt.
-    Override any other method to change behavior.
+
+class RLM:
+    """Recursive Language Model engine.
+
+    Owns mutable resources (LLM client, runtime, threads). All observable
+    state lives in RLMState — frozen, immutable, recursive.
     """
+
+    state_cls: type[RLMState] = RLMState
 
     def __init__(
         self,
         llm_client: LLMClient,
         runtime: Runtime,
         config: RLMConfig | None = None,
-        logger: Logger | None = None,
         agent_id: str = "root",
         depth: int = 0,
-        pool: ThreadPool | None = None,
         runtime_factory: Callable[[], Runtime] | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.runtime = runtime
         self.config = config or RLMConfig()
-        self.logger = logger or Logger()
         self.agent_id = agent_id
         self.depth = depth
-        self.pool = pool or ThreadPool()
-        self.runtime_factory = runtime_factory or self._default_runtime_factory
-        self._delegate_ids = count(1)
-        self._done = False
-        self._final_result = ""
-        self.last_messages: list[dict[str, str]] = []
+        self.runtime_factory = runtime_factory
 
-        if self.config.context_path is not None:
-            self.runtime.inject("CONTEXT_PATH", self.config.context_path)
+        self._delegate_ids = count(1)
+        self._child_engines: dict[str, RLM] = {}
+        self._waiting_on_ids: list[str] = []
+        self._done = False
+        self._result: str | None = None
+        self._thread = ExecThread()
+        self._last_start_state: RLMState | None = None
+
+        self.runtime.inject("CONTEXT_PATH", self.config.context_path)
         self.runtime.inject("AGENT_ID", self.agent_id)
         self.runtime.inject("DEPTH", str(self.depth))
         self.runtime.inject("MAX_DEPTH", str(self.config.max_depth))
@@ -104,340 +126,436 @@ class RLM:
         self.runtime.register_tool(self.delegate, core=True)
         self.runtime.register_tool(self.wait_all, core=True)
 
-    # ── prompt (override this) ───────────────────────────────────────
-    def build_system_prompt(self) -> str:
+    # ── lifecycle ────────────────────────────────────────────────────
+
+    def make_state(self, **fields) -> RLMState:
+        """Build initial state. Override to inject custom fields."""
+        return self.state_cls(**fields)
+
+    def start(self, task: str, *, reset_context: bool = True) -> RLMState:
+        """Reset engine, initialize context, return first state."""
+        self._child_engines.clear()
+        self._waiting_on_ids.clear()
+        self._done = False
+        self._result = None
+        self.initialize_context(task, reset=reset_context)
+        config = asdict(self.config)
+        config.update(depth=self.depth, task=task)
+        state = self.make_state(
+            agent_id=self.agent_id,
+            status=Status.WAITING,
+            config=config,
+            context=self.read_context(),
+        )
+        self._last_start_state = state
+        return state
+
+    def run(self, task: str, *, reset_context: bool = True) -> str:
+        """Run to completion. Returns the result string."""
+        state = self.start(task, reset_context=reset_context)
+        while not state.finished:
+            state = self.step(state)
+        return state.result or ""
+
+    # ── step ─────────────────────────────────────────────────────────
+
+    def step(self, state: RLMState) -> RLMState:
+        """Advance one step. The state machine: WAITING→HAS_REPLY→EXEC→(SUPERVISING→)FINISHED."""
+        match state.status:
+            case Status.WAITING:
+                return self.step_llm(state)
+            case Status.HAS_REPLY:
+                return self.step_exec(state)
+            case Status.SUPERVISING:
+                return self.step_children(state)
+            case _:
+                return state
+
+    def step_llm(self, state: RLMState) -> RLMState:
+        """Call the LLM → HAS_REPLY."""
+        # Bail if we've hit the iteration cap
+        max_iters = state.config.get("max_iterations", self.config.max_iterations)
+        if state.iteration >= max_iters:
+            return state.update(status=Status.FINISHED, result=state.last_reply or "")
+
+        # Build prompt, call LLM, store reply
+        system = self.build_system_prompt(state)
+        messages = self.build_messages(state, system_prompt=system)
+        text = self.call_llm(messages)
+        assistant_message = {"role": "assistant", "content": text}
+
+        return state.update(
+            status=Status.HAS_REPLY,
+            iteration=state.iteration + 1,
+            event=LLMReply(
+                agent_id=state.agent_id,
+                iteration=state.iteration + 1,
+                text=text,
+                code=self.extract_code(text),
+            ),
+            messages=messages + [assistant_message],
+            last_reply=text,
+        )
+
+    def step_exec(self, state: RLMState) -> RLMState:
+        """Execute the code block → WAITING / SUPERVISING / FINISHED."""
+        # Extract the ```repl``` block from the LLM's reply
+        code = self.extract_code(state.last_reply or "")
+        if not code:
+            return state.update(
+                status=Status.WAITING,
+                event=NoCodeBlock(
+                    agent_id=state.agent_id,
+                    iteration=state.iteration,
+                    text=state.last_reply or "",
+                ),
+                messages=state.messages + [self.no_code_block_message()],
+            )
+
+        # Run the code — may suspend if it calls delegate()/wait_all()
+        suspended, output = self._thread.run(self.execute_code, code)
+
+        # Determine next status based on what happened
+        if self._done:
+            new_status = Status.FINISHED
+        elif suspended:
+            new_status = Status.SUPERVISING
+        else:
+            new_status = Status.WAITING
+
+        # If suspended, register any newly created children
+        children = list(state.children)
+        if suspended:
+            existing = {cs.agent_id for cs in children}
+            for cid, engine in self._child_engines.items():
+                if cid not in existing:
+                    children.append(engine._last_start_state)
+
+        # Feed the execution output back into message history
+        exec_message = self.execution_output_message(code, output)
+        new_messages = state.messages + [exec_message]
+
+        return state.update(
+            status=new_status,
+            event=CodeExec(
+                agent_id=state.agent_id,
+                iteration=state.iteration,
+                code=code,
+                output=output,
+                suspended=suspended,
+            ),
+            messages=new_messages,
+            result=self._result if self._done else None,
+            context=self.read_context(),
+            children=children,
+        )
+
+    def execute_child_steps(
+        self, active: list[tuple[RLMState, RLM]]
+    ) -> dict[str, RLMState]:
+        """Step active children and return {agent_id: new_state}.
+
+        Override to swap in a custom executor (e.g. process pool,
+        remote dispatch, rate-limited queue).
+        """
+        cap = self.config.max_concurrent_children
+        results: dict[str, RLMState] = {}
+        with ThreadPoolExecutor(max_workers=min(len(active), cap)) as pool:
+            futures = {pool.submit(e.step, cs): cs.agent_id for cs, e in active}
+            for future in as_completed(futures):
+                aid = futures[future]
+                results[aid] = future.result()
+                self.on_child_stepped(aid, results[aid], len(results), len(active))
+        return results
+
+    def on_child_stepped(
+        self, agent_id: str, state: RLMState, completed: int, total: int
+    ) -> None:
+        """Called after each child completes a step. Override for progress."""
+
+    def step_children(self, state: RLMState) -> RLMState:
+        """Step all active children in parallel → check if wait is satisfied."""
+
+        # Run one step for every child that hasn't finished yet
+        active = [
+            (cs, self._child_engines[cs.agent_id])
+            for cs in state.children
+            if not cs.finished
+        ]
+        stepped = self.execute_child_steps(active) if active else {}
+
+        # Merge stepped children back into the full children list
+        new_children, events = [], []
+        for cs in state.children:
+            if cs.finished:
+                new_children.append(cs)
+            else:
+                new_cs = stepped[cs.agent_id]
+                new_children.append(new_cs)
+                if new_cs.event:
+                    events.append(new_cs.event)
+
+        # Check if all children the parent is waiting on are done
+        all_done = all(
+            cs.agent_id not in self._waiting_on_ids or cs.finished
+            for cs in new_children
+        )
+
+        if all_done:
+            # Resume the parent's exec thread (it was suspended at wait_all)
+            output = self._thread.resume()
+
+            if self._done:
+                new_status = Status.FINISHED
+            elif output is None:
+                new_status = Status.SUPERVISING
+            else:
+                new_status = Status.WAITING
+
+            # If done() wasn't reached, feed the output back so the LLM can retry
+            new_messages = list(state.messages)
+            if output is not None and not self._done:
+                new_messages.append(
+                    {
+                        "role": "user",
+                        "content": f"REPL output:\n{output}",
+                    }
+                )
+
+            return state.update(
+                status=new_status,
+                event=ChildStep(
+                    agent_id=state.agent_id,
+                    iteration=state.iteration,
+                    child_events=events,
+                    all_done=True,
+                    exec_output=output,
+                ),
+                messages=new_messages,
+                result=self._result if self._done else None,
+                children=new_children,
+            )
+
+        # Not all waited-on children are done yet — stay in SUPERVISING
+        return state.update(
+            event=ChildStep(
+                agent_id=state.agent_id,
+                iteration=state.iteration,
+                child_events=events,
+                all_done=False,
+            ),
+            children=new_children,
+        )
+
+    # ── prompt & messages ────────────────────────────────────────────
+
+    def build_system_prompt(self, state: RLMState) -> str:
+        """Build the system prompt. Override to customize."""
         if self.config.system_prompt:
             return self.config.system_prompt
-        tools_body = TOOLS_TEXT.format(tool_summary=self._tool_summary())
-        depth_note = f"You are at recursion depth **{self.depth}** of max **{self.config.max_depth}**."
-        if self.depth >= self.config.max_depth - 1:
+        depth = state.config.get("depth", 0)
+        max_depth = state.config.get("max_depth", self.config.max_depth)
+        tool_lines = "\n".join(
+            f"- `{td.name}{td.signature}`: {td.description}"
+            for td in self.runtime.get_tool_defs()
+        )
+        preimported = self.runtime.available_modules()
+        if preimported:
+            tool_lines += (
+                f"\n\nPre-imported modules (already available, no import needed): "
+                f"`{'`, `'.join(preimported)}`"
+            )
+        depth_note = f"You are at recursion depth **{depth}** of max **{max_depth}**."
+        if depth >= max_depth - 1:
             depth_note += (
                 " You are near the depth limit — work directly, do not delegate."
             )
-        elif self.depth > 0:
+        elif depth > 0:
             depth_note += " Be more conservative with delegation the deeper you are."
-        default_builder = make_default_builder()
-        default_builder.section("tools", tools_body, title="Tools")
-        default_builder.section("status", depth_note, title="Status")
-        return default_builder.build()
+        builder = make_default_builder()
+        builder.section(
+            "tools", TOOLS_TEXT.format(tool_summary=tool_lines), title="Tools"
+        )
+        builder.section("status", depth_note, title="Status")
+        return builder.build()
 
-    def _tool_summary(self) -> str:
-        lines = []
-        for td in self.runtime.get_tool_defs():
-            lines.append(f"- `{td.name}{td.signature}`: {td.description}")
-        return "\n".join(lines)
+    def build_messages(self, state: RLMState, *, system_prompt: str) -> list[dict]:
+        """Assemble the message list for an LLM call. Override to customize."""
+        system = {"role": "system", "content": system_prompt}
+        if not state.messages:
+            task = state.config.get("task", "")
+            return [system, self.next_action_message(task, iteration=0)]
 
-    # ── message formatting (override these) ──────────────────────────
+        msgs = list(state.messages)
+        cap = self.config.max_messages
+        if cap and len(msgs) > cap:
+            msgs = self.truncate_messages(state, msgs, cap)
+        return [system] + msgs
+
+    def truncate_messages(
+        self, state: RLMState, msgs: list[dict], cap: int
+    ) -> list[dict]:
+        """Build a condensed message list when history exceeds max_messages."""
+        task = state.config.get("task", "")
+        context = self.read_context()
+        recent = msgs[-cap:]
+
+        parts = [f"## Task\n{task}"]
+        if context:
+            parts.append(f"## Context (from {self.config.context_path})\n{context}")
+        parts.append(
+            f"## History\n{len(msgs)} messages so far, showing the last {cap}. "
+            "Read your context file for full progress."
+        )
+
+        summary = {"role": "user", "content": "\n\n".join(parts)}
+        return [summary] + recent
 
     def next_action_message(self, task: str, *, iteration: int) -> dict[str, str]:
+        """Format the user message that prompts the LLM to act."""
+        ctx_hint = (
+            "IMPORTANT: `CONTEXT_PATH` is set — start by reading it with "
+            "`read_file(CONTEXT_PATH)` to check prior progress before doing anything else. "
+            "Append important progress to it as you go.\n\n"
+            if self.config.context_path
+            else ""
+        )
         if iteration == 0:
             content = (
                 f"Task: {task}\n\n"
-                "Start by inspecting the available context and tools. "
-                "Reply with exactly one ```repl``` block that takes the next concrete step."
+                f"{ctx_hint}"
+                "Your response MUST contain exactly one ```repl``` code block. "
+                "Put any reasoning as comments inside the block. "
+                "Do NOT reply with only text — every response needs a ```repl``` block."
             )
         else:
             content = (
                 f"Continue working on the task: {task}\n\n"
-                "Reply with exactly one ```repl``` block for the next concrete step. "
-                "If you are done, call `done(...)` inside the REPL block."
+                f"{ctx_hint}"
+                "Your response MUST contain exactly one ```repl``` code block "
+                "with the next concrete action. "
+                "If you are done, call `done(result)` inside the block."
             )
         return {"role": "user", "content": content}
 
-    def execution_output_message(self, output: str) -> dict[str, str]:
+    def execution_output_message(self, code: str, output: str) -> dict[str, str]:
+        """Format the executed code and its output as a user message."""
         return {
             "role": "user",
-            "content": f"REPL output:\n```\n{output}\n```",
+            "content": f"Code executed:\n```python\n{code}\n```\n\nREPL output:\n{output}",
         }
 
     def no_code_block_message(self) -> dict[str, str]:
+        """Nudge the LLM when it forgets to include a ```repl``` block."""
         return {
             "role": "user",
-            "content": (
-                "Your previous reply did not include a ```repl``` block. "
-                "Reply with exactly one ```repl``` block and take a concrete action."
-            ),
+            "content": "ERROR: Your previous reply did not contain a ```repl``` code block. "
+            "You MUST reply with exactly one ```repl``` block every time. "
+            "Write your next action now inside a ```repl``` block.",
         }
 
-    def stall_recovery_message(self) -> dict[str, str]:
-        return {
-            "role": "user",
-            "content": (
-                "You repeated the same REPL action multiple times. "
-                "Do not repeat it again. Choose a different concrete step."
-            ),
-        }
-
-    # ── LLM interaction (override this) ─────────────────────────────
-
-    def call_llm(self, messages: list[dict[str, str]]) -> str:
-        """Call the LLM client, emitting tokens through the logger."""
-        self.logger.on_llm_start(self.agent_id, 0, len(messages))
-        chunks: list[str] = []
-        for chunk in self.llm_client.stream(messages):
-            chunks.append(chunk)
-            self.logger.on_llm_token(self.agent_id, chunk)
-        text = "".join(chunks)
-        self.logger.on_llm_end(self.agent_id, text)
-        return text
-
-    # ── execution (override these) ───────────────────────────────────
+    def call_llm(self, messages: list[dict]) -> str:
+        """Call the LLM. Override for custom streaming/logging."""
+        return "".join(self.llm_client.stream(messages))
 
     def execute_code(self, code: str) -> str:
+        """Run code via the runtime. Override for sandboxing/limits."""
         output = self.runtime.execute(code)
         if len(output) > self.config.max_output_length:
-            output = output[: self.config.max_output_length] + "\n...<truncated>"
+            return output[: self.config.max_output_length] + "\n...<truncated>"
         return output
 
-    def extract_code_blocks(self, text: str) -> list[str]:
-        return find_code_blocks(text)
+    def extract_code(self, text: str) -> str | None:
+        """Pull the first ```repl``` block from LLM output."""
+        blocks = find_code_blocks(text)
+        if not blocks:
+            return None
+        return blocks[0] if self.config.single_block else "\n\n".join(blocks)
 
-    def truncate_after_first_block(self, text: str) -> str:
-        """Cut the response after the first ```repl``` block's closing fence."""
-        import re
-
-        m = re.search(r"```repl\s*\n.*?\n```", text, re.DOTALL)
-        if m:
-            return text[: m.end()]
-        return text
-
-    # ── child agents (override these) ────────────────────────────────
-
-    def child_kwargs(self) -> dict[str, Any]:
-        return {
-            "llm_client": self.llm_client,
-            "config": replace(self.config),
-            "logger": self.logger,
-            "depth": self.depth + 1,
-            "pool": self.pool,
-            "runtime_factory": self.runtime_factory,
-        }
-
-    def create_runtime(self) -> Runtime:
-        return self.runtime_factory()
-
-    def create_child(
-        self,
-        agent_id: str,
-        task: str,
-        *,
-        max_iterations: int | None = None,
-    ) -> "RLM":
-        child_runtime = self.create_runtime()
-        if self.config.context_path:
-            child_runtime.write_file(
-                self.config.context_path,
-                self.runtime.read_file(self.config.context_path),
-            )
-
-        kwargs = self.child_kwargs()
-        if max_iterations is not None:
-            kwargs["config"] = replace(kwargs["config"], max_iterations=max_iterations)
-
-        return self.__class__(
-            runtime=child_runtime,
-            agent_id=agent_id,
-            **kwargs,
-        )
-
-    def _default_runtime_factory(self) -> Runtime:
-        return type(self.runtime)(workspace=self.runtime.workspace)
-
-    # ── context (override these) ─────────────────────────────────────
-
-    def build_initial_context(self, task: str) -> str:
-        return task
-
-    def initialize_context(self, task: str, *, reset: bool) -> None:
-        self.runtime.inject("TASK", task)
-        if self.config.context_path is None:
-            return
-        current = self.runtime.read_file(self.config.context_path)
-        if reset or not current.strip():
-            self.runtime.write_file(
-                self.config.context_path, self.build_initial_context(task)
-            )
-
-    # ── lifecycle hooks (override these) ─────────────────────────────
-
-    def on_run_start(self, task: str) -> None:
-        pass
-
-    def on_run_end(self, task: str, result: str) -> None:
-        pass
-
-    def on_iteration_start(self, task: str, iteration: int) -> None:
-        pass
-
-    def on_iteration_end(self, task: str, iteration: int) -> None:
-        pass
-
-    # ── tools ────────────────────────────────────────────────────────
+    # ── tools (injected into the REPL namespace) ─────────────────────
 
     @tool(
-        """Mark the current agent as finished.
-Args:
-- message (str): Optional final result text.
-Returns:
-- str: Confirmation string."""
+        "Mark the current agent as finished.\nArgs:\n- message (str): Required. An informative result message — the actual data, answer, or summary. Never pass empty string unless you truly found nothing.\nReturns:\n- str: The result."
     )
-    def done(self, message: str = "") -> str:
-        cleaned = message.strip()
+    def done(self, message: str) -> str:
         self._done = True
-        self._final_result = cleaned or "Done."
-        self.logger.on_done(self.agent_id, cleaned)
-        return f"Done.{(' ' + cleaned) if cleaned else ''}"
+        self._result = message.strip()
+        return self._result
 
     @tool(
-        """Delegate a subtask to a child agent.
-Args:
-- task (str): The child task to run.
-- wait (bool): If True, block until completion and return the result.
-- max_iterations (int | None): Optional iteration limit override.
-Returns:
-- DelegateHandle | str: A handle when wait=False, otherwise the child result string."""
+        "Delegate a subtask to a child agent.\nArgs:\n- task (str): The subtask.\n- wait (bool): Block until done.\n- max_iterations (int | None): Iteration cap.\nReturns:\n- ChildHandle | str: Handle (async) or result (sync)."
     )
     def delegate(
-        self,
-        task: str,
-        *,
-        wait: bool = False,
-        max_iterations: int | None = None,
-    ) -> str | DelegateHandle:
+        self, task: str, *, wait: bool = False, max_iterations: int | None = None
+    ) -> str | ChildHandle:
         if self.depth >= self.config.max_depth:
-            self.logger.on_delegate_refused(self.agent_id, self.config.max_depth)
-            return f"[delegation refused: at max depth {self.config.max_depth}] Do this directly."
+            return f"[refused: max depth {self.config.max_depth}] Do this directly."
         agent_id = f"{self.agent_id}.{next(self._delegate_ids)}"
-        self.logger.on_delegate(self.agent_id, agent_id, task, wait)
         child = self.create_child(agent_id, task, max_iterations=max_iterations)
-
-        def _run() -> str:
-            return child.run(task, reset_context=False)
-
-        handle = self.pool.submit(agent_id, task, _run)
+        self._child_engines[agent_id] = child
+        child._last_start_state = child.start(task)
+        handle = ChildHandle(agent_id)
         if wait:
-            return handle.result()
+            self._waiting_on_ids = [agent_id]
+            self._thread.suspend()
+            return child._result or ""
         return handle
 
     @tool(
-        """Wait for delegated child agents.
-Args:
-- handles (list[DelegateHandle]): Handles from delegate(..., wait=False).
-- timeout (float | None): Optional timeout per handle.
-Returns:
-- list[str]: Child results in input order."""
+        "Wait for delegated children.\nArgs:\n- *handles: Handles from delegate().\nReturns:\n- list[str]: Results in order."
     )
-    def wait_all(
-        self,
-        handles: list[DelegateHandle],
-        *,
-        timeout: float | None = None,
-    ) -> list[str]:
-        return [h.result(timeout=timeout) for h in handles]
+    def wait_all(self, *handles: ChildHandle) -> list[str]:
+        self._waiting_on_ids = [h.agent_id for h in handles]
+        self._thread.suspend()
+        return [self._child_engines[h.agent_id]._result or "" for h in handles]
 
-    # ── run loop ─────────────────────────────────────────────────────
+    # ── children & context ───────────────────────────────────────────
 
-    def run(
-        self,
-        task: str,
-        *,
-        max_iterations: int | None = None,
-        reset_context: bool = True,
-        replay_last_n_turns: int | None = None,
-    ) -> str:
-        iters = max_iterations or self.config.max_iterations
-        replay_turns = (
-            self.config.replay_last_n_turns
-            if replay_last_n_turns is None
-            else max(0, replay_last_n_turns)
+    def child_kwargs(self) -> dict[str, Any]:
+        """Kwargs passed to child constructors. Override to customize."""
+        child_iters = self.config.child_max_iterations or max(
+            3, self.config.max_iterations // 3
         )
+        return {
+            "llm_client": self.llm_client,
+            "config": replace(self.config, max_iterations=child_iters),
+            "depth": self.depth + 1,
+            "runtime_factory": self.runtime_factory,
+        }
 
-        self._done = False
-        self._final_result = ""
-        self.initialize_context(task, reset=reset_context)
-        self.on_run_start(task)
+    def create_child(
+        self, agent_id: str, task: str, *, max_iterations: int | None = None
+    ) -> RLM:
+        """Create a child engine. Override for custom child setup."""
+        rt = self.runtime_factory() if self.runtime_factory else self.runtime.clone()
+        kwargs = self.child_kwargs()
+        if max_iterations is not None:
+            kwargs["config"] = replace(kwargs["config"], max_iterations=max_iterations)
+        if self.config.context_path:
+            child_ctx = (
+                f".rlm/{agent_id}/{PurePosixPath(self.config.context_path).name}"
+            )
+            kwargs["config"] = replace(kwargs["config"], context_path=child_ctx)
+        return self.__class__(runtime=rt, agent_id=agent_id, **kwargs)
 
-        recent_turns: deque[list[dict[str, str]]] = deque(maxlen=replay_turns)
-        pending: list[dict[str, str]] = []
-        prev_code = ""
-        repeat_count = 0
-        invalid_count = 0
-        recovered = False
-        last_reply = ""
-        iteration = -1
+    def read_context(self) -> str | None:
+        """Read the context file, if configured."""
+        if not self.config.context_path:
+            return None
+        try:
+            return self.runtime.read_file(self.config.context_path)
+        except FileNotFoundError:
+            return None
 
-        system_msg = {"role": "system", "content": self.build_system_prompt()}
-        self.logger.on_run_start(self.agent_id, task, iters)
-
-        for iteration in range(iters):
-            self.on_iteration_start(task, iteration)
-            self.logger.on_iter_start(self.agent_id, iteration)
-
-            messages = [system_msg]
-            for turn in recent_turns:
-                messages.extend(turn)
-            if pending:
-                messages.extend(pending)
-                pending = []
-            messages.append(self.next_action_message(task, iteration=iteration))
-
-            text = self.call_llm(messages)
-            last_reply = text
-            assistant_msg = {"role": "assistant", "content": text}
-
-            blocks = self.extract_code_blocks(text)
-            if not blocks:
-                invalid_count += 1
-                self.logger.on_no_code_block(self.agent_id, iteration)
-                self.last_messages = messages + [assistant_msg]
-                if invalid_count <= 1:
-                    pending = [assistant_msg, self.no_code_block_message()]
-                    self.on_iteration_end(task, iteration)
-                    continue
-                self.on_iteration_end(task, iteration)
-                break
-
-            code = blocks[0]
-            if self.config.single_block:
-                text = self.truncate_after_first_block(text)
-                assistant_msg = {"role": "assistant", "content": text}
-            invalid_count = 0
-            self.logger.on_exec_start(self.agent_id, code)
-            output = self.execute_code(code)
-            self.logger.on_exec_end(self.agent_id, output)
-
-            exec_msg = self.execution_output_message(output)
-
-            norm = code.strip()
-            if norm == prev_code:
-                repeat_count += 1
-            else:
-                prev_code = norm
-                repeat_count = 1
-
-            if repeat_count >= 3:
-                self.logger.on_stall(self.agent_id, iteration)
-                self.last_messages = messages + [assistant_msg, exec_msg]
-                if not recovered:
-                    recovered = True
-                    prev_code = ""
-                    repeat_count = 0
-                    pending = [assistant_msg, exec_msg, self.stall_recovery_message()]
-                    self.on_iteration_end(task, iteration)
-                    continue
-                self.on_iteration_end(task, iteration)
-                break
-
-            recovered = False
-            if replay_turns > 0:
-                recent_turns.append([assistant_msg, exec_msg])
-            self.last_messages = messages + [assistant_msg, exec_msg]
-
-            self.on_iteration_end(task, iteration)
-            if self._done:
-                break
-
-        result = self._final_result or last_reply.strip()
-        self.logger.on_run_end(self.agent_id, result, iteration + 1)
-        self.on_run_end(task, result)
-        return result
+    def initialize_context(self, task: str, *, reset: bool) -> None:
+        """Set up the context file for a new run."""
+        self.runtime.inject("TASK", task)
+        if not self.config.context_path:
+            return
+        try:
+            current = self.runtime.read_file(self.config.context_path)
+        except FileNotFoundError:
+            current = ""
+        if reset or not current.strip():
+            content = task if self.depth == 0 else ""
+            self.runtime.write_file(self.config.context_path, content)

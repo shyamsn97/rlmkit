@@ -21,7 +21,7 @@ class ToolDef:
     core: bool = False
 
 
-def _tool_name(fn: Callable) -> str:
+def resolve_tool_name(fn: Callable) -> str:
     meta = get_tool_metadata(fn)
     if meta is not None:
         return meta.name
@@ -29,7 +29,7 @@ def _tool_name(fn: Callable) -> str:
     return name[5:] if name.startswith("tool_") else name
 
 
-def _tool_description(fn: Callable, override: str | None) -> str:
+def resolve_tool_description(fn: Callable, override: str | None = None) -> str:
     if override is not None:
         return override
     meta = get_tool_metadata(fn)
@@ -38,7 +38,7 @@ def _tool_description(fn: Callable, override: str | None) -> str:
     return (fn.__doc__ or "").strip().split("\n")[0]
 
 
-def _tool_signature(fn: Callable) -> str:
+def resolve_tool_signature(fn: Callable) -> str:
     try:
         return str(inspect.signature(fn))
     except (TypeError, ValueError):
@@ -68,6 +68,21 @@ class Runtime(ABC):
     @abstractmethod
     def inject(self, name: str, value: Any) -> None:
         """Inject a named value into the runtime namespace."""
+
+    # ── clone ─────────────────────────────────────────────────────────
+
+    def clone(self) -> "Runtime":
+        """Fresh runtime sharing the same workspace and tool registrations.
+
+        Namespace is empty — injected values do NOT carry over.
+        Tools are re-registered so the new instance can discover them.
+        Subclasses should override if they have extra state to copy.
+        """
+        new = type(self)(workspace=self.workspace)
+        for name, (fn, doc, core) in self._tools.items():
+            new._tools[name] = (fn, doc, core)
+            new.inject(name, fn)
+        return new
 
     # ── file I/O (override for sandboxed runtimes) ───────────────────
 
@@ -149,7 +164,7 @@ Args:
 - path (str): File or directory to search (default: workspace root).
 - max_results (int): Stop after this many matches (default: 50).
 Returns:
-- str: Matching lines as "relpath:lineno: line", or "(no matches)"."""
+- str: Matching lines as "relpath:lineno: line", or empty string if none."""
     )
     def grep(self, pattern: str, path: str = ".", *, max_results: int = 50) -> str:
         resolved = self._resolve(path)
@@ -168,7 +183,7 @@ Returns:
                             return "\n".join(matches)
             except (UnicodeDecodeError, PermissionError):
                 continue
-        return "\n".join(matches) if matches else "(no matches)"
+        return "\n".join(matches)
 
     def _resolve(self, path: str) -> Path:
         p = Path(path)
@@ -186,8 +201,8 @@ Returns:
         core: bool = False,
     ) -> None:
         """Register a function as a tool — injects it and makes it discoverable."""
-        name = _tool_name(fn)
-        doc = _tool_description(fn, description)
+        name = resolve_tool_name(fn)
+        doc = resolve_tool_description(fn, description)
         self._tools[name] = (fn, doc, core)
         self.inject(name, fn)
 
@@ -222,6 +237,12 @@ Returns:
 
     def get_tool_defs(self) -> list[ToolDef]:
         return [
-            ToolDef(name=n, signature=_tool_signature(fn), description=doc, core=c)
+            ToolDef(
+                name=n, signature=resolve_tool_signature(fn), description=doc, core=c
+            )
             for n, (fn, doc, c) in self._tools.items()
         ]
+
+    def available_modules(self) -> list[str]:
+        """Modules already imported into the execution namespace."""
+        return []

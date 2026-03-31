@@ -56,4 +56,7 @@ mlruns/*
 */**/gradio_cached_examples/*
 **/docs/internal/*
 
+# Example trace logs
+examples/*_log.md
+
 .DS_Store
