@@ -143,7 +143,17 @@ RLMConfig(
 
 ### `RLM`
 
-The agent engine. Subclass and override any method:
+The agent engine. Public attributes:
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `children` | `dict[str, RLM]` | Child engines, keyed by agent ID |
+| `result` | `str \| None` | What `done()` was called with |
+| `is_done` | `bool` | Whether `done()` has been called |
+| `waiting_on` | `list[str]` | Agent IDs this engine is waiting on |
+| `last_state` | `RLMState \| None` | The initial state from `start()` |
+
+Subclass and override any method:
 
 | Method | What it does |
 |--------|-------------|
@@ -213,6 +223,74 @@ builder.update({"identity": "You are a code reviewer. Be thorough."})
 ```
 
 Or bypass it entirely with `RLMConfig(system_prompt="...")`.
+
+## Subclassing
+
+The main extension point. Override methods to customize behavior, set `state_cls` for custom state.
+
+### Custom state + custom prompt
+
+```python
+from rlmkit.rlm import RLM, RLMConfig
+from rlmkit.state import RLMState, CodeExec
+
+class ReviewState(RLMState):
+    findings: list[str] = []
+
+class CodeReviewer(RLM):
+    state_cls = ReviewState
+
+    def make_state(self, **fields) -> ReviewState:
+        return ReviewState(**fields, findings=[])
+
+    def build_system_prompt(self, state: RLMState) -> str:
+        return "You are a code reviewer. Focus on bugs and type safety. ..."
+
+    def step_exec(self, state: ReviewState) -> ReviewState:
+        new_state = super().step_exec(state)
+        if isinstance(new_state.event, CodeExec) and "issue" in new_state.event.output.lower():
+            return new_state.update(findings=state.findings + [new_state.event.output])
+        return new_state
+```
+
+### Custom child execution (e.g. process pool)
+
+```python
+class RemoteRLM(RLM):
+    def execute_child_steps(self, active):
+        """Send child steps to a remote worker pool instead of local threads."""
+        return dispatch_to_cluster(active)
+
+    def create_child(self, agent_id, task, *, max_iterations=None):
+        """Give children a sandboxed runtime."""
+        child = super().create_child(agent_id, task, max_iterations=max_iterations)
+        child.runtime = SandboxedRuntime(...)
+        return child
+```
+
+### Navigating the engine tree
+
+After running, the engine tree is fully inspectable:
+
+```python
+agent = RLM(llm_client=llm, runtime=runtime, config=config)
+state = agent.start("Find the magic number in haystack.txt")
+
+while not state.finished:
+    state = agent.step(state)
+
+# Engine tree (mutable — who did what)
+for cid, child in agent.children.items():
+    print(f"{cid}: result={child.result}, is_done={child.is_done}")
+    for gcid, grandchild in child.children.items():
+        print(f"  {gcid}: result={grandchild.result}")
+
+# State tree (immutable — full computation history)
+for cs in state.children:
+    print(f"{cs.agent_id}: {cs.result}, {len(cs.messages)} messages")
+```
+
+The engine tree and state tree are parallel structures. The engine holds mutable resources (LLM client, runtime, threads). The state holds the immutable computation record (messages, events, results). Both are recursive.
 
 ## Examples
 

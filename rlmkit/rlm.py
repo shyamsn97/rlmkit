@@ -111,12 +111,12 @@ class RLM:
         self.runtime_factory = runtime_factory
 
         self._delegate_ids = count(1)
-        self._child_engines: dict[str, RLM] = {}
-        self._waiting_on_ids: list[str] = []
-        self._done = False
-        self._result: str | None = None
+        self.children: dict[str, RLM] = {}
+        self.waiting_on: list[str] = []
+        self.is_done = False
+        self.result: str | None = None
         self._thread = ExecThread()
-        self._last_start_state: RLMState | None = None
+        self.last_state: RLMState | None = None
 
         self.runtime.inject("CONTEXT_PATH", self.config.context_path)
         self.runtime.inject("AGENT_ID", self.agent_id)
@@ -134,10 +134,10 @@ class RLM:
 
     def start(self, task: str, *, reset_context: bool = True) -> RLMState:
         """Reset engine, initialize context, return first state."""
-        self._child_engines.clear()
-        self._waiting_on_ids.clear()
-        self._done = False
-        self._result = None
+        self.children.clear()
+        self.waiting_on.clear()
+        self.is_done = False
+        self.result = None
         self.initialize_context(task, reset=reset_context)
         config = asdict(self.config)
         config.update(depth=self.depth, task=task)
@@ -147,7 +147,7 @@ class RLM:
             config=config,
             context=self.read_context(),
         )
-        self._last_start_state = state
+        self.last_state = state
         return state
 
     def run(self, task: str, *, reset_context: bool = True) -> str:
@@ -216,7 +216,7 @@ class RLM:
         suspended, output = self._thread.run(self.execute_code, code)
 
         # Determine next status based on what happened
-        if self._done:
+        if self.is_done:
             new_status = Status.FINISHED
         elif suspended:
             new_status = Status.SUPERVISING
@@ -227,9 +227,9 @@ class RLM:
         children = list(state.children)
         if suspended:
             existing = {cs.agent_id for cs in children}
-            for cid, engine in self._child_engines.items():
+            for cid, engine in self.children.items():
                 if cid not in existing:
-                    children.append(engine._last_start_state)
+                    children.append(engine.last_state)
 
         # Feed the execution output back into message history
         exec_message = self.execution_output_message(code, output)
@@ -245,7 +245,7 @@ class RLM:
                 suspended=suspended,
             ),
             messages=new_messages,
-            result=self._result if self._done else None,
+            result=self.result if self.is_done else None,
             context=self.read_context(),
             children=children,
         )
@@ -278,7 +278,7 @@ class RLM:
 
         # Run one step for every child that hasn't finished yet
         active = [
-            (cs, self._child_engines[cs.agent_id])
+            (cs, self.children[cs.agent_id])
             for cs in state.children
             if not cs.finished
         ]
@@ -297,7 +297,7 @@ class RLM:
 
         # Check if all children the parent is waiting on are done
         all_done = all(
-            cs.agent_id not in self._waiting_on_ids or cs.finished
+            cs.agent_id not in self.waiting_on or cs.finished
             for cs in new_children
         )
 
@@ -305,7 +305,7 @@ class RLM:
             # Resume the parent's exec thread (it was suspended at wait_all)
             output = self._thread.resume()
 
-            if self._done:
+            if self.is_done:
                 new_status = Status.FINISHED
             elif output is None:
                 new_status = Status.SUPERVISING
@@ -314,7 +314,7 @@ class RLM:
 
             # If done() wasn't reached, feed the output back so the LLM can retry
             new_messages = list(state.messages)
-            if output is not None and not self._done:
+            if output is not None and not self.is_done:
                 new_messages.append(
                     {
                         "role": "user",
@@ -332,7 +332,7 @@ class RLM:
                     exec_output=output,
                 ),
                 messages=new_messages,
-                result=self._result if self._done else None,
+                result=self.result if self.is_done else None,
                 children=new_children,
             )
 
@@ -478,9 +478,9 @@ class RLM:
         "Mark the current agent as finished.\nArgs:\n- message (str): Required. An informative result message — the actual data, answer, or summary. Never pass empty string unless you truly found nothing.\nReturns:\n- str: The result."
     )
     def done(self, message: str) -> str:
-        self._done = True
-        self._result = message.strip()
-        return self._result
+        self.is_done = True
+        self.result = message.strip()
+        return self.result
 
     @tool(
         "Delegate a subtask to a child agent.\nArgs:\n- task (str): The subtask.\n- wait (bool): Block until done.\n- max_iterations (int | None): Iteration cap.\nReturns:\n- ChildHandle | str: Handle (async) or result (sync)."
@@ -492,22 +492,22 @@ class RLM:
             return f"[refused: max depth {self.config.max_depth}] Do this directly."
         agent_id = f"{self.agent_id}.{next(self._delegate_ids)}"
         child = self.create_child(agent_id, task, max_iterations=max_iterations)
-        self._child_engines[agent_id] = child
-        child._last_start_state = child.start(task)
+        self.children[agent_id] = child
+        child.last_state = child.start(task)
         handle = ChildHandle(agent_id)
         if wait:
-            self._waiting_on_ids = [agent_id]
+            self.waiting_on = [agent_id]
             self._thread.suspend()
-            return child._result or ""
+            return child.result or ""
         return handle
 
     @tool(
         "Wait for delegated children.\nArgs:\n- *handles: Handles from delegate().\nReturns:\n- list[str]: Results in order."
     )
     def wait_all(self, *handles: ChildHandle) -> list[str]:
-        self._waiting_on_ids = [h.agent_id for h in handles]
+        self.waiting_on = [h.agent_id for h in handles]
         self._thread.suspend()
-        return [self._child_engines[h.agent_id]._result or "" for h in handles]
+        return [self.children[h.agent_id].result or "" for h in handles]
 
     # ── children & context ───────────────────────────────────────────
 
