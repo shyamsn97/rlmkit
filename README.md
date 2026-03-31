@@ -292,6 +292,32 @@ for cs in state.children:
 
 The engine tree and state tree are parallel structures. The engine holds mutable resources (LLM client, runtime, threads). The state holds the immutable computation record (messages, events, results). Both are recursive.
 
+### Mid-run intervention
+
+Because you own the step loop, you can inspect children between steps and terminate them manually — override their result, skip bad branches, or inject corrections. This is hard to do in frameworks where the agent loop is a black box.
+
+```python
+from rlmkit.state import Status
+
+state = agent.start("Analyze all log files")
+while not state.finished:
+    state = agent.step(state)
+
+    # Check if a child is going off the rails
+    for cs in state.children:
+        if not cs.finished and "hallucinated" in (cs.last_reply or ""):
+            # Kill it and inject a custom result
+            agent.children[cs.agent_id].is_done = True
+            agent.children[cs.agent_id].result = "Skipped: bad output detected"
+            state = state.update(children=[
+                c.update(status=Status.FINISHED, result="Skipped: bad output detected")
+                if c.agent_id == cs.agent_id else c
+                for c in state.children
+            ])
+```
+
+Works at any depth — you can reach into `agent.children["root.1"].children["root.1.3"]` and terminate a grandchild the same way. The next `step()` call will see it as finished and move on.
+
 ## Examples
 
 All examples save a full step-by-step trace to `examples/*_log.md`.
