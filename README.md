@@ -1,231 +1,324 @@
 # rlmkit
 
-A minimal, pluggable framework for building **recursive LLM agents** in Python.
+A **step-based state machine** for building [Recursive Language Model](https://github.com/alexzhang13/rlm-minimal) agents in ~1,400 lines of Python.
 
-One agent loop. A Python REPL. The ability to delegate work to sub-agents that get their own fresh context window. That's it.
+An RLM is an LLM with a REPL environment — it thinks in code, executes it, observes the output, and repeats. When a problem is too big for one context window, it spawns sub-agents (which are themselves RLMs) to handle pieces in parallel. Each sub-agent gets a fresh context window and the same tools — like forking a process, but for language models.
+
+`rlmkit` makes this loop explicit. Every agent is a pure state machine: `state = agent.step(state)`. You drive the loop, you see every transition, you control the flow. The full computation — root agent, children, grandchildren — is a single immutable state tree.
 
 ```
 pip install rlmkit
 ```
 
-## Why
+## The Idea
 
-Large tasks don't fit in one context window. `rlmkit` gives your agent a simple recursive pattern: **size up → search → delegate → combine**. Each sub-agent gets a fresh context budget, the same tools, and returns a compact result. No orchestration framework, no DAGs, no YAML — just Python.
+An RLM is analogous to a process in an operating system:
+
+| Concept | OS Process | RLM Agent |
+|---------|-----------|-----------|
+| Execution | CPU runs instructions | LLM generates code, REPL executes it |
+| Memory | Address space | Context window (finite, non-renewable) |
+| Forking | `fork()` → child process | `delegate()` → child agent with fresh context |
+| IPC | pipes, shared memory | `wait_all()` returns child results |
+| Scheduling | OS scheduler | `step_children()` runs children in parallel |
+| State | PCB (process control block) | `RLMState` (immutable, serializable) |
+
+Just as an OS doesn't run one giant process — it decomposes work into many processes — an RLM decomposes work into many agents. The reason is the same: **bounded resources**. A single context window can't hold a million lines of text, just like a single process can't hold infinite memory. You fork, distribute, and combine.
 
 ## Quick Start
 
 ```python
 from rlmkit.llm import LLMClient
-from rlmkit.logging.rich import RichLogger
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 
-
 class MyLLM(LLMClient):
     def chat(self, messages):
-        # plug in any provider — OpenAI, Anthropic, local, etc.
-        ...
+        ...  # plug in any provider
 
 runtime = LocalRuntime(workspace=".")
 agent = RLM(
     llm_client=MyLLM(),
     runtime=runtime,
-    config=RLMConfig(max_depth=3, max_iterations=15),
-    logger=RichLogger(),
+    config=RLMConfig(max_depth=3, max_iterations=15, context_path="context.md"),
 )
+
+# You drive the loop. Every step is visible.
+state = agent.start("Find and fix all type errors in src/")
+while not state.finished:
+    state = agent.step(state)
+    print(state.event)
+
+print(state.result)
+```
+
+Or run to completion:
+
+```python
 result = agent.run("Find and fix all type errors in src/")
 ```
 
-## How It Works
+## The State Machine
+
+Each `step(state) → state` is a single atomic transition. The agent cycles through four statuses:
 
 ```
-┌─────────────────────────────────────┐
-│  RLM agent loop                     │
-│                                     │
-│  1. Build system prompt (tools,     │
-│     depth, context)                 │
-│  2. Send messages to LLM            │
-│  3. Extract ```repl``` code block   │
-│  4. Execute in persistent namespace │
-│  5. Repeat until done() is called   │
-│                                     │
-│  Tools available in the REPL:       │
-│  - done(message)                    │
-│  - delegate(task, wait=True/False)  │
-│  - wait_all(handles)                │
-│  - read_file, write_file, grep, ... │
-└─────────────────────────────────────┘
+                    ┌─────────────────────────────────────────┐
+                    │                                         │
+                    ▼                                         │
+                WAITING ──── step_llm() ────→ HAS_REPLY      │
+                  ▲  ▲                           │            │
+                  │  │                     step_exec()        │
+                  │  │                      ╱        ╲        │
+                  │  └── no children ──────╴          ╲       │
+                  │                                    ▼      │
+                  │  done() ───────────────────→ FINISHED     │
+                  │                                           │
+                  │                              SUPERVISING ─┘
+                  │                                  │
+                  │                          step_children()
+                  │                          (all children
+                  └── children done ──────── stepped in parallel)
 ```
 
-When an agent calls `delegate()`, a child agent is created with:
-- A **fresh context window** (new message history)
-- The **same tools** and configuration
-- Its own **runtime** (via `runtime_factory`)
-- An incremented **depth** counter
+**States:**
+- `WAITING` — ready for an LLM call (like a process waiting for CPU)
+- `HAS_REPLY` — LLM responded, code block ready to execute
+- `SUPERVISING` — exec suspended mid-block, waiting on child agents (like a parent waiting on `waitpid`)
+- `FINISHED` — `done()` was called, result available
 
-All children share an `AgentPool` (thread pool), so `max_workers` is the global concurrency limit across all depths.
+**Key mechanism:** when REPL code calls `delegate()` + `wait_all()`, the exec thread **suspends mid-block**. The stepper takes over, advancing all children in parallel via `step_children()`. Once children finish, exec resumes exactly where it left off — same stack, same locals, same line.
+
+## `RLMState`
+
+The state is a frozen, immutable, recursive Pydantic model. It captures the entire computation:
+
+```python
+state.agent_id    # "root", "root.1", "root.1.2", ...
+state.status      # WAITING | HAS_REPLY | SUPERVISING | FINISHED
+state.iteration   # current iteration count
+state.event       # last StepEvent — what just happened
+state.messages    # full LLM message history
+state.result      # final result string (when finished)
+state.children    # list[RLMState] — the full recursive tree
+state.config      # dict of config + runtime info
+state.context     # context file contents (if configured)
+state.finished    # shorthand for status == FINISHED
+
+new_state = state.update(iteration=5)  # immutable update
+```
+
+The state tree is recursive. `state.children[0].children[1]` gives you the grandchild's full state — its messages, events, result, everything. Serialize the root state and you've captured the entire multi-agent computation tree.
+
+## StepEvents
+
+Every `step()` attaches a typed event to the returned state:
+
+| Event | Key Fields | Emitted When |
+|-------|-----------|------|
+| `LLMReply` | `text`, `code` | LLM responded |
+| `CodeExec` | `code`, `output`, `suspended` | REPL block executed |
+| `ChildStep` | `child_events[]`, `all_done`, `exec_output` | Children were stepped |
+| `NoCodeBlock` | `text` | LLM forgot the ```repl``` block |
+
+`ChildStep.child_events` is recursive — if a child was itself supervising grandchildren, you get the full event tree. `exec_output` contains the resumed execution output after children complete.
 
 ## Core API
 
 ### `RLMConfig`
 
-All the tuning knobs, grouped in a dataclass:
-
 ```python
 RLMConfig(
-    max_depth=5,           # recursion limit
-    max_iterations=30,     # loops per agent
-    max_output_length=12_000,
-    replay_last_n_turns=0, # sliding context window
-    single_block=True,     # only execute first ```repl``` block
-    context_path=None,     # durable scratchpad file
-    system_prompt=None,    # raw override (skips default builder)
+    max_depth=5,               # recursion limit
+    max_iterations=30,         # loops per agent
+    max_output_length=12_000,  # truncate REPL output
+    max_messages=None,         # keep last N messages (None = all)
+    max_concurrent_children=8, # parallel child execution cap
+    child_max_iterations=None, # override for child iteration limit
+    single_block=True,         # only execute first ```repl``` block
+    context_path=None,         # durable scratchpad file
+    system_prompt=None,        # raw override (skips default builder)
 )
 ```
 
 ### `RLM`
 
-The agent. Subclass and override anything:
+The agent engine. Public attributes:
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `children` | `dict[str, RLM]` | Child engines, keyed by agent ID |
+| `result` | `str \| None` | What `done()` was called with |
+| `is_done` | `bool` | Whether `done()` has been called |
+| `waiting_on` | `list[str]` | Agent IDs this engine is waiting on |
+| `last_state` | `RLMState \| None` | The initial state from `start()` |
+
+Subclass and override any method:
 
 | Method | What it does |
 |--------|-------------|
-| `build_system_prompt()` | Return the system prompt string |
-| `call_llm(messages)` | Call the LLM (handles streaming via logger) |
-| `execute_code(code)` | Run a REPL block |
-| `child_kwargs()` | Control what children inherit |
+| `step(state)` | Dispatch to step_llm / step_exec / step_children |
+| `step_llm(state)` | Call the LLM → HAS_REPLY |
+| `step_exec(state)` | Execute code block → WAITING / SUPERVISING / FINISHED |
+| `step_children(state)` | Step all active children in parallel |
+| `execute_child_steps(active)` | Run child steps (override for custom executor) |
+| `build_system_prompt(state)` | Return the system prompt string |
+| `build_messages(state)` | Assemble the LLM message list |
+| `make_state(**fields)` | Construct initial state (override for custom state classes) |
 | `create_child(agent_id, task)` | Full control over child construction |
-| `on_run_start/end()` | Lifecycle hooks |
-| `on_iteration_start/end()` | Per-iteration hooks |
+| `on_child_stepped(aid, state, n, total)` | Callback after each child completes a step |
 
 ### `LLMClient`
 
-Abstract base class — implement `chat()`, optionally `stream()`:
+Implement `chat()`. Optionally override `stream()`:
 
 ```python
 class LLMClient(ABC):
-    @abstractmethod
     def chat(self, messages: list[dict[str, str]]) -> str: ...
-
     def stream(self, messages) -> Iterator[str]:
-        yield self.chat(messages)  # default fallback
+        yield self.chat(messages)
 ```
 
 ### `Runtime`
 
-Execution environment. Only two abstract methods:
+The execution environment — analogous to a process's address space:
 
 ```python
 class Runtime(ABC):
-    @abstractmethod
     def execute(self, code: str, timeout=None) -> str: ...
-
-    @abstractmethod
     def inject(self, name: str, value: Any) -> None: ...
+    def clone(self) -> Runtime: ...  # fresh namespace, same tools
 ```
 
-`LocalRuntime` runs code via `exec()` in a persistent namespace. File I/O tools (`read_file`, `write_file`, `grep`, `ls`, `edit_file`, `append_file`) are registered as builtins by default.
+`LocalRuntime` runs code via `exec()` with a persistent namespace. Builtin tools: `read_file`, `write_file`, `edit_file`, `append_file`, `ls`, `grep`. Common modules (`re`, `os`, `json`, `math`, etc.) are pre-imported.
+
+Child agents get a **cloned runtime** — same workspace and tools, isolated namespace. Like `fork()` — shared filesystem, separate memory.
 
 ### Custom Tools
 
-Register tools dynamically with the `@runtime.tool` decorator:
-
 ```python
-runtime = LocalRuntime(workspace="./data")
-
 @runtime.tool("Search for a regex pattern across files.")
 def search(pattern: str, path: str = ".") -> str:
     ...
-```
 
-Or use the `@tool` decorator and register manually:
-
-```python
+# or register manually
 from rlmkit.utils import tool
 
 @tool("Get the current timestamp.")
 def now() -> str:
-    from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
 
 runtime.register_tool(now)
 ```
 
-### Logger
+### `PromptBuilder`
 
-Override any hook for custom output. Three built-in options:
-
-```python
-from rlmkit.logging import Logger, PrintLogger
-from rlmkit.logging.rich import RichLogger
-
-Logger()       # silent (no-op) — the default
-PrintLogger()  # plain stdout streaming
-RichLogger()   # syntax-highlighted panels, colored output (requires `rich`)
-```
-
-Subclass `Logger` for your own:
+The default system prompt is assembled from named sections (`identity`, `recursion`, `examples`, `tools`, `guardrails`, `status`). Override or extend any section:
 
 ```python
-class MyLogger(Logger):
-    def on_llm_token(self, agent_id, token):
-        # stream to a WebSocket, file, TUI, etc.
-        ...
+from rlmkit.prompts.default import make_default_builder
 
-    def on_exec_end(self, agent_id, output):
-        ...
+builder = make_default_builder()
+builder.update({"identity": "You are a code reviewer. Be thorough."})
 ```
 
-Available hooks: `on_run_start`, `on_run_end`, `on_iter_start`, `on_llm_start`, `on_llm_token`, `on_llm_end`, `on_exec_start`, `on_exec_end`, `on_no_code_block`, `on_stall`, `on_done`, `on_delegate`, `on_delegate_refused`.
+Or bypass it entirely with `RLMConfig(system_prompt="...")`.
 
-### Prompt Builder
+## Subclassing
 
-Compose markdown prompts from ordered sections:
+The main extension point. Override methods to customize behavior, set `state_cls` for custom state.
+
+### Custom state + custom prompt
 
 ```python
-from rlmkit.prompts import PromptBuilder, Section
+from rlmkit.rlm import RLM, RLMConfig
+from rlmkit.state import RLMState, CodeExec
 
-builder = PromptBuilder(
-    order="{role}\n\n{instructions}\n\n{tools}",
-    sections={
-        "role": Section("role", "You are a helpful agent.", title="Role"),
-        "instructions": "Be concise.",
-    },
-)
-builder.section("tools", lambda ctx: ctx["tool_list"], title="Tools")
-prompt = builder.build(context={"tool_list": "- read_file\n- grep"})
+class ReviewState(RLMState):
+    findings: list[str] = []
+
+class CodeReviewer(RLM):
+    state_cls = ReviewState
+
+    def make_state(self, **fields) -> ReviewState:
+        return ReviewState(**fields, findings=[])
+
+    def build_system_prompt(self, state: RLMState) -> str:
+        return "You are a code reviewer. Focus on bugs and type safety. ..."
+
+    def step_exec(self, state: ReviewState) -> ReviewState:
+        new_state = super().step_exec(state)
+        if isinstance(new_state.event, CodeExec) and "issue" in new_state.event.output.lower():
+            return new_state.update(findings=state.findings + [new_state.event.output])
+        return new_state
 ```
+
+### Custom child execution (e.g. process pool)
+
+```python
+class RemoteRLM(RLM):
+    def execute_child_steps(self, active):
+        """Send child steps to a remote worker pool instead of local threads."""
+        return dispatch_to_cluster(active)
+
+    def create_child(self, agent_id, task, *, max_iterations=None):
+        """Give children a sandboxed runtime."""
+        child = super().create_child(agent_id, task, max_iterations=max_iterations)
+        child.runtime = SandboxedRuntime(...)
+        return child
+```
+
+### Navigating the engine tree
+
+After running, the engine tree is fully inspectable:
+
+```python
+agent = RLM(llm_client=llm, runtime=runtime, config=config)
+state = agent.start("Find the magic number in haystack.txt")
+
+while not state.finished:
+    state = agent.step(state)
+
+# Engine tree (mutable — who did what)
+for cid, child in agent.children.items():
+    print(f"{cid}: result={child.result}, is_done={child.is_done}")
+    for gcid, grandchild in child.children.items():
+        print(f"  {gcid}: result={grandchild.result}")
+
+# State tree (immutable — full computation history)
+for cs in state.children:
+    print(f"{cs.agent_id}: {cs.result}, {len(cs.messages)} messages")
+```
+
+The engine tree and state tree are parallel structures. The engine holds mutable resources (LLM client, runtime, threads). The state holds the immutable computation record (messages, events, results). Both are recursive.
 
 ## Examples
 
-### `examples/basic.py` — Single-file needle in a haystack
+All examples save a full step-by-step trace to `examples/*_log.md`.
 
-Generates a 1M-line file with a hidden magic number. The agent chunks the file and delegates search to sub-agents in parallel. Demonstrates dynamically registered tools on a bare runtime.
-
-### `examples/needle_haystack.py` — Multi-file needle search
-
-Generates 500 files with a needle in one. Uses `@runtime.tool` for custom `grep`, `list_files`, `count_files`, and `read_file`. Passes a `runtime_factory` so each child agent gets a fresh runtime with the same tools.
-
-### `examples/custom_agent.py` — Subclassing RLM
-
-A `CodeReviewer` agent that overrides `build_system_prompt()`, registers custom tools (`file_stats`, `now`), uses lifecycle hooks for timing, and caps child iterations in `create_child()`.
+| Example | What it shows |
+|---------|--------------|
+| `basic.py` | 1M-line needle search with parallel sub-agent delegation |
+| `needle_haystack.py` | 500-file search with `runtime_factory` for child isolation |
+| `custom_agent.py` | Subclassed `RLM` + `RLMState` for a code reviewer with custom state |
 
 ## Project Structure
 
 ```
 rlmkit/
-├── llm.py                  # LLMClient ABC
-├── rlm.py                  # RLM, RLMConfig, AgentPool, DelegateHandle
-├── utils.py                # @tool decorator, code block parsing
-├── logging/
-│   ├── base.py             # Logger (no-op), PrintLogger
-│   └── rich.py             # RichLogger
+├── rlm.py          # RLM engine, RLMConfig, ExecThread
+├── state.py         # RLMState, Status, StepEvent hierarchy, ChildHandle
+├── llm.py           # LLMClient ABC
+├── utils.py         # @tool decorator, code block parsing
 ├── runtime/
-│   ├── runtime.py          # Runtime ABC, ToolDef, file I/O builtins
-│   └── local.py            # LocalRuntime (exec-based)
+│   ├── runtime.py   # Runtime ABC, ToolDef, builtins
+│   └── local.py     # LocalRuntime (exec-based)
 └── prompts/
-    ├── builder.py          # PromptBuilder, Section
-    └── default.py          # Default prompt text + sections
+    ├── builder.py   # PromptBuilder, Section
+    └── default.py   # Default prompt sections
 ```
+
+~1,400 lines of core code.
 
 ## License
 

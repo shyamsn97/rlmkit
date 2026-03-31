@@ -12,7 +12,6 @@ from __future__ import annotations
 import re
 import textwrap
 from collections.abc import Callable, Mapping
-from pathlib import Path
 from typing import Any, Optional
 
 SectionBody = Optional[str]
@@ -117,43 +116,12 @@ class PromptBuilder:
         )
         return self
 
-    def raw(
-        self, name: str, value: SectionBody | SectionBodyConstructFn
-    ) -> "PromptBuilder":
-        self._sections[name] = value
-        return self
-
-    def file(
-        self,
-        name: str,
-        path: str | Path,
-        *,
-        title: Optional[str] = None,
-        level: int = 2,
-        encoding: str = "utf-8",
-    ) -> "PromptBuilder":
-        def _read_file(context: Mapping[str, Any]) -> str:
-            base_dir = context.get("base_dir")
-            resolved = Path(base_dir) / path if base_dir else Path(path)
-            return resolved.read_text(encoding=encoding).strip()
-
-        return self.section(
-            name, body_construct_fn=_read_file, title=title, level=level
-        )
-
     def update(
         self,
         sections: Mapping[str, Section | SectionBody | SectionBodyConstructFn],
     ) -> "PromptBuilder":
         self._sections.update(sections)
         return self
-
-    def remove(self, name: str) -> "PromptBuilder":
-        self._sections.pop(name, None)
-        return self
-
-    def clone(self) -> "PromptBuilder":
-        return self.__class__(order=self._order, sections=dict(self._sections))
 
     def build(self, context: Mapping[str, Any] | None = None) -> str:
         ctx = context or {}
@@ -188,11 +156,6 @@ class PromptBuilder:
             return rendered.get(match.group(1), "").strip()
 
         return re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", _replace, self._order)
-
-    @classmethod
-    def from_sections(cls, *names: str) -> "PromptBuilder":
-        order = "\n\n".join(f"{{{name}}}" for name in names)
-        return cls(order=order)
 
 
 __all__ = [

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import io
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 
 from .runtime import Runtime
+
+_builtin_print = print
 
 
 class LocalRuntime(Runtime):
@@ -22,21 +23,24 @@ class LocalRuntime(Runtime):
     ) -> None:
         super().__init__(workspace=workspace)
         self._namespace: dict[str, Any] = {"__builtins__": __builtins__}
+        for mod in self.available_modules():
+            self._namespace[mod] = __import__(mod)
         self.register_builtins()
 
     def execute(self, code: str, timeout: float | None = None) -> str:
-        stdout_buf = io.StringIO()
-        stderr_buf = io.StringIO()
+        buf = io.StringIO()
+        self._namespace["print"] = lambda *a, **kw: _builtin_print(
+            *a, **{**kw, "file": buf}
+        )
         try:
-            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-                exec(code, self._namespace)
+            exec(code, self._namespace)
         except Exception as exc:
-            stderr_buf.write(f"{type(exc).__name__}: {exc}\n")
-
-        out = stdout_buf.getvalue()
-        err = stderr_buf.getvalue()
-        parts = [p for p in (out, err) if p.strip()]
-        return "\n".join(parts) if parts else "(no output)"
+            buf.write(f"\n{type(exc).__name__}: {exc}")
+        out = buf.getvalue().strip()
+        return out
 
     def inject(self, name: str, value: Any) -> None:
         self._namespace[name] = value
+
+    def available_modules(self) -> list[str]:
+        return ["re", "os", "json", "math", "collections", "itertools", "functools"]
