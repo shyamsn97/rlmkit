@@ -30,17 +30,13 @@ Just as an OS doesn't run one giant process — it decomposes work into many pro
 ## Quick Start
 
 ```python
-from rlmkit.llm import LLMClient
+from rlmkit.llm import OpenAIClient
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 
-class MyLLM(LLMClient):
-    def chat(self, messages):
-        ...  # plug in any provider
-
 runtime = LocalRuntime(workspace=".")
 agent = RLM(
-    llm_client=MyLLM(),
+    llm_client=OpenAIClient("gpt-5"),
     runtime=runtime,
     config=RLMConfig(max_depth=3, max_iterations=15, context="context.md"),
 )
@@ -173,12 +169,23 @@ Subclass and override any method:
 
 ### `LLMClient`
 
-Implement `chat()`. Optionally override `stream()`:
+Built-in clients for OpenAI and Anthropic (imports are lazy — neither package is required unless you use it):
 
 ```python
-class LLMClient(ABC):
+from rlmkit.llm import OpenAIClient, AnthropicClient
+
+llm = OpenAIClient("gpt-5")                   # or any OpenAI-compatible API
+llm = AnthropicClient("claude-sonnet-4-20250514")
+```
+
+Or implement your own — just subclass `LLMClient` and implement `chat()`:
+
+```python
+from rlmkit.llm import LLMClient
+
+class MyLLM(LLMClient):
     def chat(self, messages: list[dict[str, str]]) -> str: ...
-    def stream(self, messages) -> Iterator[str]:
+    def stream(self, messages) -> Iterator[str]:  # optional
         yield self.chat(messages)
 ```
 
@@ -212,6 +219,58 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 runtime.register_tool(now)
+```
+
+### Context
+
+Agents can have a **durable scratchpad** that persists across REPL turns. Pass a string path to auto-create a file-backed context, or implement your own `Context` subclass for other backends (database, in-memory, etc.):
+
+```python
+# String path → auto-creates FileContext
+agent = RLM(llm_client=llm, runtime=runtime, config=RLMConfig(context="context.md"))
+
+# Or provide a Context object directly
+from rlmkit.context import FileContext, Context
+agent = RLM(llm_client=llm, runtime=runtime, config=RLMConfig(context=FileContext("ctx.md", runtime)))
+```
+
+When context is configured, two tools are registered into the REPL:
+- `read_context()` — returns the full context string
+- `append_context(text)` — appends text to the context
+
+Children get an **isolated clone** via `Context.clone(agent_id)`. For `FileContext`, this creates a sibling file under `{parent_dir}/{agent_id}/{filename}`.
+
+To implement a custom context backend, subclass `Context` and implement `read()`, `append()`, `write()`, and `clone()`:
+
+```python
+from rlmkit.context import Context
+
+class RedisContext(Context):
+    def read(self) -> str: ...
+    def append(self, text: str) -> None: ...
+    def write(self, text: str) -> None: ...
+    def clone(self, agent_id: str) -> RedisContext: ...
+```
+
+### Model Selection
+
+Pass multiple models via `llm_clients` and let the agent choose per-delegation:
+
+```python
+agent = RLM(
+    llm_client=OpenAIClient("gpt-5"),
+    runtime=runtime,
+    config=config,
+    llm_clients={
+        "fast": {"model": OpenAIClient("gpt-5-mini"), "description": "Cheap model for simple tasks"},
+    },
+)
+```
+
+The default model comes from `llm_client` and is always available as `"default"`. The agent sees available models in its system prompt and can select one per delegation:
+
+```python
+delegate("search", "Find the needle", model="fast")
 ```
 
 ### `PromptBuilder`
@@ -338,7 +397,7 @@ rlmkit/
 ├── rlm.py          # RLM engine, RLMConfig, ExecThread
 ├── state.py         # RLMState, Status, StepEvent hierarchy, ChildHandle
 ├── context.py       # Context ABC, FileContext
-├── llm.py           # LLMClient ABC
+├── llm.py           # LLMClient ABC, OpenAIClient, AnthropicClient
 ├── utils.py         # @tool decorator, code block parsing
 ├── runtime/
 │   ├── runtime.py   # Runtime ABC, ToolDef, builtins
