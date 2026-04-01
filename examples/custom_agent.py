@@ -279,7 +279,7 @@ def main():
         agent = CodeReviewer(
             llm_client=Client(),
             runtime=runtime,
-            config=RLMConfig(max_depth=3, max_iterations=15, context_path="context.md"),
+            config=RLMConfig(max_depth=3, max_iterations=15, context="context.md"),
             review_focus="bugs, missing error handling, and type safety",
         )
 

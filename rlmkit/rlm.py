@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, fields, replace
 from itertools import count
-from pathlib import PurePosixPath
 from threading import Event, Thread
 
+from .context import Context, FileContext
 from .llm import LLMClient
 from .prompts.default import TOOLS_TEXT, make_default_builder
 from .runtime import Runtime
@@ -77,7 +77,7 @@ class RLMConfig:
     max_concurrent_children: int = 8
     child_max_iterations: int | None = None
     single_block: bool = True
-    context_path: str | None = None
+    context: Context | str | None = None
     system_prompt: str | None = None
 
 
@@ -117,13 +117,22 @@ class RLM:
         self._thread = ExecThread()
         self.last_state: RLMState | None = None
 
-        self.runtime.inject("CONTEXT_PATH", self.config.context_path)
+        # Auto-create FileContext from string path
+        if isinstance(self.config.context, str):
+            self.config = replace(
+                self.config, context=FileContext(self.config.context, self.runtime)
+            )
+        self.context: Context | None = self.config.context
+
         self.runtime.inject("AGENT_ID", self.agent_id)
         self.runtime.inject("DEPTH", str(self.depth))
         self.runtime.inject("MAX_DEPTH", str(self.config.max_depth))
         self.runtime.register_tool(self.done, core=True)
         self.runtime.register_tool(self.delegate, core=True)
         self.runtime.register_tool(self.wait_all, core=True)
+        if self.context:
+            self.runtime.register_tool(self.read_context, core=True)
+            self.runtime.register_tool(self.append_context, core=True)
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -137,14 +146,20 @@ class RLM:
         self.waiting_on.clear()
         self.is_done = False
         self.result = None
-        self.initialize_context(task, reset=reset_context)
-        config = asdict(self.config)
-        config.update(depth=self.depth, task=task)
+        self.runtime.inject("TASK", task)
+        if self.context and reset_context:
+            self.context.write(task if self.depth == 0 else "")
+        config_dict = {
+            f.name: getattr(self.config, f.name)
+            for f in fields(self.config)
+            if f.name != "context"
+        }
+        config_dict.update(depth=self.depth, task=task)
         state = self.make_state(
             agent_id=self.agent_id,
             status=Status.WAITING,
-            config=config,
-            context=self.read_context(),
+            config=config_dict,
+            context=self.context.read() if self.context else None,
         )
         self.last_state = state
         return state
@@ -245,7 +260,7 @@ class RLM:
             ),
             messages=new_messages,
             result=self.result if self.is_done else None,
-            context=self.read_context(),
+            context=self.context.read() if self.context else None,
             children=children,
         )
 
@@ -395,15 +410,15 @@ class RLM:
     ) -> list[dict]:
         """Build a condensed message list when history exceeds max_messages."""
         task = state.config.get("task", "")
-        context = self.read_context()
+        context = self.context.read() if self.context else ""
         recent = msgs[-cap:]
 
         parts = [f"## Task\n{task}"]
         if context:
-            parts.append(f"## Context (from {self.config.context_path})\n{context}")
+            parts.append(f"## Context\n{context}")
         parts.append(
             f"## History\n{len(msgs)} messages so far, showing the last {cap}. "
-            "Read your context file for full progress."
+            "Call read_context() for full progress."
         )
 
         summary = {"role": "user", "content": "\n\n".join(parts)}
@@ -412,10 +427,10 @@ class RLM:
     def next_action_message(self, task: str, *, iteration: int) -> dict[str, str]:
         """Format the user message that prompts the LLM to act."""
         ctx_hint = (
-            "IMPORTANT: `CONTEXT_PATH` is set — start by reading it with "
-            "`read_file(CONTEXT_PATH)` to check prior progress before doing anything else. "
-            "Append important progress to it as you go.\n\n"
-            if self.config.context_path
+            "IMPORTANT: Context is available — start by calling `read_context()` "
+            "to check prior progress before doing anything else. "
+            "Use `append_context(text)` to record progress as you go.\n\n"
+            if self.context
             else ""
         )
         if iteration == 0:
@@ -507,11 +522,24 @@ class RLM:
         self._thread.suspend()
         return [self.children[h.agent_id].result or "" for h in handles]
 
-    # ── children & context ───────────────────────────────────────────
+    # ── context tools ──────────────────────────────────────────────
 
-    def create_context_path(self, agent_id: str) -> str:
-        """Derive the context file path for a child. Override to customize layout."""
-        return f".rlm/{agent_id}/{PurePosixPath(self.config.context_path).name}"
+    @tool("Read the agent's durable context. Returns the full context string.")
+    def read_context(self) -> str:
+        if not self.context:
+            return ""
+        return self.context.read()
+
+    @tool(
+        "Append text to the agent's durable context.\nArgs:\n- text (str): Text to append.\nReturns:\n- str: Confirmation."
+    )
+    def append_context(self, text: str) -> str:
+        if not self.context:
+            return "No context configured."
+        self.context.append(text)
+        return "ok"
+
+    # ── children ─────────────────────────────────────────────────────
 
     def create_child(
         self, agent_id: str, task: str, *, max_iterations: int | None = None
@@ -522,12 +550,10 @@ class RLM:
             or self.config.child_max_iterations
             or self.config.max_iterations // 3
         )
-        child_config = replace(self.config, max_iterations=child_iters)
-        if self.config.context_path:
-            child_config = replace(
-                child_config,
-                context_path=self.create_context_path(agent_id),
-            )
+        child_context = self.context.clone(agent_id) if self.context else None
+        child_config = replace(
+            self.config, max_iterations=child_iters, context=child_context
+        )
         rt = self.runtime_factory() if self.runtime_factory else self.runtime.clone()
         return self.__class__(
             llm_client=self.llm_client,
@@ -537,25 +563,3 @@ class RLM:
             depth=self.depth + 1,
             runtime_factory=self.runtime_factory,
         )
-
-    def read_context(self) -> str | None:
-        """Read the context file, if configured."""
-        if not self.config.context_path:
-            return None
-        try:
-            return self.runtime.read_file(self.config.context_path)
-        except FileNotFoundError:
-            return None
-
-    def initialize_context(self, task: str, *, reset: bool) -> None:
-        """Set up the context file for a new run."""
-        self.runtime.inject("TASK", task)
-        if not self.config.context_path:
-            return
-        try:
-            current = self.runtime.read_file(self.config.context_path)
-        except FileNotFoundError:
-            current = ""
-        if reset or not current.strip():
-            content = task if self.depth == 0 else ""
-            self.runtime.write_file(self.config.context_path, content)

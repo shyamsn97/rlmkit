@@ -260,7 +260,7 @@ def main():
         agent = RLM(
             llm_client=llm,
             runtime=runtime,
-            config=RLMConfig(max_depth=3, max_iterations=15, context_path="context.md"),
+            config=RLMConfig(max_depth=3, max_iterations=15, context="context.md"),
             runtime_factory=lambda: setup_runtime(workspace),
         )
 

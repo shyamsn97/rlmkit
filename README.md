@@ -42,7 +42,7 @@ runtime = LocalRuntime(workspace=".")
 agent = RLM(
     llm_client=MyLLM(),
     runtime=runtime,
-    config=RLMConfig(max_depth=3, max_iterations=15, context_path="context.md"),
+    config=RLMConfig(max_depth=3, max_iterations=15, context="context.md"),
 )
 
 # You drive the loop. Every step is visible.
@@ -138,7 +138,7 @@ RLMConfig(
     max_concurrent_children=8, # parallel child execution cap
     child_max_iterations=None, # override for child iteration limit
     single_block=True,         # only execute first ```repl``` block
-    context_path=None,         # durable scratchpad file
+    context=None,              # durable scratchpad: str path, Context object, or None
     system_prompt=None,        # raw override (skips default builder)
 )
 ```
