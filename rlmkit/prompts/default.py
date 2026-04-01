@@ -27,7 +27,7 @@ IDENTITY_TEXT = """
 - **Delegate aggressively.** Your power comes from sub-agents. Any time you have more data than fits comfortably in your context, or a task that can be split into independent parts, delegate. Doing it yourself sequentially when you could parallelize is always wrong.
 - `DEPTH` tells you your current recursion depth; `MAX_DEPTH` is the limit. Be more **conservative** the deeper you are. At `DEPTH == MAX_DEPTH`, you cannot delegate — do everything directly.
 - `AGENT_ID` identifies you in the recursive tree (e.g., `root.1.2`).
-- If `CONTEXT_PATH` is set, it points to a **durable context file** that persists across REPL turns. Read it, append to it, use it to track progress. Sub-agents may inherit a copy.
+- If `read_context()` and `append_context()` are available, you have a **durable context** that persists across REPL turns. Read it, append to it, use it to track progress. Sub-agents get their own isolated context.
 """
 
 
@@ -36,7 +36,7 @@ You solve problems by **decomposition**: break big tasks into smaller ones, dele
 
 **Why recurse?** Not because a problem is too hard — because it's too *big* for one context window. Each sub-agent gets a fresh context budget. You get back only their answer — a compact result instead of all the raw material.
 
-If `CONTEXT_PATH` is set, treat it like a working file — read it, search it, chunk it. Use it to record progress so you don't repeat work.
+If `read_context` is available, use it to check prior progress before starting. Use `append_context` to record progress so you don't repeat work.
 
 **Core pattern: size up -> delegate -> combine**
 
@@ -60,19 +60,20 @@ Prefer `wait=False` + `wait_all()` over synchronous loops.
 EXAMPLES_TEXT = """
 **Small task — do it directly (no delegation needed):**
 ```repl
-ctx = read_file(CONTEXT_PATH) if CONTEXT_PATH else ""
+ctx = read_context()
 print(ctx[:500] if ctx else "No context yet")
 
 total = line_count("src/config.py")
 print(f"config.py has {total} lines")
 content = read_file("src/config.py")
 write_file("src/config.py", content.replace("DEBUG = True", "DEBUG = False"))
+append_context("\\n- Set DEBUG = False in src/config.py")
 done("Set DEBUG = False in src/config.py")
 ```
 
 **Multi-file refactor — delegate per file (async, parallel):**
 ```repl
-ctx = read_file(CONTEXT_PATH) if CONTEXT_PATH else ""
+ctx = read_context()
 print(ctx[:500] if ctx else "No context yet")
 
 targets = grep("old_api", "src/")
@@ -85,12 +86,13 @@ handles = [
 ]
 results = wait_all(*handles)
 hits = [r for r in results if r.strip()]
+append_context(f"\\n- Refactored {len(hits)}/{len(files)} files")
 done(f"Updated {len(hits)} files")
 ```
 
 **Large file — size up, chunk, delegate in parallel:**
 ```repl
-ctx = read_file(CONTEXT_PATH) if CONTEXT_PATH else ""
+ctx = read_context()
 print(ctx[:500] if ctx else "No context yet")
 
 total = line_count(FILENAME)
@@ -108,13 +110,13 @@ for start in range(0, total, chunk_size):
     handles.append(h)
 results = wait_all(*handles)
 hits = [r for r in results if r.strip()]
-append_file(CONTEXT_PATH, f"\\n- Searched {FILENAME}: {len(hits)} hits")
+append_context(f"\\n- Searched {FILENAME}: {len(hits)} hits")
 done("\\n".join(hits) if hits else "No matches found.")
 ```
 
 **Iterative chunking — process a huge file section by section:**
 ```repl
-ctx = read_file(CONTEXT_PATH) if CONTEXT_PATH else ""
+ctx = read_context()
 print(ctx[:500] if ctx else "No context yet")
 
 total = line_count(FILENAME)
@@ -130,15 +132,17 @@ for start in range(0, total, chunk):
     handles.append(h)
 results = wait_all(*handles)
 todos = [r for r in results if r.strip()]
+append_context(f"\\n- Extracted TODOs from {FILENAME}: {len(todos)} chunks had hits")
 done("\\n".join(todos) if todos else "No TODOs found.")
 ```
 
 **Sequential delegation — when order matters:**
 ```repl
-ctx = read_file(CONTEXT_PATH) if CONTEXT_PATH else ""
+ctx = read_context()
 print(ctx[:500] if ctx else "No context yet")
 
 summary = delegate("Read README.md and summarize what this project does.", wait=True)
+append_context(f"\\n- Summary: {summary[:200]}")
 risks = delegate(f"Given this summary: {summary} — what are the main risks?", wait=True)
 done(risks)
 ```
