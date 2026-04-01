@@ -25,6 +25,8 @@ An RLM is analogous to a process in an operating system:
 
 Just as an OS doesn't run one giant process — it decomposes work into many processes — an RLM decomposes work into many agents. The reason is the same: **bounded resources**. A single context window can't hold a million lines of text, just like a single process can't hold infinite memory. You fork, distribute, and combine.
 
+`rlmkit` makes every step explicit: `state = agent.step(state)`. You see every LLM call, every code execution, every child spawn. Inspect, intervene, or terminate between any two steps. The state is immutable and recursive — the entire computation tree is a single serializable snapshot you can pause, resume, fork, or replay.
+
 ## Quick Start
 
 ```python
@@ -346,6 +348,25 @@ rlmkit/
 
 ~1,400 lines of core code.
 
+## References
+
+- [Recursive Language Models](https://github.com/alexzhang13/rlm) — the original RLM paper and implementation
+- [rlm-minimal](https://github.com/alexzhang13/rlm-minimal) — minimal single-file RLM reference implementation
+- [ypi](https://github.com/alexzhang13/ypi) — RLM-based coding agent built on rlm-minimal
+
 ## License
 
 See [LICENSE](LICENSE).
+
+## Citation
+
+```bibtex
+@misc{sudhakaran2025rlmkit,
+  author = {Sudhakaran, Shyam},
+  title = {rlmkit},
+  year = {2025},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/shyamsn97/rlmkit}},
+}
+```

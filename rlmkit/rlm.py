@@ -278,9 +278,7 @@ class RLM:
 
         # Run one step for every child that hasn't finished yet
         active = [
-            (cs, self.children[cs.agent_id])
-            for cs in state.children
-            if not cs.finished
+            (cs, self.children[cs.agent_id]) for cs in state.children if not cs.finished
         ]
         stepped = self.execute_child_steps(active) if active else {}
 
@@ -297,8 +295,7 @@ class RLM:
 
         # Check if all children the parent is waiting on are done
         all_done = all(
-            cs.agent_id not in self.waiting_on or cs.finished
-            for cs in new_children
+            cs.agent_id not in self.waiting_on or cs.finished for cs in new_children
         )
 
         if all_done:
