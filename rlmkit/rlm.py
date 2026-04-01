@@ -8,7 +8,6 @@ from dataclasses import asdict, dataclass, replace
 from itertools import count
 from pathlib import PurePosixPath
 from threading import Event, Thread
-from typing import Any
 
 from .llm import LLMClient
 from .prompts.default import TOOLS_TEXT, make_default_builder
@@ -508,32 +507,34 @@ class RLM:
 
     # ── children & context ───────────────────────────────────────────
 
-    def child_kwargs(self) -> dict[str, Any]:
-        """Kwargs passed to child constructors. Override to customize."""
-        child_iters = self.config.child_max_iterations or max(
-            3, self.config.max_iterations // 3
-        )
-        return {
-            "llm_client": self.llm_client,
-            "config": replace(self.config, max_iterations=child_iters),
-            "depth": self.depth + 1,
-            "runtime_factory": self.runtime_factory,
-        }
+    def create_context_path(self, agent_id: str) -> str:
+        """Derive the context file path for a child. Override to customize layout."""
+        return f".rlm/{agent_id}/{PurePosixPath(self.config.context_path).name}"
 
     def create_child(
         self, agent_id: str, task: str, *, max_iterations: int | None = None
     ) -> RLM:
         """Create a child engine. Override for custom child setup."""
-        rt = self.runtime_factory() if self.runtime_factory else self.runtime.clone()
-        kwargs = self.child_kwargs()
-        if max_iterations is not None:
-            kwargs["config"] = replace(kwargs["config"], max_iterations=max_iterations)
+        child_iters = (
+            max_iterations
+            or self.config.child_max_iterations
+            or self.config.max_iterations // 3
+        )
+        child_config = replace(self.config, max_iterations=child_iters)
         if self.config.context_path:
-            child_ctx = (
-                f".rlm/{agent_id}/{PurePosixPath(self.config.context_path).name}"
+            child_config = replace(
+                child_config,
+                context_path=self.create_context_path(agent_id),
             )
-            kwargs["config"] = replace(kwargs["config"], context_path=child_ctx)
-        return self.__class__(runtime=rt, agent_id=agent_id, **kwargs)
+        rt = self.runtime_factory() if self.runtime_factory else self.runtime.clone()
+        return self.__class__(
+            llm_client=self.llm_client,
+            runtime=rt,
+            config=child_config,
+            agent_id=agent_id,
+            depth=self.depth + 1,
+            runtime_factory=self.runtime_factory,
+        )
 
     def read_context(self) -> str | None:
         """Read the context file, if configured."""
