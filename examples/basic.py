@@ -154,9 +154,21 @@ def _fmt_event(ev, indent=0):
         md.append(f"{md_prefix}**`{ev.agent_id}`** no code block")
 
     elif isinstance(ev, ChildStep):
-        status = f"{GREEN}all done{RESET}" if ev.all_done else "in progress"
+        if ev.agent_finished:
+            status = f"{GREEN}finished{RESET}"
+            md_status = "agent finished"
+        elif ev.all_done:
+            status = f"{GREEN}all done{RESET}"
+            md_status = "all done"
+        else:
+            status = "in progress"
+            md_status = "in progress"
         term.append(f"{pad}{tag} {BOLD}children{RESET} {status}")
-        md.append(f"{md_prefix}**`{ev.agent_id}`** children — {'all done' if ev.all_done else 'in progress'}")
+        md.append(f"{md_prefix}**`{ev.agent_id}`** children — {md_status}")
+        if ev.exec_output and ev.exec_output.strip():
+            for line in ev.exec_output.strip().splitlines()[:10]:
+                term.append(f"{pad}  {DIM}│{RESET} {line}")
+            md.append(f"```\n{ev.exec_output.strip()[:2000]}\n```")
         for ce in ev.child_events:
             t, m = _fmt_event(ce, indent + 1)
             term.extend(t)

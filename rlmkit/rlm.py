@@ -318,6 +318,7 @@ class RLM:
                     }
                 )
 
+            # Signal event-stream observers if done() was called in resumed exec
             return state.update(
                 status=new_status,
                 event=ChildStep(
@@ -326,6 +327,7 @@ class RLM:
                     child_events=events,
                     all_done=True,
                     exec_output=output,
+                    agent_finished=self.is_done,
                 ),
                 messages=new_messages,
                 result=self.result if self.is_done else None,

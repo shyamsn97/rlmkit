@@ -39,6 +39,9 @@ class ChildStep(StepEvent):
     child_events: list[StepEvent] = []
     all_done: bool = False
     exec_output: str | None = None
+    # True when done() was called in the resumed exec after children returned.
+    # Purely for event-stream observers — state.finished already covers this.
+    agent_finished: bool = False
 
 
 class NoCodeBlock(StepEvent):

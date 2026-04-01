@@ -150,6 +150,49 @@ def test_child_events_during_supervision():
             print(f"  ChildStep all_done={s.event.all_done} sub_events={sub}")
 
 
+def test_agent_finished_on_delegation_path():
+    """ChildStep.agent_finished should be True when done() is called after children return."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rt = LocalRuntime(workspace=Path(tmpdir))
+        llm = FakeLLM()
+        agent = RLM(llm_client=llm, runtime=rt, config=RLMConfig(max_depth=1))
+
+        steps, final = run_to_completion(agent, agent.start("test"))
+
+        assert final.finished
+
+        # The final event should be a ChildStep with agent_finished=True
+        assert isinstance(final.event, ChildStep)
+        assert final.event.all_done
+        assert final.event.agent_finished
+
+        # In-progress ChildStep events should NOT have agent_finished
+        in_progress = [
+            s for s in steps
+            if isinstance(s.event, ChildStep) and not s.event.all_done
+        ]
+        for s in in_progress:
+            assert not s.event.agent_finished
+
+        print(f"  final event: {type(final.event).__name__} agent_finished={final.event.agent_finished}")
+
+
+def test_agent_finished_false_on_direct_path():
+    """When done() is called directly (no delegation), there should be no ChildStep at all."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rt = LocalRuntime(workspace=Path(tmpdir))
+        llm = FakeLLM()
+        agent = RLM(llm_client=llm, runtime=rt, config=RLMConfig(max_depth=0))
+
+        steps, final = run_to_completion(agent, agent.start("test"))
+
+        assert final.finished
+        assert isinstance(final.event, CodeExec)
+        assert not any(isinstance(s.event, ChildStep) for s in steps)
+
+        print(f"  final event: {type(final.event).__name__}")
+
+
 def test_max_depth_zero():
     """At max_depth=0, root is already the leaf — no delegation."""
     with tempfile.TemporaryDirectory() as tmpdir:
