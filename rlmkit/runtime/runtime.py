@@ -71,7 +71,7 @@ class Runtime(ABC):
 
     # ── clone ─────────────────────────────────────────────────────────
 
-    def clone(self) -> "Runtime":
+    def clone(self) -> Runtime:
         """Fresh runtime sharing the same workspace and tool registrations.
 
         Namespace is empty — injected values do NOT carry over.

@@ -94,7 +94,7 @@ class PromptBuilder:
     def sections(self) -> dict[str, Section | SectionBody | SectionBodyConstructFn]:
         return dict(self._sections)
 
-    def set_order(self, order: str) -> "PromptBuilder":
+    def set_order(self, order: str) -> PromptBuilder:
         self._order = textwrap.dedent(order).strip()
         return self
 
@@ -106,7 +106,7 @@ class PromptBuilder:
         body_construct_fn: SectionBodyConstructFn | None = None,
         title: Optional[str] = None,
         level: int = 2,
-    ) -> "PromptBuilder":
+    ) -> PromptBuilder:
         self._sections[name] = Section(
             name,
             body,
@@ -119,7 +119,7 @@ class PromptBuilder:
     def update(
         self,
         sections: Mapping[str, Section | SectionBody | SectionBodyConstructFn],
-    ) -> "PromptBuilder":
+    ) -> PromptBuilder:
         self._sections.update(sections)
         return self
 
