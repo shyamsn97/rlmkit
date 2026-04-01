@@ -8,7 +8,7 @@ version = "0.0.1"
 description = "A state-machine framework for recursive LLM agents in ~1,200 lines of Python."
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 authors = [
     { name = "Shyam Sudhakaran", email = "shyamsnair@protonmail.com" },
 ]
