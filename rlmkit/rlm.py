@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, fields, replace
-from itertools import count
 from threading import Event, Thread
 
 from .context import Context, FileContext
@@ -21,7 +20,7 @@ from .state import (
     RLMState,
     Status,
 )
-from .utils import find_code_blocks, tool
+from .utils import OrphanedDelegatesError, find_code_blocks, tool
 
 # ── exec thread helper ───────────────────────────────────────────────
 
@@ -101,6 +100,7 @@ class RLM:
         agent_id: str = "root",
         depth: int = 0,
         runtime_factory: Callable[[], Runtime] | None = None,
+        llm_clients: dict[str, dict] | None = None,
     ) -> None:
         self.llm_client = llm_client
         self.runtime = runtime
@@ -109,7 +109,15 @@ class RLM:
         self.depth = depth
         self.runtime_factory = runtime_factory
 
-        self._delegate_ids = count(1)
+        self.llm_clients: dict[str, LLMClient] = {}
+        self.model_descriptions: dict[str, str] = {}
+        for k, entry in (llm_clients or {}).items():
+            self.llm_clients[k] = entry["model"]
+            if "description" in entry:
+                self.model_descriptions[k] = entry["description"]
+        if "default" not in self.llm_clients:
+            self.llm_clients["default"] = self.llm_client
+
         self.children: dict[str, RLM] = {}
         self.waiting_on: list[str] = []
         self.is_done = False
@@ -124,6 +132,7 @@ class RLM:
             )
         self.context: Context | None = self.config.context
 
+        self.runtime.inject("OrphanedDelegatesError", OrphanedDelegatesError)
         self.runtime.inject("AGENT_ID", self.agent_id)
         self.runtime.inject("DEPTH", str(self.depth))
         self.runtime.inject("MAX_DEPTH", str(self.config.max_depth))
@@ -229,6 +238,29 @@ class RLM:
         # Run the code — may suspend if it calls delegate()/wait_all()
         suspended, output = self._thread.run(self.execute_code, code)
 
+        # Detect newly created children
+        children = list(state.children)
+        existing = {cs.agent_id for cs in children}
+        new_child_ids = [cid for cid in self.children if cid not in existing]
+
+        # Orphan check: delegate() called but wait_all() never was
+        if new_child_ids and not suspended:
+            for cid in new_child_ids:
+                del self.children[cid]
+            names = ", ".join(new_child_ids)
+            msg = (
+                f"delegate() was called for [{names}] but wait_all() was never "
+                f"called. You must call wait_all(*handles) to collect results, "
+                f"or use delegate(name, task, wait=True) for synchronous execution."
+            )
+            err_output = self.execute_code(f"raise OrphanedDelegatesError({msg!r})")
+            output += "\n\n" + err_output if output.strip() else err_output
+            new_child_ids = []
+
+        if suspended:
+            for cid in new_child_ids:
+                children.append(self.children[cid].last_state)
+
         # Determine next status based on what happened
         if self.is_done:
             new_status = Status.FINISHED
@@ -236,14 +268,6 @@ class RLM:
             new_status = Status.SUPERVISING
         else:
             new_status = Status.WAITING
-
-        # If suspended, register any newly created children
-        children = list(state.children)
-        if suspended:
-            existing = {cs.agent_id for cs in children}
-            for cid, engine in self.children.items():
-                if cid not in existing:
-                    children.append(engine.last_state)
 
         # Feed the execution output back into message history
         exec_message = self.execution_output_message(code, output)
@@ -372,6 +396,15 @@ class RLM:
             f"- `{td.name}{td.signature}`: {td.description}"
             for td in self.runtime.get_tool_defs()
         )
+        if len(self.llm_clients) > 1:
+            model_parts = []
+            for k in sorted(self.llm_clients):
+                desc = self.model_descriptions.get(k)
+                model_parts.append(f"- `{k}`: {desc}" if desc else f"- `{k}`")
+            tool_lines += (
+                "\n\nAvailable models for `delegate(model=...)`:\n"
+                + "\n".join(model_parts)
+            )
         preimported = self.runtime.available_modules()
         if preimported:
             tool_lines += (
@@ -496,15 +529,33 @@ class RLM:
         return self.result
 
     @tool(
-        "Delegate a subtask to a child agent.\nArgs:\n- task (str): The subtask.\n- wait (bool): Block until done.\n- max_iterations (int | None): Iteration cap.\nReturns:\n- ChildHandle | str: Handle (async) or result (sync)."
+        "Delegate a subtask to a named child agent.\nArgs:\n"
+        "- name (str): Short identifier for the child (e.g. 'search_batch_0').\n"
+        "- task (str): The subtask description.\n"
+        "- wait (bool): Block until done.\n"
+        "- max_iterations (int | None): Iteration cap.\n"
+        "- model (str): Which model to use. Defaults to 'default'.\n"
+        "Returns:\n- ChildHandle | str: Handle (async) or result (sync)."
     )
     def delegate(
-        self, task: str, *, wait: bool = False, max_iterations: int | None = None
+        self,
+        name: str,
+        task: str,
+        *,
+        wait: bool = False,
+        max_iterations: int | None = None,
+        model: str = "default",
     ) -> str | ChildHandle:
         if self.depth >= self.config.max_depth:
             return f"[refused: max depth {self.config.max_depth}] Do this directly."
-        agent_id = f"{self.agent_id}.{next(self._delegate_ids)}"
-        child = self.create_child(agent_id, task, max_iterations=max_iterations)
+        if model not in self.llm_clients:
+            keys = ", ".join(sorted(self.llm_clients))
+            return f"[error: unknown model {model!r}. available: {keys}]"
+        agent_id = self._resolve_child_id(name)
+        client = self.llm_clients[model]
+        child = self.create_child(
+            agent_id, task, max_iterations=max_iterations, llm_client=client
+        )
         self.children[agent_id] = child
         child.last_state = child.start(task)
         handle = ChildHandle(agent_id)
@@ -513,6 +564,26 @@ class RLM:
             self._thread.suspend()
             return child.result or ""
         return handle
+
+    def _packed_llm_clients(self) -> dict[str, dict]:
+        """Re-pack llm_clients with descriptions for propagation to children."""
+        result: dict[str, dict] = {}
+        for k, client in self.llm_clients.items():
+            entry: dict = {"model": client}
+            if k in self.model_descriptions:
+                entry["description"] = self.model_descriptions[k]
+            result[k] = entry
+        return result
+
+    def _resolve_child_id(self, name: str) -> str:
+        """Derive a unique agent_id, auto-suffixing on collision."""
+        base = f"{self.agent_id}.{name}"
+        if base not in self.children:
+            return base
+        n = 2
+        while f"{base}_{n}" in self.children:
+            n += 1
+        return f"{base}_{n}"
 
     @tool(
         "Wait for delegated children.\nArgs:\n- *handles: Handles from delegate().\nReturns:\n- list[str]: Results in order."
@@ -542,7 +613,12 @@ class RLM:
     # ── children ─────────────────────────────────────────────────────
 
     def create_child(
-        self, agent_id: str, task: str, *, max_iterations: int | None = None
+        self,
+        agent_id: str,
+        task: str,
+        *,
+        max_iterations: int | None = None,
+        llm_client: LLMClient | None = None,
     ) -> RLM:
         """Create a child engine. Override for custom child setup."""
         child_iters = (
@@ -556,10 +632,11 @@ class RLM:
         )
         rt = self.runtime_factory() if self.runtime_factory else self.runtime.clone()
         return self.__class__(
-            llm_client=self.llm_client,
+            llm_client=llm_client or self.llm_client,
             runtime=rt,
             config=child_config,
             agent_id=agent_id,
             depth=self.depth + 1,
             runtime_factory=self.runtime_factory,
+            llm_clients=self._packed_llm_clients(),
         )

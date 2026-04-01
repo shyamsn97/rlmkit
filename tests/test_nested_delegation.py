@@ -19,7 +19,7 @@ from rlmkit.state import ChildStep, CodeExec, LLMReply, RLMState, Status
 # variables to decide whether to delegate or finish directly.
 UNIVERSAL_REPLY = '''```repl
 if int(DEPTH) < int(MAX_DEPTH):
-    h = delegate("go deeper", wait=False)
+    h = delegate("child", "go deeper", wait=False)
     results = wait_all(h)
     done("from-" + AGENT_ID + ":" + results[0])
 else:
@@ -69,10 +69,10 @@ def test_two_levels():
 
         assert final.finished
         assert "from-root:" in final.result
-        assert "leaf-root.1" in final.result
+        assert "leaf-root.child" in final.result
         assert len(final.children) == 1
         assert final.children[0].finished
-        assert final.children[0].result == "leaf-root.1"
+        assert final.children[0].result == "leaf-root.child"
 
         print(f"  {len(steps)} steps, {llm.call_count} LLM calls")
         print(f"  root result: {final.result}")
@@ -94,9 +94,9 @@ def test_three_levels():
 
         child = final.children[0]
         grandchild = child.children[0]
-        assert grandchild.result == "leaf-root.1.1"
-        assert "leaf-root.1.1" in child.result
-        assert "leaf-root.1.1" in final.result
+        assert grandchild.result == "leaf-root.child.child"
+        assert "leaf-root.child.child" in child.result
+        assert "leaf-root.child.child" in final.result
 
         print(f"  {len(steps)} steps, {llm.call_count} LLM calls")
         for d in [final] + descendants:
@@ -208,6 +208,126 @@ def test_max_depth_zero():
         assert llm.call_count == 1
 
         print(f"  {len(steps)} steps, result: {final.result}")
+
+
+def test_named_delegate_collision():
+    """Duplicate names get auto-suffixed: child, child_2, child_3."""
+    reply = '''```repl
+h1 = delegate("worker", "task A", wait=False)
+h2 = delegate("worker", "task B", wait=False)
+h3 = delegate("worker", "task C", wait=False)
+results = wait_all(h1, h2, h3)
+done(" ".join(results))
+```'''
+
+    class ScriptedLLM(LLMClient):
+        def __init__(self):
+            self.call_count = 0
+
+        def chat(self, messages, *args, **kwargs):
+            self.call_count += 1
+            if self.call_count == 1:
+                return reply
+            return '```repl\ndone("leaf-" + AGENT_ID)\n```'
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rt = LocalRuntime(workspace=Path(tmpdir))
+        agent = RLM(llm_client=ScriptedLLM(), runtime=rt, config=RLMConfig(max_depth=1))
+
+        steps, final = run_to_completion(agent, agent.start("test"))
+
+        assert final.finished
+        child_ids = sorted(c.agent_id for c in final.children)
+        assert child_ids == ["root.worker", "root.worker_2", "root.worker_3"]
+        print(f"  child IDs: {child_ids}")
+
+
+def test_llm_client_routing():
+    """delegate(model='fast') should use the corresponding client."""
+    reply = '''```repl
+h = delegate("sub", "do it", wait=True, model="fast")
+done(h)
+```'''
+
+    class TaggedLLM(LLMClient):
+        def __init__(self, tag: str):
+            self.tag = tag
+            self.call_count = 0
+
+        def chat(self, messages, *args, **kwargs):
+            self.call_count += 1
+            return f'```repl\ndone("used-{self.tag}")\n```'
+
+    strong = TaggedLLM("strong")
+    fast = TaggedLLM("fast")
+
+    # Override strong's first reply to delegate with model="fast"
+    original_chat = strong.chat
+    def patched_chat(messages, *args, **kwargs):
+        strong.call_count += 1
+        if strong.call_count == 1:
+            return reply
+        return original_chat(messages, *args, **kwargs)
+    strong.chat = patched_chat
+    strong.call_count = 0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rt = LocalRuntime(workspace=Path(tmpdir))
+        agent = RLM(
+            llm_client=strong,
+            runtime=rt,
+            config=RLMConfig(max_depth=1),
+            llm_clients={
+                "strong": {"model": strong},
+                "fast": {"model": fast},
+            },
+        )
+
+        steps, final = run_to_completion(agent, agent.start("test"))
+
+        assert final.finished
+        assert final.result == "used-fast"
+        assert fast.call_count == 1
+        print(f"  result: {final.result}, fast calls: {fast.call_count}")
+
+
+def test_orphaned_delegates_error():
+    """delegate() without wait_all() should surface an error, not silently orphan."""
+    # First reply: delegates but never waits. Second reply: fixes it.
+    orphan_reply = '''```repl
+h = delegate("worker", "do stuff", wait=False)
+print("forgot to wait")
+```'''
+    fix_reply = '''```repl
+done("fixed")
+```'''
+
+    class ScriptedLLM(LLMClient):
+        def __init__(self):
+            self.call_count = 0
+
+        def chat(self, messages, *args, **kwargs):
+            self.call_count += 1
+            if self.call_count == 1:
+                return orphan_reply
+            return fix_reply
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rt = LocalRuntime(workspace=Path(tmpdir))
+        agent = RLM(llm_client=ScriptedLLM(), runtime=rt, config=RLMConfig(max_depth=1))
+
+        steps, final = run_to_completion(agent, agent.start("test"))
+
+        assert final.finished
+        assert final.result == "fixed"
+        # The orphan error should have appeared in a CodeExec event
+        exec_events = [s for s in steps if isinstance(s.event, CodeExec)]
+        orphan_output = exec_events[0].event.output
+        assert "OrphanedDelegatesError" in orphan_output
+        assert "wait_all" in orphan_output
+        # The orphaned child should have been cleaned up
+        assert len(final.children) == 0
+        print(f"  error surfaced: {orphan_output.splitlines()[-1][:80]}")
 
 
 if __name__ == "__main__":

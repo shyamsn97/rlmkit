@@ -26,7 +26,7 @@ IDENTITY_TEXT = """
 - **Your context window is finite and non-renewable.** Every file you read, every tool output, every message — it all accumulates. When it fills up, you lose information. This is the fundamental constraint that shapes how you work.
 - **Delegate aggressively.** Your power comes from sub-agents. Any time you have more data than fits comfortably in your context, or a task that can be split into independent parts, delegate. Doing it yourself sequentially when you could parallelize is always wrong.
 - `DEPTH` tells you your current recursion depth; `MAX_DEPTH` is the limit. Be more **conservative** the deeper you are. At `DEPTH == MAX_DEPTH`, you cannot delegate — do everything directly.
-- `AGENT_ID` identifies you in the recursive tree (e.g., `root.1.2`).
+- `AGENT_ID` identifies you in the recursive tree (e.g., `root.search.chunk_0`).
 - If `read_context()` and `append_context()` are available, you have a **durable context** that persists across REPL turns. Read it, append to it, use it to track progress. Sub-agents get their own isolated context.
 """
 
@@ -41,7 +41,7 @@ If `read_context` is available, use it to check prior progress before starting. 
 **Core pattern: size up -> delegate -> combine**
 
 1. **Size up** — Orient yourself. Figure out the shape of the problem (file sizes, line counts, number of items). Read only metadata, not the full data.
-2. **Delegate** — Split the work and `delegate(task, wait=False)` in parallel. This is your default action. Even if you *could* solve it with a single tool call, delegation is preferred — it's faster, more robust, and demonstrates the recursive pattern.
+2. **Delegate** — Split the work and `delegate(name, task, wait=False)` in parallel. Give each child a short descriptive name. This is your default action. Even if you *could* solve it with a single tool call, delegation is preferred — it's faster, more robust, and demonstrates the recursive pattern.
 3. **Combine** — Aggregate sub-agent results and produce the final output via `done(answer)`.
 
 **When to do it directly (no delegation):**
@@ -81,8 +81,8 @@ files = list(set(line.split(":")[0] for line in targets.splitlines()))
 print(f"Found {len(files)} files to update")
 
 handles = [
-    delegate(f"In {f}, replace old_api() with new_api(). Update imports.", wait=False)
-    for f in files
+    delegate(f"refactor_{i}", f"In {f}, replace old_api() with new_api(). Update imports.", wait=False)
+    for i, f in enumerate(files)
 ]
 results = wait_all(*handles)
 hits = [r for r in results if r.strip()]
@@ -103,6 +103,7 @@ handles = []
 for start in range(0, total, chunk_size):
     end = min(start + chunk_size, total)
     h = delegate(
+        f"search_{start}",
         f"Search {FILENAME} lines {start}-{end} for <PATTERN>. "
         f"Return ONLY matching lines, or call done with empty string if none.",
         wait=False,
@@ -125,6 +126,7 @@ handles = []
 for start in range(0, total, chunk):
     end = min(start + chunk, total)
     h = delegate(
+        f"todos_{start}",
         f"Extract any TODO items from {FILENAME} lines {start}-{end}. "
         f"Return a numbered list, or call done with empty string if none found.",
         wait=False,
@@ -136,14 +138,14 @@ append_context(f"\\n- Extracted TODOs from {FILENAME}: {len(todos)} chunks had h
 done("\\n".join(todos) if todos else "No TODOs found.")
 ```
 
-**Sequential delegation — when order matters:**
+**Sequential delegation — when order matters (with model selection):**
 ```repl
 ctx = read_context()
 print(ctx[:500] if ctx else "No context yet")
 
-summary = delegate("Read README.md and summarize what this project does.", wait=True)
+summary = delegate("summarize", "Read README.md and summarize what this project does.", wait=True, model="default")
 append_context(f"\\n- Summary: {summary[:200]}")
-risks = delegate(f"Given this summary: {summary} — what are the main risks?", wait=True)
+risks = delegate("risk_analysis", f"Given this summary: {summary} — what are the main risks?", wait=True)
 done(risks)
 ```
 """

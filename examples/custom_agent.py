@@ -13,7 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import LLMClient
+from rlmkit.llm import OpenAIClient
 from rlmkit.prompts.default import IDENTITY_TEXT, RECURSION_TEXT, GUARDRAILS_TEXT
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
@@ -117,8 +117,8 @@ Output format for each file:
             )
         return new_state
 
-    def create_child(self, agent_id, task, *, max_iterations=None):
-        child = super().create_child(agent_id, task, max_iterations=max_iterations)
+    def create_child(self, agent_id, task, *, max_iterations=None, llm_client=None):
+        child = super().create_child(agent_id, task, max_iterations=max_iterations, llm_client=llm_client)
         child.config.max_iterations = min(child.config.max_iterations, 8)
         return child
 
@@ -247,28 +247,7 @@ def log_step(step: int, state: RLMState):
 # ── 5. Run it ───────────────────────────────────────────────────────
 
 def main():
-    try:
-        import anthropic
-
-        class Client(LLMClient):
-            def __init__(self):
-                self.client = anthropic.Anthropic()
-
-            def chat(self, messages):
-                system = ""
-                chat_msgs = []
-                for m in messages:
-                    if m["role"] == "system":
-                        system = m["content"]
-                    else:
-                        chat_msgs.append(m)
-                return self.client.messages.create(
-                    model="claude-sonnet-4-20250514", max_tokens=4096,
-                    system=system, messages=chat_msgs,
-                ).content[0].text
-
-    except ImportError:
-        raise RuntimeError("pip install anthropic")
+    llm = OpenAIClient()
 
     LOG_PATH.write_text("# custom_agent.py trace\n\n")
 
@@ -277,7 +256,7 @@ def main():
         runtime = LocalRuntime(workspace=workspace)
 
         agent = CodeReviewer(
-            llm_client=Client(),
+            llm_client=llm,
             runtime=runtime,
             config=RLMConfig(max_depth=3, max_iterations=15, context="context.md"),
             review_focus="bugs, missing error handling, and type safety",

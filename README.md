@@ -18,7 +18,7 @@ An RLM is analogous to a process in an operating system:
 |---------|-----------|-----------|
 | Execution | CPU runs instructions | LLM generates code, REPL executes it |
 | Memory | Address space | Context window (finite, non-renewable) |
-| Forking | `fork()` → child process | `delegate()` → child agent with fresh context |
+| Forking | `fork()` → child process | `delegate(name, task)` → named child agent with fresh context |
 | IPC | pipes, shared memory | `wait_all()` returns child results |
 | Scheduling | OS scheduler | `step_children()` runs children in parallel |
 | State | PCB (process control block) | `RLMState` (immutable, serializable) |
@@ -68,7 +68,7 @@ Each `step(state) → state` is a single atomic transition. The agent cycles thr
                     ┌─────────────────────────────────────────┐
                     │                                         │
                     ▼                                         │
-                WAITING ──── step_llm() ────→ HAS_REPLY      │
+                WAITING ──── step_llm() ────→ HAS_REPLY       │
                   ▲  ▲                           │            │
                   │  │                     step_exec()        │
                   │  │                      ╱        ╲        │
@@ -154,6 +154,7 @@ The agent engine. Public attributes:
 | `is_done` | `bool` | Whether `done()` has been called |
 | `waiting_on` | `list[str]` | Agent IDs this engine is waiting on |
 | `last_state` | `RLMState \| None` | The initial state from `start()` |
+| `llm_clients` | `dict[str, LLMClient]` | Named model registry (always includes `"default"`) |
 
 Subclass and override any method:
 
@@ -167,7 +168,7 @@ Subclass and override any method:
 | `build_system_prompt(state)` | Return the system prompt string |
 | `build_messages(state)` | Assemble the LLM message list |
 | `make_state(**fields)` | Construct initial state (override for custom state classes) |
-| `create_child(agent_id, task)` | Full control over child construction |
+| `create_child(agent_id, task, *, llm_client)` | Full control over child construction |
 | `on_child_stepped(aid, state, n, total)` | Callback after each child completes a step |
 
 ### `LLMClient`
@@ -263,9 +264,9 @@ class RemoteRLM(RLM):
         """Send child steps to a remote worker pool instead of local threads."""
         return dispatch_to_cluster(active)
 
-    def create_child(self, agent_id, task, *, max_iterations=None):
+    def create_child(self, agent_id, task, *, max_iterations=None, llm_client=None):
         """Give children a sandboxed runtime."""
-        child = super().create_child(agent_id, task, max_iterations=max_iterations)
+        child = super().create_child(agent_id, task, max_iterations=max_iterations, llm_client=llm_client)
         child.runtime = SandboxedRuntime(...)
         return child
 ```
@@ -318,7 +319,7 @@ while not state.finished:
             ])
 ```
 
-Works at any depth — you can reach into `agent.children["root.1"].children["root.1.3"]` and terminate a grandchild the same way. The next `step()` call will see it as finished and move on.
+Works at any depth — you can reach into `agent.children["root.search"].children["root.search.chunk_3"]` and terminate a grandchild the same way. The next `step()` call will see it as finished and move on.
 
 ## Examples
 
@@ -336,6 +337,7 @@ All examples save a full step-by-step trace to `examples/*_log.md`.
 rlmkit/
 ├── rlm.py          # RLM engine, RLMConfig, ExecThread
 ├── state.py         # RLMState, Status, StepEvent hierarchy, ChildHandle
+├── context.py       # Context ABC, FileContext
 ├── llm.py           # LLMClient ABC
 ├── utils.py         # @tool decorator, code block parsing
 ├── runtime/

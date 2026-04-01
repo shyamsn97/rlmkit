@@ -15,55 +15,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import LLMClient
+from rlmkit.llm import OpenAIClient
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.state import RLMState
-
-
-# ── LLM client ──────────────────────────────────────────────────────
-
-try:
-    from openai import OpenAI
-
-    class OpenAIClient(LLMClient):
-        def __init__(self, model: str = "gpt-4o"):
-            self.client = OpenAI()
-            self.model = model
-
-        def chat(self, messages: list[dict[str, str]]) -> str:
-            resp = self.client.chat.completions.create(
-                model=self.model, messages=messages,
-            )
-            return resp.choices[0].message.content or ""
-
-except ImportError:
-    OpenAIClient = None  # type: ignore[misc,assignment]
-
-try:
-    import anthropic
-
-    class AnthropicClient(LLMClient):
-        def __init__(self, model: str = "claude-sonnet-4-20250514"):
-            self.client = anthropic.Anthropic()
-            self.model = model
-
-        def chat(self, messages: list[dict[str, str]]) -> str:
-            system = ""
-            chat_msgs = []
-            for m in messages:
-                if m["role"] == "system":
-                    system = m["content"]
-                else:
-                    chat_msgs.append(m)
-            resp = self.client.messages.create(
-                model=self.model, max_tokens=4096,
-                system=system, messages=chat_msgs,
-            )
-            return resp.content[0].text
-
-except ImportError:
-    AnthropicClient = None  # type: ignore[misc,assignment]
 
 
 # ── Generate the haystack ───────────────────────────────────────────
@@ -242,12 +197,7 @@ def log_step(step: int, state: RLMState):
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
-    if OpenAIClient is not None:
-        llm = OpenAIClient()
-    elif AnthropicClient is not None:
-        llm = AnthropicClient()
-    else:
-        raise RuntimeError("pip install openai anthropic")
+    llm = OpenAIClient()
 
     LOG_PATH.write_text("# needle_haystack.py trace\n\n")
 
