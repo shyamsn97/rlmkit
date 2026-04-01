@@ -40,6 +40,10 @@ def get_tool_metadata(fn: Any) -> ToolMetadata | None:
     return getattr(target, "__rlmkit_tool__", None)
 
 
+class OrphanedDelegatesError(RuntimeError):
+    """Raised when delegate(wait=False) is called without a matching wait_all()."""
+
+
 def find_code_blocks(text: str) -> list[str]:
     """Find REPL code blocks wrapped in triple backticks."""
     pattern = r"```repl\s*\n(.*?)\n```"
