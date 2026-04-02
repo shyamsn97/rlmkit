@@ -41,7 +41,7 @@ def get_tool_metadata(fn: Any) -> ToolMetadata | None:
 
 
 class OrphanedDelegatesError(RuntimeError):
-    """Raised when delegate(wait=False) is called without a matching wait_all()."""
+    """Raised when delegate() is called without a matching yield wait()."""
 
 
 def find_code_blocks(text: str) -> list[str]:

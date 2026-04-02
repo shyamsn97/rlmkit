@@ -117,8 +117,8 @@ Output format for each file:
             )
         return new_state
 
-    def create_child(self, agent_id, task, *, max_iterations=None, llm_client=None):
-        child = super().create_child(agent_id, task, max_iterations=max_iterations, llm_client=llm_client)
+    def create_child(self, agent_id, *, max_iterations=None, llm_client=None):
+        child = super().create_child(agent_id, max_iterations=max_iterations, llm_client=llm_client)
         child.config.max_iterations = min(child.config.max_iterations, 8)
         return child
 

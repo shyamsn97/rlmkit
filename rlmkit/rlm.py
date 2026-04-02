@@ -1,11 +1,11 @@
-"""Core RLM engine — step-based execution with thread suspension."""
+"""Core RLM engine — step-based execution with generators."""
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, fields, replace
-from threading import Event, Thread
 
 from .context import Context, FileContext
 from .llm import LLMClient
@@ -19,49 +19,41 @@ from .state import (
     NoCodeBlock,
     RLMState,
     Status,
+    WaitRequest,
 )
 from .utils import OrphanedDelegatesError, find_code_blocks, tool
 
-# ── exec thread helper ───────────────────────────────────────────────
+
+# ── AST yield checker ────────────────────────────────────────────────
 
 
-class ExecThread:
-    """Runs code in a background thread with suspend/resume for delegation."""
+class _YieldChecker(ast.NodeVisitor):
+    """Detect bare wait() calls that are missing a yield prefix."""
 
     def __init__(self):
-        self._phase = Event()
-        self._resume = Event()
-        self.suspended = False
-        self.output = ""
+        self.errors: list[str] = []
 
-    def run(self, fn: Callable[[str], str], code: str) -> tuple[bool, str]:
-        """Execute code via fn. Returns (suspended, output)."""
-        self._phase = Event()
-        self._resume = Event()
-        self.suspended = False
-        self.output = ""
-        Thread(target=self._target, args=(fn, code), daemon=True).start()
-        self._phase.wait()
-        return self.suspended, self.output
+    def visit_Yield(self, node):  # noqa: N802
+        pass  # yield <expr> — don't descend into the call
 
-    def resume(self) -> str | None:
-        """Resume after children finish. Returns output or None if re-suspended."""
-        self._phase.clear()
-        self._resume.set()
-        self._phase.wait()
-        return None if self.suspended else self.output
+    def visit_Call(self, node):  # noqa: N802
+        name = node.func.id if isinstance(node.func, ast.Name) else None
+        if name == "wait":
+            self.errors.append(
+                f"Line {node.lineno}: `wait(...)` must be prefixed with `yield`"
+            )
+        self.generic_visit(node)
 
-    def suspend(self):
-        """Called from the exec thread to yield control back to the stepper."""
-        self.suspended = True
-        self._phase.set()
-        self._resume.wait()
-        self._resume.clear()
-        self.suspended = False
 
-    def _target(self, fn, code):
-        self.output = fn(code)
-        self._phase.set()
+def check_missing_yields(code: str) -> list[str]:
+    """Return a list of error strings for any wait() calls missing yield."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    checker = _YieldChecker()
+    checker.visit(tree)
+    return checker.errors
 
 
 # ── config ───────────────────────────────────────────────────────────
@@ -122,7 +114,6 @@ class RLM:
         self.waiting_on: list[str] = []
         self.is_done = False
         self.result: str | None = None
-        self._thread = ExecThread()
         self.last_state: RLMState | None = None
 
         # Auto-create FileContext from string path
@@ -138,7 +129,7 @@ class RLM:
         self.runtime.inject("MAX_DEPTH", str(self.config.max_depth))
         self.runtime.register_tool(self.done, core=True)
         self.runtime.register_tool(self.delegate, core=True)
-        self.runtime.register_tool(self.wait_all, core=True)
+        self.runtime.register_tool(self.wait, core=True)
         if self.context:
             self.runtime.register_tool(self.read_context, core=True)
             self.runtime.register_tool(self.append_context, core=True)
@@ -149,13 +140,12 @@ class RLM:
         """Build initial state. Override to inject custom fields."""
         return self.state_cls(**fields)
 
-    def start(self, task: str, *, reset_context: bool = True) -> RLMState:
-        """Reset engine, initialize context, return first state."""
+    def initialize_state(self, task: str, *, reset_context: bool = True) -> RLMState:
+        """Create initial state for a task, reset engine for a fresh run."""
         self.children.clear()
         self.waiting_on.clear()
         self.is_done = False
         self.result = None
-        self.runtime.inject("TASK", task)
         if self.context and reset_context:
             self.context.write(task if self.depth == 0 else "")
         config_dict = {
@@ -163,9 +153,10 @@ class RLM:
             for f in fields(self.config)
             if f.name != "context"
         }
-        config_dict.update(depth=self.depth, task=task)
+        config_dict.update(depth=self.depth)
         state = self.make_state(
             agent_id=self.agent_id,
+            task=task,
             status=Status.WAITING,
             config=config_dict,
             context=self.context.read() if self.context else None,
@@ -173,9 +164,13 @@ class RLM:
         self.last_state = state
         return state
 
+    def start(self, task: str, *, reset_context: bool = True) -> RLMState:
+        """Alias for initialize_state (backwards compat)."""
+        return self.initialize_state(task, reset_context=reset_context)
+
     def run(self, task: str, *, reset_context: bool = True) -> str:
         """Run to completion. Returns the result string."""
-        state = self.start(task, reset_context=reset_context)
+        state = self.initialize_state(task, reset_context=reset_context)
         while not state.finished:
             state = self.step(state)
         return state.result or ""
@@ -222,7 +217,6 @@ class RLM:
 
     def step_exec(self, state: RLMState) -> RLMState:
         """Execute the code block → WAITING / SUPERVISING / FINISHED."""
-        # Extract the ```repl``` block from the LLM's reply
         code = self.extract_code(state.last_reply or "")
         if not code:
             return state.update(
@@ -235,33 +229,49 @@ class RLM:
                 messages=state.messages + [self.no_code_block_message()],
             )
 
-        # Run the code — may suspend if it calls delegate()/wait_all()
-        suspended, output = self._thread.run(self.execute_code, code)
+        yield_errors = check_missing_yields(code)
+        if yield_errors:
+            err_msg = "ERROR: " + "; ".join(yield_errors)
+            return state.update(
+                status=Status.WAITING,
+                event=CodeExec(
+                    agent_id=state.agent_id,
+                    iteration=state.iteration,
+                    code=code,
+                    output=err_msg,
+                    suspended=False,
+                ),
+                messages=state.messages
+                + [self.execution_output_message(code, err_msg)],
+            )
 
-        # Detect newly created children
+        suspended, result = self.runtime.start_code(code)
+
         children = list(state.children)
         existing = {cs.agent_id for cs in children}
         new_child_ids = [cid for cid in self.children if cid not in existing]
 
-        # Orphan check: delegate() called but wait_all() never was
         if new_child_ids and not suspended:
             for cid in new_child_ids:
                 del self.children[cid]
             names = ", ".join(new_child_ids)
             msg = (
-                f"delegate() was called for [{names}] but wait_all() was never "
-                f"called. You must call wait_all(*handles) to collect results, "
-                f"or use delegate(name, task, wait=True) for synchronous execution."
+                f"delegate() was called for [{names}] but wait() was never "
+                f"called. You must use `yield wait(*handles)` to collect results."
             )
             err_output = self.execute_code(f"raise OrphanedDelegatesError({msg!r})")
+            output = result if isinstance(result, str) else ""
             output += "\n\n" + err_output if output.strip() else err_output
             new_child_ids = []
+            suspended = False
+        else:
+            output = "" if suspended else result
 
         if suspended:
+            self.waiting_on = result.agent_ids if isinstance(result, WaitRequest) else []
             for cid in new_child_ids:
                 children.append(self.children[cid].last_state)
 
-        # Determine next status based on what happened
         if self.is_done:
             new_status = Status.FINISHED
         elif suspended:
@@ -269,7 +279,6 @@ class RLM:
         else:
             new_status = Status.WAITING
 
-        # Feed the execution output back into message history
         exec_message = self.execution_output_message(code, output)
         new_messages = state.messages + [exec_message]
 
@@ -286,6 +295,7 @@ class RLM:
             result=self.result if self.is_done else None,
             context=self.context.read() if self.context else None,
             children=children,
+            waiting_on=self.waiting_on if suspended else [],
         )
 
     def execute_child_steps(
@@ -314,13 +324,11 @@ class RLM:
     def step_children(self, state: RLMState) -> RLMState:
         """Step all active children in parallel → check if wait is satisfied."""
 
-        # Run one step for every child that hasn't finished yet
         active = [
             (cs, self.children[cs.agent_id]) for cs in state.children if not cs.finished
         ]
         stepped = self.execute_child_steps(active) if active else {}
 
-        # Merge stepped children back into the full children list
         new_children, events = [], []
         for cs in state.children:
             if cs.finished:
@@ -331,25 +339,32 @@ class RLM:
                 if new_cs.event:
                     events.append(new_cs.event)
 
-        # Check if all children the parent is waiting on are done
         all_done = all(
             cs.agent_id not in self.waiting_on or cs.finished for cs in new_children
         )
 
         if all_done:
-            # Resume the parent's exec thread (it was suspended at wait_all)
-            output = self._thread.resume()
+            results = [
+                self.children[aid].result or "" for aid in self.waiting_on
+            ]
+            suspended, resume_result = self.runtime.resume_code(results)
 
             if self.is_done:
                 new_status = Status.FINISHED
-            elif output is None:
+            elif suspended:
+                self.waiting_on = (
+                    resume_result.agent_ids
+                    if isinstance(resume_result, WaitRequest)
+                    else []
+                )
                 new_status = Status.SUPERVISING
             else:
                 new_status = Status.WAITING
 
-            # If done() wasn't reached, feed the output back so the LLM can retry
+            output = "" if suspended else resume_result
+
             new_messages = list(state.messages)
-            if output is not None and not self.is_done:
+            if not suspended and not self.is_done and output:
                 new_messages.append(
                     {
                         "role": "user",
@@ -357,7 +372,6 @@ class RLM:
                     }
                 )
 
-            # Signal event-stream observers if done() was called in resumed exec
             return state.update(
                 status=new_status,
                 event=ChildStep(
@@ -365,15 +379,15 @@ class RLM:
                     iteration=state.iteration,
                     child_events=events,
                     all_done=True,
-                    exec_output=output,
+                    exec_output=output if not suspended else None,
                     agent_finished=self.is_done,
                 ),
                 messages=new_messages,
                 result=self.result if self.is_done else None,
                 children=new_children,
+                waiting_on=self.waiting_on if suspended else [],
             )
 
-        # Not all waited-on children are done yet — stay in SUPERVISING
         return state.update(
             event=ChildStep(
                 agent_id=state.agent_id,
@@ -390,8 +404,17 @@ class RLM:
         """Build the system prompt. Override to customize."""
         if self.config.system_prompt:
             return self.config.system_prompt
-        depth = state.config.get("depth", 0)
-        max_depth = state.config.get("max_depth", self.config.max_depth)
+        builder = make_default_builder()
+        builder.section(
+            "tools",
+            TOOLS_TEXT.format(tool_summary=self.build_tools_section(state)),
+            title="Tools",
+        )
+        builder.section("status", self.build_status_section(state), title="Status")
+        return builder.build()
+
+    def build_tools_section(self, state: RLMState) -> str:
+        """Build the tools summary for the system prompt. Override to customize."""
         tool_lines = "\n".join(
             f"- `{td.name}{td.signature}`: {td.description}"
             for td in self.runtime.get_tool_defs()
@@ -411,6 +434,12 @@ class RLM:
                 f"\n\nPre-imported modules (already available, no import needed): "
                 f"`{'`, `'.join(preimported)}`"
             )
+        return tool_lines
+
+    def build_status_section(self, state: RLMState) -> str:
+        """Build the status note for the system prompt. Override to customize."""
+        depth = state.config.get("depth", 0)
+        max_depth = state.config.get("max_depth", self.config.max_depth)
         depth_note = f"You are at recursion depth **{depth}** of max **{max_depth}**."
         if depth >= max_depth - 1:
             depth_note += (
@@ -418,19 +447,13 @@ class RLM:
             )
         elif depth > 0:
             depth_note += " Be more conservative with delegation the deeper you are."
-        builder = make_default_builder()
-        builder.section(
-            "tools", TOOLS_TEXT.format(tool_summary=tool_lines), title="Tools"
-        )
-        builder.section("status", depth_note, title="Status")
-        return builder.build()
+        return depth_note
 
     def build_messages(self, state: RLMState, *, system_prompt: str) -> list[dict]:
         """Assemble the message list for an LLM call. Override to customize."""
         system = {"role": "system", "content": system_prompt}
         if not state.messages:
-            task = state.config.get("task", "")
-            return [system, self.next_action_message(task, iteration=0)]
+            return [system, self.next_action_message(state.task, iteration=0)]
 
         msgs = list(state.messages)
         cap = self.config.max_messages
@@ -442,11 +465,10 @@ class RLM:
         self, state: RLMState, msgs: list[dict], cap: int
     ) -> list[dict]:
         """Build a condensed message list when history exceeds max_messages."""
-        task = state.config.get("task", "")
         context = self.context.read() if self.context else ""
         recent = msgs[-cap:]
 
-        parts = [f"## Task\n{task}"]
+        parts = [f"## Task\n{state.task}"]
         if context:
             parts.append(f"## Context\n{context}")
         parts.append(
@@ -532,20 +554,18 @@ class RLM:
         "Delegate a subtask to a named child agent.\nArgs:\n"
         "- name (str): Short identifier for the child (e.g. 'search_batch_0').\n"
         "- task (str): The subtask description.\n"
-        "- wait (bool): Block until done.\n"
         "- max_iterations (int | None): Iteration cap.\n"
         "- model (str): Which model to use. Defaults to 'default'.\n"
-        "Returns:\n- ChildHandle | str: Handle (async) or result (sync)."
+        "Returns:\n- ChildHandle: Use `yield wait(handle)` to collect the result."
     )
     def delegate(
         self,
         name: str,
         task: str,
         *,
-        wait: bool = False,
         max_iterations: int | None = None,
         model: str = "default",
-    ) -> str | ChildHandle:
+    ) -> ChildHandle:
         if self.depth >= self.config.max_depth:
             return f"[refused: max depth {self.config.max_depth}] Do this directly."
         if model not in self.llm_clients:
@@ -554,16 +574,11 @@ class RLM:
         agent_id = self._resolve_child_id(name)
         client = self.llm_clients[model]
         child = self.create_child(
-            agent_id, task, max_iterations=max_iterations, llm_client=client
+            agent_id, max_iterations=max_iterations, llm_client=client
         )
         self.children[agent_id] = child
         child.last_state = child.start(task)
-        handle = ChildHandle(agent_id)
-        if wait:
-            self.waiting_on = [agent_id]
-            self._thread.suspend()
-            return child.result or ""
-        return handle
+        return ChildHandle(agent_id)
 
     def _packed_llm_clients(self) -> dict[str, dict]:
         """Re-pack llm_clients with descriptions for propagation to children."""
@@ -586,12 +601,12 @@ class RLM:
         return f"{base}_{n}"
 
     @tool(
-        "Wait for delegated children.\nArgs:\n- *handles: Handles from delegate().\nReturns:\n- list[str]: Results in order."
+        "Wait for delegated children. Must be called with `yield`.\n"
+        "Args:\n- *handles: Handles from delegate().\n"
+        "Returns:\n- list[str]: Results in order (via yield)."
     )
-    def wait_all(self, *handles: ChildHandle) -> list[str]:
-        self.waiting_on = [h.agent_id for h in handles]
-        self._thread.suspend()
-        return [self.children[h.agent_id].result or "" for h in handles]
+    def wait(self, *handles: ChildHandle) -> WaitRequest:
+        return WaitRequest(agent_ids=[h.agent_id for h in handles])
 
     # ── context tools ──────────────────────────────────────────────
 
@@ -615,7 +630,6 @@ class RLM:
     def create_child(
         self,
         agent_id: str,
-        task: str,
         *,
         max_iterations: int | None = None,
         llm_client: LLMClient | None = None,
