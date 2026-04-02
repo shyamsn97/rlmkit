@@ -41,7 +41,7 @@ If `read_context` is available, use it to check prior progress before starting. 
 **Core pattern: size up -> delegate -> combine**
 
 1. **Size up** — Orient yourself. Figure out the shape of the problem (file sizes, line counts, number of items). Read only metadata, not the full data.
-2. **Delegate** — Split the work and `delegate(name, task, wait=False)` in parallel. Give each child a short descriptive name. This is your default action. Even if you *could* solve it with a single tool call, delegation is preferred — it's faster, more robust, and demonstrates the recursive pattern.
+2. **Delegate** — Split the work with `delegate(name, task)` and collect results with `yield wait(*handles)`. Give each child a short descriptive name. This is your default action. Even if you *could* solve it with a single tool call, delegation is preferred — it's faster, more robust, and demonstrates the recursive pattern.
 3. **Combine** — Aggregate sub-agent results and produce the final output via `done(answer)`.
 
 **When to do it directly (no delegation):**
@@ -52,8 +52,7 @@ If `read_context` is available, use it to check prior progress before starting. 
 - Sub-agents share your workspace and tools. Tell them *which file* and *which line range* to look in — **never embed raw file content** in the task.
 - Tell children to return **only raw data or empty string**. Example: `"Return ONLY the matching line. If nothing found, call done with empty string."`
 - To aggregate: `hits = [r for r in results if r.strip()]`. **Never use** `if 'pattern' in result` — children may echo the pattern in "not found" messages, causing false positives.
-
-Prefer `wait=False` + `wait_all()` over synchronous loops.
+- **Always** use `yield` before `wait()`. Writing `wait(...)` without `yield` is an error.
 """
 
 
@@ -81,10 +80,10 @@ files = list(set(line.split(":")[0] for line in targets.splitlines()))
 print(f"Found {len(files)} files to update")
 
 handles = [
-    delegate(f"refactor_{i}", f"In {f}, replace old_api() with new_api(). Update imports.", wait=False)
+    delegate(f"refactor_{i}", f"In {f}, replace old_api() with new_api(). Update imports.")
     for i, f in enumerate(files)
 ]
-results = wait_all(*handles)
+results = yield wait(*handles)
 hits = [r for r in results if r.strip()]
 append_context(f"\\n- Refactored {len(hits)}/{len(files)} files")
 done(f"Updated {len(hits)} files")
@@ -106,10 +105,9 @@ for start in range(0, total, chunk_size):
         f"search_{start}",
         f"Search {FILENAME} lines {start}-{end} for <PATTERN>. "
         f"Return ONLY matching lines, or call done with empty string if none.",
-        wait=False,
     )
     handles.append(h)
-results = wait_all(*handles)
+results = yield wait(*handles)
 hits = [r for r in results if r.strip()]
 append_context(f"\\n- Searched {FILENAME}: {len(hits)} hits")
 done("\\n".join(hits) if hits else "No matches found.")
@@ -129,10 +127,9 @@ for start in range(0, total, chunk):
         f"todos_{start}",
         f"Extract any TODO items from {FILENAME} lines {start}-{end}. "
         f"Return a numbered list, or call done with empty string if none found.",
-        wait=False,
     )
     handles.append(h)
-results = wait_all(*handles)
+results = yield wait(*handles)
 todos = [r for r in results if r.strip()]
 append_context(f"\\n- Extracted TODOs from {FILENAME}: {len(todos)} chunks had hits")
 done("\\n".join(todos) if todos else "No TODOs found.")
@@ -143,9 +140,11 @@ done("\\n".join(todos) if todos else "No TODOs found.")
 ctx = read_context()
 print(ctx[:500] if ctx else "No context yet")
 
-summary = delegate("summarize", "Read README.md and summarize what this project does.", wait=True, model="default")
+h = delegate("summarize", "Read README.md and summarize what this project does.", model="default")
+[summary] = yield wait(h)
 append_context(f"\\n- Summary: {summary[:200]}")
-risks = delegate("risk_analysis", f"Given this summary: {summary} — what are the main risks?", wait=True)
+h2 = delegate("risk_analysis", f"Given this summary: {summary} — what are the main risks?")
+[risks] = yield wait(h2)
 done(risks)
 ```
 """
@@ -162,7 +161,7 @@ Available tools:
 
 GUARDRAILS_TEXT = """
 - **Child result format:** Tell children to return ONLY the raw data (matching lines, extracted values, etc.) or empty string if nothing found. **Never ask children to return conversational messages** like "Found X" or "X not found" — these are hard to parse reliably.
-- **Aggregating results:** After `wait_all`, filter by `if r.strip()` (non-empty = found something). **NEVER use substring matching** like `if 'pattern' in result` — children may quote the search pattern in "not found" messages, creating false positives.
+- **Aggregating results:** After `yield wait(...)`, filter by `if r.strip()` (non-empty = found something). **NEVER use substring matching** like `if 'pattern' in result` — children may quote the search pattern in "not found" messages, creating false positives.
 - **`done(message)` is required and must be informative.** The `message` argument is how your result is communicated. Always pass a meaningful answer — the raw data you found, the value you computed, or a clear summary.
 - **When YOU are a child:** Return ONLY the raw matching data via `done(data)`. If nothing found, `done("")`. Do NOT include the search pattern or conversational text in your result.
 - **Empty tool output = no results.** If `grep` or `search_lines` returns an empty string, it means no matches. Check with `if result:`.

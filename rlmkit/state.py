@@ -52,7 +52,7 @@ class NoCodeBlock(StepEvent):
 
 
 class ChildHandle:
-    """Opaque reference returned by delegate(), passed to wait_all()."""
+    """Opaque reference returned by delegate(), passed to wait()."""
 
     def __init__(self, agent_id: str) -> None:
         self.agent_id = agent_id
@@ -61,14 +61,25 @@ class ChildHandle:
         return f"ChildHandle({self.agent_id!r})"
 
 
+class WaitRequest:
+    """Yielded by wait() to request suspension until children finish."""
+
+    def __init__(self, agent_ids: list[str]) -> None:
+        self.agent_ids = agent_ids
+
+    def __repr__(self) -> str:
+        return f"WaitRequest({self.agent_ids!r})"
+
+
 # ── RLMState ─────────────────────────────────────────────────────────
 
 
 class RLMState(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    agent_id: str
-    status: Status
+    agent_id: str = ""
+    task: str = ""
+    status: Status = Status.WAITING
     iteration: int = 0
     config: dict = {}
 
@@ -79,6 +90,7 @@ class RLMState(BaseModel):
     context: str | None = None
 
     children: list[RLMState] = []
+    waiting_on: list[str] = []
 
     @property
     def finished(self) -> bool:

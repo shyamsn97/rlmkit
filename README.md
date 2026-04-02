@@ -19,7 +19,7 @@ An RLM is analogous to a process in an operating system:
 | Execution | CPU runs instructions | LLM generates code, REPL executes it |
 | Memory | Address space | Context window (finite, non-renewable) |
 | Forking | `fork()` → child process | `delegate(name, task)` → named child agent with fresh context |
-| IPC | pipes, shared memory | `wait_all()` returns child results |
+| IPC | pipes, shared memory | `yield wait()` returns child results |
 | Scheduling | OS scheduler | `step_children()` runs children in parallel |
 | State | PCB (process control block) | `RLMState` (immutable, serializable) |
 
@@ -85,7 +85,61 @@ Each `step(state) → state` is a single atomic transition. The agent cycles thr
 - `SUPERVISING` — exec suspended mid-block, waiting on child agents (like a parent waiting on `waitpid`)
 - `FINISHED` — `done()` was called, result available
 
-**Key mechanism:** when REPL code calls `delegate()` + `wait_all()`, the exec thread **suspends mid-block**. The stepper takes over, advancing all children in parallel via `step_children()`. Once children finish, exec resumes exactly where it left off — same stack, same locals, same line.
+**Key mechanism:** when REPL code calls `delegate()` + `yield wait()`, the code generator **suspends at the yield point**. The stepper takes over, advancing all children in parallel via `step_children()`. Once children finish, exec resumes exactly where it left off — same locals, same line. No threads, no locks — just Python generators.
+
+## Architecture
+
+The engine is a stateless stepper. The state is the single source of truth.
+
+```
+┌───────────────────────────────────────────────────────┐
+│                       RLMState                        │
+│           (immutable, serializable, recursive)        │
+│                                                       │
+│  task, status, messages, events, result, waiting_on,  │
+│  context, config                                      │
+│                                                       │
+│  children: [RLMState, RLMState, ...]                  │
+│             └── full recursive state tree             │
+└───────────────────────────┬───────────────────────────┘
+                            │
+                  step(state) → new_state
+                            │
+┌───────────────────────────┴───────────────────────────┐
+│                      RLM Engine                       │
+│                  (stateless stepper)                   │
+│                                                       │
+│  immutable infra: llm_client, runtime, config         │
+│  ephemeral working memory: is_done, result            │
+│    (set during a step, flushed to state, gone)        │
+│                                                       │
+│           new_state = f(state, infra)                 │
+└───────────────────────────────────────────────────────┘
+```
+
+Between steps, the engine holds no meaningful computation state — everything is in `RLMState`. This means you can serialize, fork, rewind, or hand off a state to a completely different engine:
+
+```python
+# ── serialize at any step boundary ────────────────────
+snapshot = state.model_dump_json()
+state = RLMState.model_validate_json(snapshot)
+
+# ── fork the computation ──────────────────────────────
+branch_a = state.update(task="fix with approach A", status=Status.WAITING)
+branch_b = state.update(task="fix with approach B", status=Status.WAITING)
+
+# ── rewind to a checkpoint ────────────────────────────
+history = []
+while not state.finished:
+    history.append(state)
+    state = engine.step(state)
+state = engine.step(history[3])  # back to step 3
+
+# ── hand off to a different engine ────────────────────
+engine2 = RLM(llm_client=other_llm, runtime=other_runtime)
+while not state.finished:
+    state = engine2.step(state)
+```
 
 ## `RLMState`
 
@@ -93,11 +147,13 @@ The state is a frozen, immutable, recursive Pydantic model. It captures the enti
 
 ```python
 state.agent_id    # "root", "root.1", "root.1.2", ...
+state.task        # the task string this agent is working on
 state.status      # WAITING | HAS_REPLY | SUPERVISING | FINISHED
 state.iteration   # current iteration count
 state.event       # last StepEvent — what just happened
 state.messages    # full LLM message history
 state.result      # final result string (when finished)
+state.waiting_on  # agent IDs currently waiting on (during SUPERVISING)
 state.children    # list[RLMState] — the full recursive tree
 state.config      # dict of config + runtime info
 state.context     # context file contents (if configured)
@@ -141,14 +197,13 @@ RLMConfig(
 
 ### `RLM`
 
-The agent engine. Public attributes:
+The agent engine. Mostly stateless — ephemeral working memory is flushed to `RLMState` at each step boundary.
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `children` | `dict[str, RLM]` | Child engines, keyed by agent ID |
-| `result` | `str \| None` | What `done()` was called with |
-| `is_done` | `bool` | Whether `done()` has been called |
-| `waiting_on` | `list[str]` | Agent IDs this engine is waiting on |
+| `children` | `dict[str, RLM]` | Child engine instances (infrastructure, not state) |
+| `result` | `str \| None` | Ephemeral — set by `done()` during a step, flushed to state |
+| `is_done` | `bool` | Ephemeral — set by `done()` during a step, flushed to state |
 | `last_state` | `RLMState \| None` | The initial state from `start()` |
 | `llm_clients` | `dict[str, LLMClient]` | Named model registry (always includes `"default"`) |
 
@@ -164,7 +219,7 @@ Subclass and override any method:
 | `build_system_prompt(state)` | Return the system prompt string |
 | `build_messages(state)` | Assemble the LLM message list |
 | `make_state(**fields)` | Construct initial state (override for custom state classes) |
-| `create_child(agent_id, task, *, llm_client)` | Full control over child construction |
+| `create_child(agent_id, *, max_iterations, llm_client)` | Full control over child construction |
 | `on_child_stepped(aid, state, n, total)` | Callback after each child completes a step |
 
 ### `LLMClient`
@@ -197,8 +252,12 @@ The execution environment — analogous to a process's address space:
 class Runtime(ABC):
     def execute(self, code: str, timeout=None) -> str: ...
     def inject(self, name: str, value: Any) -> None: ...
-    def clone(self) -> Runtime: ...  # fresh namespace, same tools
+    def clone(self) -> Runtime: ...       # fresh namespace, same tools
+    def start_code(self, code) -> tuple[bool, object]: ...   # generator execution
+    def resume_code(self, send_value=None) -> tuple[bool, object]: ...
 ```
+
+`start_code`/`resume_code` drive the generator-based execution that enables `yield wait()` suspension. `LocalRuntime` implements these in-process; remote runtimes can override them to communicate with a sandbox container via `rlmkit.sandbox` (a shipped JSON-over-stdio driver).
 
 `LocalRuntime` runs code via `exec()` with a persistent namespace. Builtin tools: `read_file`, `write_file`, `edit_file`, `append_file`, `ls`, `grep`. Common modules (`re`, `os`, `json`, `math`, etc.) are pre-imported.
 
@@ -323,9 +382,9 @@ class RemoteRLM(RLM):
         """Send child steps to a remote worker pool instead of local threads."""
         return dispatch_to_cluster(active)
 
-    def create_child(self, agent_id, task, *, max_iterations=None, llm_client=None):
+    def create_child(self, agent_id, *, max_iterations=None, llm_client=None):
         """Give children a sandboxed runtime."""
-        child = super().create_child(agent_id, task, max_iterations=max_iterations, llm_client=llm_client)
+        child = super().create_child(agent_id, max_iterations=max_iterations, llm_client=llm_client)
         child.runtime = SandboxedRuntime(...)
         return child
 ```
@@ -341,7 +400,7 @@ state = agent.start("Find the magic number in haystack.txt")
 while not state.finished:
     state = agent.step(state)
 
-# Engine tree (mutable — who did what)
+# Engine tree (infrastructure — child engines)
 for cid, child in agent.children.items():
     print(f"{cid}: result={child.result}, is_done={child.is_done}")
     for gcid, grandchild in child.children.items():
@@ -352,7 +411,7 @@ for cs in state.children:
     print(f"{cs.agent_id}: {cs.result}, {len(cs.messages)} messages")
 ```
 
-The engine tree and state tree are parallel structures. The engine holds mutable resources (LLM client, runtime, threads). The state holds the immutable computation record (messages, events, results). Both are recursive.
+The engine tree and state tree are parallel structures. The engine holds infrastructure (LLM client, runtime). The state holds the immutable computation record (messages, events, results). Both are recursive. Between steps, the state is the single source of truth — the engine's working memory is ephemeral.
 
 ### Mid-run intervention
 
@@ -394,14 +453,15 @@ All examples save a full step-by-step trace to `examples/*_log.md`.
 
 ```
 rlmkit/
-├── rlm.py          # RLM engine, RLMConfig, ExecThread
-├── state.py         # RLMState, Status, StepEvent hierarchy, ChildHandle
+├── rlm.py          # RLM engine, RLMConfig, step logic
+├── state.py         # RLMState, Status, StepEvent hierarchy, ChildHandle, WaitRequest
 ├── context.py       # Context ABC, FileContext
 ├── llm.py           # LLMClient ABC, OpenAIClient, AnthropicClient
 ├── utils.py         # @tool decorator, code block parsing
+├── sandbox.py       # In-container driver for remote sandboxes (JSON-over-stdio)
 ├── runtime/
-│   ├── runtime.py   # Runtime ABC, ToolDef, builtins
-│   └── local.py     # LocalRuntime (exec-based)
+│   ├── runtime.py   # Runtime ABC, ToolDef, builtins, start_code/resume_code
+│   └── local.py     # LocalRuntime (exec + generator-based execution)
 └── prompts/
     ├── builder.py   # PromptBuilder, Section
     └── default.py   # Default prompt sections

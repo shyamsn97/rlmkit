@@ -19,8 +19,8 @@ from rlmkit.state import ChildStep, CodeExec, LLMReply, RLMState, Status
 # variables to decide whether to delegate or finish directly.
 UNIVERSAL_REPLY = '''```repl
 if int(DEPTH) < int(MAX_DEPTH):
-    h = delegate("child", "go deeper", wait=False)
-    results = wait_all(h)
+    h = delegate("child", "go deeper")
+    results = yield wait(h)
     done("from-" + AGENT_ID + ":" + results[0])
 else:
     done("leaf-" + AGENT_ID)
@@ -213,10 +213,10 @@ def test_max_depth_zero():
 def test_named_delegate_collision():
     """Duplicate names get auto-suffixed: child, child_2, child_3."""
     reply = '''```repl
-h1 = delegate("worker", "task A", wait=False)
-h2 = delegate("worker", "task B", wait=False)
-h3 = delegate("worker", "task C", wait=False)
-results = wait_all(h1, h2, h3)
+h1 = delegate("worker", "task A")
+h2 = delegate("worker", "task B")
+h3 = delegate("worker", "task C")
+results = yield wait(h1, h2, h3)
 done(" ".join(results))
 ```'''
 
@@ -245,8 +245,9 @@ done(" ".join(results))
 def test_llm_client_routing():
     """delegate(model='fast') should use the corresponding client."""
     reply = '''```repl
-h = delegate("sub", "do it", wait=True, model="fast")
-done(h)
+h = delegate("sub", "do it", model="fast")
+[result] = yield wait(h)
+done(result)
 ```'''
 
     class TaggedLLM(LLMClient):
@@ -292,10 +293,9 @@ done(h)
 
 
 def test_orphaned_delegates_error():
-    """delegate() without wait_all() should surface an error, not silently orphan."""
-    # First reply: delegates but never waits. Second reply: fixes it.
+    """delegate() without wait() should surface an error, not silently orphan."""
     orphan_reply = '''```repl
-h = delegate("worker", "do stuff", wait=False)
+h = delegate("worker", "do stuff")
 print("forgot to wait")
 ```'''
     fix_reply = '''```repl
@@ -324,7 +324,7 @@ done("fixed")
         exec_events = [s for s in steps if isinstance(s.event, CodeExec)]
         orphan_output = exec_events[0].event.output
         assert "OrphanedDelegatesError" in orphan_output
-        assert "wait_all" in orphan_output
+        assert "wait" in orphan_output
         # The orphaned child should have been cleaned up
         assert len(final.children) == 0
         print(f"  error surfaced: {orphan_output.splitlines()[-1][:80]}")

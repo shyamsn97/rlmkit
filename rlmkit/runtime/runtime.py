@@ -69,6 +69,23 @@ class Runtime(ABC):
     def inject(self, name: str, value: Any) -> None:
         """Inject a named value into the runtime namespace."""
 
+    # ── generator-based execution (override for remote runtimes) ────
+
+    def start_code(self, code: str) -> tuple[bool, object]:
+        """Execute a code block that may suspend at yield points.
+
+        Returns ``(True, WaitRequest)`` if the code yielded, or
+        ``(False, stdout_str)`` when it ran to completion.
+        """
+        raise NotImplementedError
+
+    def resume_code(self, send_value=None) -> tuple[bool, object]:
+        """Resume a suspended code block with child results.
+
+        Same return convention as :meth:`start_code`.
+        """
+        raise NotImplementedError
+
     # ── clone ─────────────────────────────────────────────────────────
 
     def clone(self) -> Runtime:
