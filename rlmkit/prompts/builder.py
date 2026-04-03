@@ -1,168 +1,132 @@
-"""Tiny markdown prompt builder built around sections and ordering.
+"""Prompt builder: ordered list of named sections with fluent API.
 
-Override points for subclasses:
-- `Section.render()` — change how a single section becomes text
-- `PromptBuilder.render_section()` — change how any section value is rendered
-- `PromptBuilder.normalize()` — change final whitespace cleanup
-- `PromptBuilder.build()` — change the full assembly pipeline
+Sections are rendered top-to-bottom. Empty sections are skipped.
+Dynamic content is passed as keyword overrides to ``build()``.
+
+Usage::
+
+    builder = (
+        PromptBuilder()
+        .section("role", "You are a helpful agent.", title="Role")
+        .section("tools", title="Tools")  # placeholder
+    )
+
+    prompt = builder.build(tools="- read_file(path): Read a file.")
 """
 
 from __future__ import annotations
 
 import re
-import textwrap
-from collections.abc import Callable, Mapping
-from typing import Any, Optional
-
-SectionBody = Optional[str]
-SectionBodyConstructFn = Callable[[Mapping[str, Any]], Optional[str]]
-
-
-def markdown_heading(title: str, level: int = 2) -> str:
-    return "#" * max(level, 1) + " " + title
-
-
-def markdown_section(title: str, body: str, level: int = 2) -> str:
-    body = body.strip()
-    heading = markdown_heading(title, level)
-    if not body:
-        return heading
-    return heading + "\n\n" + body
 
 
 class Section:
-    """One named section of a prompt.
+    """One named section of a prompt."""
 
-    Subclass and override `render()` to change how a section produces text.
-    """
+    __slots__ = ("name", "body", "title", "level")
 
     def __init__(
         self,
         name: str,
-        body: SectionBody = None,
+        body: str = "",
         *,
-        body_construct_fn: SectionBodyConstructFn | None = None,
-        title: Optional[str] = None,
+        title: str | None = None,
         level: int = 2,
     ) -> None:
-        if body is not None and body_construct_fn is not None:
-            raise ValueError("Provide either `body` or `body_construct_fn`, not both.")
         self.name = name
         self.body = body
-        self.body_construct_fn = body_construct_fn
         self.title = title
         self.level = level
 
-    def render(self, context: Mapping[str, Any]) -> str:
-        value = self.resolve_body(context)
-        if not self.title:
-            return value
-        return markdown_section(self.title, value, level=self.level)
-
-    def resolve_body(self, context: Mapping[str, Any]) -> str:
-        if self.body_construct_fn is not None:
-            return (self.body_construct_fn(context) or "").strip()
-        return (self.body or "").strip()
+    def render(self, body_override: str | None = None) -> str:
+        text = (body_override if body_override is not None else self.body).strip()
+        if not text:
+            return ""
+        if self.title:
+            heading = "#" * max(self.level, 1) + " " + self.title
+            return heading + "\n\n" + text
+        return text
 
 
 class PromptBuilder:
-    """Build markdown from ordered placeholders like `{role}`.
+    """Ordered list of sections with a fluent API.
 
-    Subclass and override:
-    - `render_section()` to change how individual sections render
-    - `normalize()` to change whitespace cleanup
-    - `build()` to change the full pipeline
+    Sections are stored in insertion order. ``build()`` renders them
+    top-to-bottom, skipping any that produce empty output. Pass keyword
+    arguments to ``build()`` to override section bodies for that single
+    render without mutating the builder.
     """
 
-    def __init__(
-        self,
-        order: str = "",
-        sections: (
-            Mapping[str, Section | SectionBody | SectionBodyConstructFn] | None
-        ) = None,
-    ) -> None:
-        self._order = textwrap.dedent(order).strip()
-        self._sections: dict[str, Section | SectionBody | SectionBodyConstructFn] = (
-            dict(sections or {})
-        )
-
-    @property
-    def order(self) -> str:
-        return self._order
-
-    @property
-    def sections(self) -> dict[str, Section | SectionBody | SectionBodyConstructFn]:
-        return dict(self._sections)
-
-    def set_order(self, order: str) -> PromptBuilder:
-        self._order = textwrap.dedent(order).strip()
-        return self
+    def __init__(self) -> None:
+        self._sections: list[Section] = []
 
     def section(
         self,
         name: str,
-        body: SectionBody = None,
+        body: str = "",
         *,
-        body_construct_fn: SectionBodyConstructFn | None = None,
-        title: Optional[str] = None,
+        title: str | None = None,
         level: int = 2,
+        before: str | None = None,
+        after: str | None = None,
     ) -> PromptBuilder:
-        self._sections[name] = Section(
-            name,
-            body,
-            body_construct_fn=body_construct_fn,
-            title=title,
-            level=level,
-        )
+        """Add or replace a named section.
+
+        If a section with *name* already exists, it is replaced in-place
+        (preserving its position).  Otherwise it is appended, or inserted
+        relative to *before* / *after* if given.
+        """
+        new = Section(name, body, title=title, level=level)
+
+        for i, s in enumerate(self._sections):
+            if s.name == name:
+                self._sections[i] = new
+                return self
+
+        if before:
+            for i, s in enumerate(self._sections):
+                if s.name == before:
+                    self._sections.insert(i, new)
+                    return self
+        if after:
+            for i, s in enumerate(self._sections):
+                if s.name == after:
+                    self._sections.insert(i + 1, new)
+                    return self
+
+        self._sections.append(new)
         return self
 
-    def update(
-        self,
-        sections: Mapping[str, Section | SectionBody | SectionBodyConstructFn],
-    ) -> PromptBuilder:
-        self._sections.update(sections)
+    def remove(self, name: str) -> PromptBuilder:
+        """Remove a section by name. No-op if not found."""
+        self._sections = [s for s in self._sections if s.name != name]
         return self
 
-    def build(self, context: Mapping[str, Any] | None = None) -> str:
-        ctx = context or {}
-        rendered = {
-            name: self.render_section(name, value, ctx)
-            for name, value in self._sections.items()
-        }
-        text = self._render_order(rendered)
-        return self.normalize(text)
+    @property
+    def names(self) -> list[str]:
+        """Section names in current order."""
+        return [s.name for s in self._sections]
 
-    def render_section(
-        self,
-        name: str,
-        value: Section | SectionBody | SectionBodyConstructFn,
-        context: Mapping[str, Any],
-    ) -> str:
-        if isinstance(value, Section):
-            return value.render(context)
-        if callable(value):
-            return (value(context) or "").strip()
-        return (value or "").strip()
+    def get(self, name: str) -> Section | None:
+        for s in self._sections:
+            if s.name == name:
+                return s
+        return None
 
-    def normalize(self, text: str) -> str:
-        text = text.strip()
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        if text:
-            return text + "\n"
-        return ""
+    def build(self, **overrides: str) -> str:
+        """Render all sections in order, skip empties.
 
-    def _render_order(self, rendered: Mapping[str, str]) -> str:
-        def _replace(match: re.Match[str]) -> str:
-            return rendered.get(match.group(1), "").strip()
-
-        return re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", _replace, self._order)
+        Keyword arguments override section bodies for this call only —
+        the builder itself is not mutated.
+        """
+        parts = []
+        for s in self._sections:
+            override = overrides.get(s.name)
+            rendered = s.render(override)
+            if rendered.strip():
+                parts.append(rendered)
+        text = "\n\n".join(parts)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return text + "\n" if text else ""
 
 
-__all__ = [
-    "PromptBuilder",
-    "Section",
-    "SectionBody",
-    "SectionBodyConstructFn",
-    "markdown_heading",
-    "markdown_section",
-]
+__all__ = ["PromptBuilder", "Section"]

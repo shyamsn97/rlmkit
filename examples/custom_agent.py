@@ -14,7 +14,8 @@ import tempfile
 from pathlib import Path
 
 from rlmkit.llm import OpenAIClient
-from rlmkit.prompts.default import IDENTITY_TEXT, RECURSION_TEXT, GUARDRAILS_TEXT
+from rlmkit.prompts import make_default_builder
+from rlmkit.prompts.default import ROLE_TEXT
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.state import CodeExec, RLMState
@@ -59,33 +60,7 @@ class CodeReviewer(RLM):
         self.runtime.register_tool(file_stats)
         self.runtime.register_tool(now)
 
-    def make_state(self, **fields) -> ReviewState:
-        return ReviewState(**fields, findings=[])
-
-    def build_system_prompt(self, state: RLMState) -> str:
-        tools = self._tool_summary()
-        depth = state.config.get("depth", 0)
-        max_depth = state.config.get("max_depth", self.config.max_depth)
-        depth_note = f"Depth: {depth}/{max_depth}."
-        if depth >= max_depth - 1:
-            depth_note += " Near limit — do not delegate."
-
-        return f"""\
-## Identity
-
-You are a recursive code reviewer. You analyze codebases by breaking
-them into pieces, reviewing each piece, and combining findings.
-
-Focus on: {self.review_focus}
-
-{IDENTITY_TEXT}
-
-## Recursion
-
-{RECURSION_TEXT}
-
-## Review Process
-
+        REVIEW_PROCESS = """\
 For small files (< 100 lines), review directly and report findings.
 For large files or directories with many files, delegate per-file
 reviews to sub-agents and combine their results into a summary.
@@ -93,20 +68,23 @@ reviews to sub-agents and combine their results into a summary.
 Output format for each file:
 - **File**: path
 - **Issues**: numbered list of findings
-- **Severity**: info / warning / error for each
+- **Severity**: info / warning / error for each"""
 
-## Guardrails
+        self.prompt_builder = (
+            make_default_builder()
+            .section(
+                "role",
+                f"You are a recursive code reviewer. You analyze codebases by "
+                f"breaking them into pieces, reviewing each piece, and combining "
+                f"findings.\n\nFocus on: {self.review_focus}\n\n{ROLE_TEXT}",
+                title="Role",
+            )
+            .section("review_process", REVIEW_PROCESS, title="Review Process", after="recursion")
+            .remove("examples")
+        )
 
-{GUARDRAILS_TEXT}
-
-## Current State
-
-{depth_note}
-
-## Tools
-
-{tools}
-"""
+    def make_state(self, **fields) -> ReviewState:
+        return ReviewState(**fields, findings=[])
 
     def step_exec(self, state: ReviewState) -> ReviewState:
         """After each exec, extract any findings from the output."""

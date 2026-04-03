@@ -141,6 +141,56 @@ while not state.finished:
     state = engine2.step(state)
 ```
 
+### The Gym Analogy
+
+The step API is structurally identical to OpenAI Gym's `reset → step → done` loop:
+
+```python
+# Gym                                    # rlmkit
+env = gym.make("CartPole-v1")            agent = RLM(llm_client=..., runtime=...)
+state, info = env.reset()                state = agent.start("Find the bug")
+while not done:                          while not state.finished:
+    action = policy(state)                   state = agent.step(state)
+    state, reward, done, _, info = \
+        env.step(action)
+```
+
+| Gym | rlmkit | |
+|-----|--------|-|
+| `env.reset()` | `agent.start(task)` | Returns initial state |
+| `env.step(action)` | `agent.step(state)` | Returns next state |
+| `state` | `RLMState` | Full observable snapshot |
+| `done` | `state.finished` | Terminal flag |
+| `reward` / `info` | `state.result` / `state.event` | Outcome + metadata |
+
+In vanilla rlmkit, the LLM **is** the policy — it picks the action (code to run) internally. But because the state is immutable and `step()` is pure, you can **inject actions** between steps:
+
+```python
+while not state.finished:
+    if stuck(state):
+        state = state.update(context=state.context + "\nHint: try a different approach")
+    state = agent.step(state)
+```
+
+The state you pass back *is* the action space — inject context, override the task, fork, rewind, or swap the engine entirely. A Gym-compatible wrapper is trivial:
+
+```python
+class RLMEnv:
+    def __init__(self, agent): self.agent = agent
+
+    def reset(self, task):
+        self.state = self.agent.start(task)
+        return self.state
+
+    def step(self, action=None):
+        if action:
+            self.state = self.state.update(**action)
+        self.state = self.agent.step(self.state)
+        return self.state, self._reward(self.state), self.state.finished, {}
+```
+
+This makes rlmkit a natural fit for RL-based agent orchestration (train a meta-controller that decides when to hint, kill, or fork), evaluation harnesses, and human-in-the-loop workflows.
+
 ### Parallelism
 
 When an agent delegates to children, the engine doesn't create nested thread pools per parent. Instead, it flattens the entire agent tree, sorts by depth (leaves first), and steps everything through a single global pool:
@@ -380,25 +430,85 @@ delegate("search", "Find the needle", model="fast")
 
 ### `PromptBuilder`
 
-The default system prompt is assembled from named sections (`identity`, `recursion`, `examples`, `tools`, `guardrails`, `status`). Override or extend any section:
+The system prompt is assembled from an ordered list of named sections. The default builder ships with: `role`, `repl`, `recursion`, `examples`, `tools`, `guardrails`, `status`.
+
+Static sections (role, repl, recursion, examples, guardrails) are baked into the builder at construction. Dynamic sections (tools, status) are empty placeholders — the engine fills them at render time via keyword overrides to `build()`:
 
 ```python
-from rlmkit.prompts.default import make_default_builder
+from rlmkit.prompts import PromptBuilder, make_default_builder
 
+# The default builder
 builder = make_default_builder()
-builder.update({"identity": "You are a code reviewer. Be thorough."})
+builder.names  # ['role', 'repl', 'recursion', 'examples', 'tools', 'guardrails', 'status']
+
+# Render — dynamic sections passed as keyword args
+prompt = builder.build(
+    tools="- read_file(path): Read a file.\n- grep(pattern, path): Search.",
+    status="You are at recursion depth 1 of 3.",
+)
 ```
 
-Or bypass it entirely with `RLMConfig(system_prompt="...")`.
+The builder is immutable during `build()` — overrides apply to that single render only.
+
+**Customizing the builder:**
+
+```python
+builder = make_default_builder()
+
+# Replace an existing section
+builder = builder.section("role", "You are a security auditor. Find vulnerabilities.", title="Role")
+
+# Add a new section after an existing one
+builder = builder.section("methodology", "Always check OWASP Top 10.", title="Methodology", after="recursion")
+
+# Remove a section
+builder = builder.remove("examples")
+
+# Insert before a section
+builder = builder.section("constraints", "Only review .py files.", title="Constraints", before="guardrails")
+
+# Build from scratch
+builder = (
+    PromptBuilder()
+    .section("role", "You are a data analyst.", title="Role")
+    .section("repl", REPL_TEXT, title="REPL")
+    .section("tools", title="Tools")
+)
+```
+
+The three core reusable sections — `role`, `repl`, `recursion` — are exported as constants from `rlmkit.prompts.default` (`ROLE_TEXT`, `REPL_TEXT`, `RECURSION_TEXT`). Most custom agents will keep `repl` and `recursion` as-is and just swap `role`.
+
+Or bypass the builder entirely with `RLMConfig(system_prompt="...")`.
 
 ## Subclassing
 
-The main extension point. Override methods to customize behavior, set `state_cls` for custom state.
+Subclassing `RLM` is the main extension point. There are several reasons you'd subclass:
 
-### Custom state + custom prompt
+### Custom prompt via builder
+
+The most common case — change what the agent is told to do. Override the role, add domain-specific sections, remove examples.
 
 ```python
-from rlmkit.rlm import RLM, RLMConfig
+from rlmkit.rlm import RLM
+from rlmkit.prompts import make_default_builder
+from rlmkit.prompts.default import ROLE_TEXT
+
+class SecurityAuditor(RLM):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.prompt_builder = (
+            make_default_builder()
+            .section("role", f"You are a security auditor.\n\n{ROLE_TEXT}", title="Role")
+            .section("methodology", METHODOLOGY, title="Methodology", after="recursion")
+            .remove("examples")
+        )
+```
+
+### Custom state
+
+Track domain-specific data across steps. State is immutable — `update()` returns a new instance.
+
+```python
 from rlmkit.state import RLMState, CodeExec
 
 class ReviewState(RLMState):
@@ -410,14 +520,55 @@ class CodeReviewer(RLM):
     def make_state(self, **fields) -> ReviewState:
         return ReviewState(**fields, findings=[])
 
-    def build_system_prompt(self, state: RLMState) -> str:
-        return "You are a code reviewer. Focus on bugs and type safety. ..."
-
     def step_exec(self, state: ReviewState) -> ReviewState:
         new_state = super().step_exec(state)
         if isinstance(new_state.event, CodeExec) and "issue" in new_state.event.output.lower():
             return new_state.update(findings=state.findings + [new_state.event.output])
         return new_state
+```
+
+### Custom tools
+
+Register domain-specific tools that all agents in the tree can use.
+
+```python
+from rlmkit.utils import tool
+
+@tool("Query a SQL database. Returns results as CSV.")
+def query_db(sql: str) -> str:
+    return run_query(sql)
+
+class DataAnalyst(RLM):
+    def __init__(self, db_conn, **kwargs):
+        super().__init__(**kwargs)
+        self.runtime.register_tool(query_db)
+```
+
+### Step hooks — logging, metrics, early stopping
+
+Intercept any step phase to add logging, collect metrics, or bail early.
+
+```python
+class MonitoredRLM(RLM):
+    def step(self, state):
+        new_state = super().step(state)
+        self.metrics.record(state.agent_id, new_state.event)
+        if self.budget_exceeded():
+            return new_state.update(status=Status.FINISHED, result="Budget exceeded")
+        return new_state
+```
+
+### Custom child construction
+
+Control how children are created — different runtimes, different configs, rate limits.
+
+```python
+class SandboxedRLM(RLM):
+    def create_child(self, agent_id, *, max_iterations=None, llm_client=None):
+        child = super().create_child(agent_id, max_iterations=max_iterations, llm_client=llm_client)
+        child.runtime = SandboxedRuntime(...)
+        child.config.max_iterations = min(child.config.max_iterations, 8)
+        return child
 ```
 
 ### Custom pools
@@ -428,7 +579,6 @@ The pool controls how agent steps are executed in parallel. Subclass `Pool` for 
 from rlmkit.pool import Pool
 
 class RateLimitedPool(Pool):
-    """Respect API rate limits across the entire tree."""
     def __init__(self, max_concurrency=8, requests_per_second=10):
         self.max_concurrency = max_concurrency
         self.limiter = RateLimiter(requests_per_second)
@@ -450,17 +600,6 @@ def my_pool(items):
     return {cs.agent_id: engine.step(cs) for cs, engine in items}
 
 agent = RLM(llm_client=llm, runtime=runtime, pool=my_pool)
-```
-
-### Custom child construction
-
-```python
-class SandboxedRLM(RLM):
-    def create_child(self, agent_id, *, max_iterations=None, llm_client=None):
-        """Give children a sandboxed runtime."""
-        child = super().create_child(agent_id, max_iterations=max_iterations, llm_client=llm_client)
-        child.runtime = SandboxedRuntime(...)
-        return child
 ```
 
 ### Navigating the engine tree
@@ -522,6 +661,7 @@ All examples save a full step-by-step trace to `examples/*_log.md`.
 | `basic.py` | 1M-line needle search with parallel sub-agent delegation |
 | `needle_haystack.py` | 500-file search with `runtime_factory` for child isolation |
 | `custom_agent.py` | Subclassed `RLM` + `RLMState` for a code reviewer with custom state |
+| `summarizer.py` | Recursive summarization of a long document with custom prompt builder |
 
 ## Project Structure
 

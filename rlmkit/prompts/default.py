@@ -1,30 +1,24 @@
-"""Default system prompt for a minimal recursive coding agent."""
+"""Default system prompt sections for a recursive coding agent.
+
+Key reusable sections: ``role``, ``repl``, ``recursion``.
+Dynamic sections (``tools``, ``status``) are placeholders — the engine
+fills them via ``builder.build(tools=..., status=...)``.
+"""
 
 from __future__ import annotations
 
-from .builder import PromptBuilder, Section, SectionBody
+from .builder import PromptBuilder
 
-PROMPT_ORDER = """
-{identity}
-
-{recursion}
-
-{examples}
-
-{tools}
-
-{guardrails}
-
-{status}
-"""
-
-
-IDENTITY_TEXT = """
+ROLE_TEXT = """
 - You are a **recursive LLM agent** with a Python REPL and the ability to delegate work to sub-agents.
-- **Every response you produce MUST contain exactly one ```repl``` code block.**. Put reasoning as comments inside the block if needed. Never reply with only text.
 - Sub-agents are the same kind of agent as you — they get their own **fresh context window** and the same tools.
 - **Your context window is finite and non-renewable.** Every file you read, every tool output, every message — it all accumulates. When it fills up, you lose information. This is the fundamental constraint that shapes how you work.
 - **Delegate aggressively.** Your power comes from sub-agents. Any time you have more data than fits comfortably in your context, or a task that can be split into independent parts, delegate. Doing it yourself sequentially when you could parallelize is always wrong.
+"""
+
+REPL_TEXT = """
+- **Every response you produce MUST contain exactly one ```repl``` code block.**. Put reasoning as comments inside the block if needed. Never reply with only text.
+- Tools are injected into the REPL namespace. Call them directly in ```repl``` blocks.
 - `DEPTH` tells you your current recursion depth; `MAX_DEPTH` is the limit. Be more **conservative** the deeper you are. At `DEPTH == MAX_DEPTH`, you cannot delegate — do everything directly.
 - `AGENT_ID` identifies you in the recursive tree (e.g., `root.search.chunk_0`).
 - If `read_context()` and `append_context()` are available, you have a **durable context** that persists across REPL turns. Read it, append to it, use it to track progress. Sub-agents get their own isolated context.
@@ -150,15 +144,6 @@ done(risks)
 """
 
 
-TOOLS_TEXT = """
-Tools are injected into the REPL namespace. Call them directly in ```repl``` blocks.
-
-Available tools:
-
-{tool_summary}
-"""
-
-
 GUARDRAILS_TEXT = """
 - **Child result format:** Tell children to return ONLY the raw data (matching lines, extracted values, etc.) or empty string if nothing found. **Never ask children to return conversational messages** like "Found X" or "X not found" — these are hard to parse reliably.
 - **Aggregating results:** After `yield wait(...)`, filter by `if r.strip()` (non-empty = found something). **NEVER use substring matching** like `if 'pattern' in result` — children may quote the search pattern in "not found" messages, creating false positives.
@@ -169,39 +154,30 @@ GUARDRAILS_TEXT = """
 - Respect depth, timeout, budget, and call-count limits when configured.
 """
 
-STATUS_TEXT = """
-Current recursion depth: {depth} of {max_depth}
-"""
 
+def make_default_builder() -> PromptBuilder:
+    """Create the default prompt builder with all standard sections.
 
-DEFAULT_SECTIONS: dict[str, Section] = {
-    "identity": Section("identity", IDENTITY_TEXT, title="Identity"),
-    "recursion": Section("recursion", RECURSION_TEXT, title="Recursive Decomposition"),
-    "examples": Section("examples", EXAMPLES_TEXT, title="Examples"),
-    "tools": Section("tools", TOOLS_TEXT, title="Tools"),
-    "guardrails": Section("guardrails", GUARDRAILS_TEXT, title="Guardrails"),
-    "status": Section("status", STATUS_TEXT, title="Status"),
-}
-
-
-def make_default_builder(
-    order: str = PROMPT_ORDER,
-    sections: dict[str, Section | SectionBody] | None = None,
-) -> PromptBuilder:
-    builder = PromptBuilder(order=order, sections=DEFAULT_SECTIONS.copy())
-    if sections:
-        builder.update(sections)
-    return builder
+    ``tools`` and ``status`` are empty placeholders — fill them at
+    build time via ``builder.build(tools=..., status=...)``.
+    """
+    return (
+        PromptBuilder()
+        .section("role", ROLE_TEXT, title="Role")
+        .section("repl", REPL_TEXT, title="REPL")
+        .section("recursion", RECURSION_TEXT, title="Recursive Decomposition")
+        .section("examples", EXAMPLES_TEXT, title="Examples")
+        .section("tools", title="Tools")
+        .section("guardrails", GUARDRAILS_TEXT, title="Guardrails")
+        .section("status", title="Status")
+    )
 
 
 __all__ = [
-    "DEFAULT_SECTIONS",
     "EXAMPLES_TEXT",
     "GUARDRAILS_TEXT",
-    "IDENTITY_TEXT",
-    "PROMPT_ORDER",
+    "REPL_TEXT",
     "RECURSION_TEXT",
-    "STATUS_TEXT",
-    "TOOLS_TEXT",
+    "ROLE_TEXT",
     "make_default_builder",
 ]

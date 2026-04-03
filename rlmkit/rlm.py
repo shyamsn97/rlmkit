@@ -10,7 +10,7 @@ from typing import Any
 from .context import Context, FileContext
 from .llm import LLMClient
 from .pool import CallablePool, ThreadPool
-from .prompts.default import TOOLS_TEXT, make_default_builder
+from .prompts.default import make_default_builder
 from .runtime import Runtime
 from .state import (
     ChildHandle,
@@ -94,6 +94,7 @@ class RLM:
         runtime_factory: Callable[[], Runtime] | None = None,
         llm_clients: dict[str, dict] | None = None,
         pool: Any = None,
+        prompt_builder: Any = None,
     ) -> None:
         self.llm_client = llm_client
         self.runtime = runtime
@@ -101,6 +102,7 @@ class RLM:
         self.agent_id = agent_id
         self.depth = depth
         self.runtime_factory = runtime_factory
+        self.prompt_builder = prompt_builder or make_default_builder()
 
         if pool is None:
             pool = ThreadPool(self.config.max_concurrency)
@@ -447,20 +449,21 @@ class RLM:
     # ── prompt & messages ────────────────────────────────────────────
 
     def build_system_prompt(self, state: RLMState) -> str:
-        """Build the system prompt. Override to customize."""
+        """Build the system prompt. Override to customize.
+
+        The builder holds static sections (role, repl, recursion, etc.).
+        Dynamic sections — ``tools`` and ``status`` — are passed as
+        keyword overrides to ``build()``, keeping the builder immutable.
+        """
         if self.config.system_prompt:
             return self.config.system_prompt
-        builder = make_default_builder()
-        builder.section(
-            "tools",
-            TOOLS_TEXT.format(tool_summary=self.build_tools_section(state)),
-            title="Tools",
+        return self.prompt_builder.build(
+            tools=self.build_tools_section(state),
+            status=self.build_status_section(state),
         )
-        builder.section("status", self.build_status_section(state), title="Status")
-        return builder.build()
 
     def build_tools_section(self, state: RLMState) -> str:
-        """Build the tools summary for the system prompt. Override to customize."""
+        """Build the tools content for the system prompt. Override to customize."""
         tool_lines = "\n".join(
             f"- `{td.name}{td.signature}`: {td.description}"
             for td in self.runtime.get_tool_defs()
@@ -700,4 +703,5 @@ class RLM:
             runtime_factory=self.runtime_factory,
             llm_clients=self._packed_llm_clients(),
             pool=self.pool,
+            prompt_builder=self.prompt_builder,
         )
