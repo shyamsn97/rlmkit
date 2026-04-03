@@ -292,6 +292,53 @@ done(result)
         print(f"  result: {final.result}, fast calls: {fast.call_count}")
 
 
+def test_multi_yield():
+    """Agent yields twice: first batch of children, resumes, delegates again."""
+    root_reply = '''```repl
+h1 = delegate("batch1_a", "search A")
+h2 = delegate("batch1_b", "search B")
+results1 = yield wait(h1, h2)
+
+h3 = delegate("batch2_a", "search C")
+h4 = delegate("batch2_b", "search D")
+results2 = yield wait(h3, h4)
+
+done(",".join(results1) + "|" + ",".join(results2))
+```'''
+
+    class ScriptedLLM(LLMClient):
+        def __init__(self):
+            self.call_count = 0
+
+        def chat(self, messages, *args, **kwargs):
+            self.call_count += 1
+            if self.call_count == 1:
+                return root_reply
+            return '```repl\ndone("leaf-" + AGENT_ID)\n```'
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rt = LocalRuntime(workspace=Path(tmpdir))
+        agent = RLM(
+            llm_client=ScriptedLLM(),
+            runtime=rt,
+            config=RLMConfig(max_depth=1),
+        )
+
+        steps, final = run_to_completion(agent, agent.start("test"))
+
+        assert final.finished
+        assert len(final.children) == 4
+        child_ids = sorted(c.agent_id for c in final.children)
+        assert child_ids == [
+            "root.batch1_a", "root.batch1_b",
+            "root.batch2_a", "root.batch2_b",
+        ]
+        assert "leaf-root.batch1_a" in final.result
+        assert "leaf-root.batch2_a" in final.result
+        print(f"  result: {final.result}")
+        print(f"  children: {child_ids}")
+
+
 def test_orphaned_delegates_error():
     """delegate() without wait() should surface an error, not silently orphan."""
     orphan_reply = '''```repl

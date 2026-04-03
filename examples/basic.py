@@ -210,30 +210,26 @@ def main():
             },
         )
 
-        def _progress(aid, child_state, done, total):
-            status = child_state.status.value
-            msg = f"  {DIM}[{done}/{total}]{RESET} {aid} → {status}"
-            print(msg)
-            with open(LOG_PATH, "a") as f:
-                f.write(f"- [{done}/{total}] `{aid}` → {status}\n")
-            sys.stdout.flush()
-
-        agent.on_child_stepped = _progress
-
         state = agent.start(
             "I'm looking for a magic number in haystack.txt. What is it? You can only read around 50000 lines at a time."
         )
 
-        step = 0
-        while not state.finished:
-            state = agent.step(state)
-            step += 1
-            log_step(step, state)
+        if "--viz" in sys.argv:
+            from rlmkit.utils.viz import live
+            states = live(agent, state)
+        else:
+            step = 0
+            states = []
+            while not state.finished:
+                state = agent.step(state)
+                step += 1
+                states.append(state)
+                log_step(step, state)
 
+        final = states[-1] if states else state
         print(f"\n{'='*40}")
         print(f"Actual answer:  {answer}")
-        print(f"Correct:        {answer in (state.result or '')}")
-
+        print(f"Correct:        {answer in (final.result or '')}")
         print(f"Trace saved to {LOG_PATH}")
 
 

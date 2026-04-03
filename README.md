@@ -20,7 +20,7 @@ An RLM is analogous to a process in an operating system:
 | Memory | Address space | Context window (finite, non-renewable) |
 | Forking | `fork()` → child process | `delegate(name, task)` → named child agent with fresh context |
 | IPC | pipes, shared memory | `yield wait()` returns child results |
-| Scheduling | OS scheduler | `step_children()` runs children in parallel |
+| Scheduling | OS scheduler | Global pool steps all leaves in parallel |
 | State | PCB (process control block) | `RLMState` (immutable, serializable) |
 
 Just as an OS doesn't run one giant process — it decomposes work into many processes — an RLM decomposes work into many agents. The reason is the same: **bounded resources**. A single context window can't hold a million lines of text, just like a single process can't hold infinite memory. You fork, distribute, and combine.
@@ -74,9 +74,9 @@ Each `step(state) → state` is a single atomic transition. The agent cycles thr
                   │                                           │
                   │                              SUPERVISING ─┘
                   │                                  │
-                  │                          step_children()
-                  │                          (all children
-                  └── children done ──────── stepped in parallel)
+                  │                          step_supervise()
+                  │                          flatten tree → step
+                  └── children done ──────── leaves first → cascade
 ```
 
 **States:**
@@ -85,11 +85,11 @@ Each `step(state) → state` is a single atomic transition. The agent cycles thr
 - `SUPERVISING` — exec suspended mid-block, waiting on child agents (like a parent waiting on `waitpid`)
 - `FINISHED` — `done()` was called, result available
 
-**Key mechanism:** when REPL code calls `delegate()` + `yield wait()`, the code generator **suspends at the yield point**. The stepper takes over, advancing all children in parallel via `step_children()`. Once children finish, exec resumes exactly where it left off — same locals, same line. No threads, no locks — just Python generators.
+**Key mechanism:** when REPL code calls `delegate()` + `yield wait()`, the code generator **suspends at the yield point**. The engine flattens the entire agent tree, sorts deepest-first, and steps all leaves in parallel via a global pool. When children finish, parent generators resume automatically in the same pass — no nested threads, no wasted orchestration slots. One pool, one concurrency cap, regardless of tree depth.
 
 ## Architecture
 
-The engine is a stateless stepper. The state is the single source of truth.
+The engine is a stateless stepper. The state is the single source of truth. A global pool handles all parallelism.
 
 ```
 ┌───────────────────────────────────────────────────────┐
@@ -109,7 +109,7 @@ The engine is a stateless stepper. The state is the single source of truth.
 │                      RLM Engine                       │
 │                  (stateless stepper)                   │
 │                                                       │
-│  immutable infra: llm_client, runtime, config         │
+│  immutable infra: llm_client, runtime, config, pool   │
 │  ephemeral working memory: is_done, result            │
 │    (set during a step, flushed to state, gone)        │
 │                                                       │
@@ -140,6 +140,40 @@ engine2 = RLM(llm_client=other_llm, runtime=other_runtime)
 while not state.finished:
     state = engine2.step(state)
 ```
+
+### Parallelism
+
+When an agent delegates to children, the engine doesn't create nested thread pools per parent. Instead, it flattens the entire agent tree, sorts by depth (leaves first), and steps everything through a single global pool:
+
+```
+root (SUPERVISING)
+├── child_A (SUPERVISING)
+│   ├── gc_1 (WAITING)     ← step in pool
+│   ├── gc_2 (WAITING)     ← step in pool
+│   └── gc_3 (WAITING)     ← step in pool
+├── child_B (WAITING)      ← step in pool
+└── child_C (FINISHED)     ← skip
+```
+
+All 4 active leaves go into the pool. SUPERVISING parents don't take a thread — they're resolved for free when their children finish. With `max_concurrency=8`, at most 8 things run at a time across the **entire tree**, regardless of depth.
+
+```python
+from rlmkit.pool import ThreadPool, SequentialPool
+
+agent = RLM(
+    llm_client=llm,
+    runtime=runtime,
+    pool=ThreadPool(max_concurrency=8),   # default
+)
+
+# For debugging — run everything sequentially
+agent = RLM(llm_client=llm, runtime=runtime, pool=SequentialPool())
+
+# Or pass any function
+agent = RLM(llm_client=llm, runtime=runtime, pool=my_custom_pool_fn)
+```
+
+The pool is shared across the entire tree — root and all descendants use the same pool instance. One pool, one concurrency cap.
 
 ## `RLMState`
 
@@ -187,7 +221,7 @@ RLMConfig(
     max_iterations=30,         # loops per agent
     max_output_length=12_000,  # truncate REPL output
     max_messages=None,         # keep last N messages (None = all)
-    max_concurrent_children=8, # parallel child execution cap
+    max_concurrency=8,         # global parallel execution cap
     child_max_iterations=None, # override for child iteration limit
     single_block=True,         # only execute first ```repl``` block
     context=None,              # durable scratchpad: str path, Context object, or None
@@ -199,9 +233,21 @@ RLMConfig(
 
 The agent engine. Mostly stateless — ephemeral working memory is flushed to `RLMState` at each step boundary.
 
+```python
+agent = RLM(
+    llm_client=llm,            # required — LLMClient instance
+    runtime=runtime,           # required — Runtime instance
+    config=RLMConfig(),        # optional — tuning knobs
+    pool=ThreadPool(8),        # optional — execution pool (default: ThreadPool)
+    runtime_factory=None,      # optional — factory for child runtimes
+    llm_clients=None,          # optional — named model registry
+)
+```
+
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `children` | `dict[str, RLM]` | Child engine instances (infrastructure, not state) |
+| `pool` | `Pool` | Shared execution pool for parallel stepping |
 | `result` | `str \| None` | Ephemeral — set by `done()` during a step, flushed to state |
 | `is_done` | `bool` | Ephemeral — set by `done()` during a step, flushed to state |
 | `last_state` | `RLMState \| None` | The initial state from `start()` |
@@ -211,16 +257,16 @@ Subclass and override any method:
 
 | Method | What it does |
 |--------|-------------|
-| `step(state)` | Dispatch to step_llm / step_exec / step_children |
+| `step(state)` | Dispatch to step_llm / step_exec / step_supervise |
 | `step_llm(state)` | Call the LLM → HAS_REPLY |
 | `step_exec(state)` | Execute code block → WAITING / SUPERVISING / FINISHED |
-| `step_children(state)` | Step all active children in parallel |
-| `execute_child_steps(active)` | Run child steps (override for custom executor) |
+| `step_supervise(state)` | Flatten tree, step leaves in pool, cascade parent resumes |
+| `flatten_all(state, depth)` | Collect all non-finished nodes as `(depth, state, engine)` |
+| `apply_results(state, stepped)` | Bottom-up tree rebuild with parent resume cascading |
 | `build_system_prompt(state)` | Return the system prompt string |
 | `build_messages(state)` | Assemble the LLM message list |
 | `make_state(**fields)` | Construct initial state (override for custom state classes) |
 | `create_child(agent_id, *, max_iterations, llm_client)` | Full control over child construction |
-| `on_child_stepped(aid, state, n, total)` | Callback after each child completes a step |
 
 ### `LLMClient`
 
@@ -257,7 +303,7 @@ class Runtime(ABC):
     def resume_code(self, send_value=None) -> tuple[bool, object]: ...
 ```
 
-`start_code`/`resume_code` drive the generator-based execution that enables `yield wait()` suspension. `LocalRuntime` implements these in-process; remote runtimes can override them to communicate with a sandbox container via `rlmkit.sandbox` (a shipped JSON-over-stdio driver).
+`start_code`/`resume_code` drive the generator-based execution that enables `yield wait()` suspension. Both `LocalRuntime` and `ModalRuntime` delegate to `Sandbox` — `LocalRuntime` uses it in-process, `ModalRuntime` communicates with it over JSON-over-stdio in a remote container.
 
 `LocalRuntime` runs code via `exec()` with a persistent namespace. Builtin tools: `read_file`, `write_file`, `edit_file`, `append_file`, `ls`, `grep`. Common modules (`re`, `os`, `json`, `math`, etc.) are pre-imported.
 
@@ -374,14 +420,42 @@ class CodeReviewer(RLM):
         return new_state
 ```
 
-### Custom child execution (e.g. process pool)
+### Custom pools
+
+The pool controls how agent steps are executed in parallel. Subclass `Pool` for custom scheduling, or pass a plain function:
 
 ```python
-class RemoteRLM(RLM):
-    def execute_child_steps(self, active):
-        """Send child steps to a remote worker pool instead of local threads."""
-        return dispatch_to_cluster(active)
+from rlmkit.pool import Pool
 
+class RateLimitedPool(Pool):
+    """Respect API rate limits across the entire tree."""
+    def __init__(self, max_concurrency=8, requests_per_second=10):
+        self.max_concurrency = max_concurrency
+        self.limiter = RateLimiter(requests_per_second)
+
+    def execute(self, items):
+        results = {}
+        for cs, engine in items:
+            self.limiter.wait()
+            results[cs.agent_id] = engine.step(cs)
+        return results
+
+agent = RLM(llm_client=llm, runtime=runtime, pool=RateLimitedPool())
+```
+
+Or wrap any function — it gets auto-wrapped in `CallablePool`:
+
+```python
+def my_pool(items):
+    return {cs.agent_id: engine.step(cs) for cs, engine in items}
+
+agent = RLM(llm_client=llm, runtime=runtime, pool=my_pool)
+```
+
+### Custom child construction
+
+```python
+class SandboxedRLM(RLM):
     def create_child(self, agent_id, *, max_iterations=None, llm_client=None):
         """Give children a sandboxed runtime."""
         child = super().create_child(agent_id, max_iterations=max_iterations, llm_client=llm_client)
@@ -453,21 +527,21 @@ All examples save a full step-by-step trace to `examples/*_log.md`.
 
 ```
 rlmkit/
-├── rlm.py          # RLM engine, RLMConfig, step logic
+├── rlm.py           # RLM engine, RLMConfig, step logic
 ├── state.py         # RLMState, Status, StepEvent hierarchy, ChildHandle, WaitRequest
+├── pool.py          # Pool ABC, ThreadPool, SequentialPool, CallablePool
 ├── context.py       # Context ABC, FileContext
 ├── llm.py           # LLMClient ABC, OpenAIClient, AnthropicClient
 ├── utils.py         # @tool decorator, code block parsing
-├── sandbox.py       # In-container driver for remote sandboxes (JSON-over-stdio)
 ├── runtime/
-│   ├── runtime.py   # Runtime ABC, ToolDef, builtins, start_code/resume_code
-│   └── local.py     # LocalRuntime (exec + generator-based execution)
+│   ├── runtime.py   # Runtime ABC, ToolDef, builtins
+│   ├── local.py     # LocalRuntime (in-process execution via Sandbox)
+│   ├── sandbox.py   # Sandbox (code execution + JSON-over-stdio for remote runtimes)
+│   └── modal.py     # ModalRuntime (remote execution via Modal containers)
 └── prompts/
     ├── builder.py   # PromptBuilder, Section
     └── default.py   # Default prompt sections
 ```
-
-~1,400 lines of core code.
 
 ## References
 

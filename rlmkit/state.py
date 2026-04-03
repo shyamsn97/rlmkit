@@ -60,6 +60,13 @@ class ChildHandle:
     def __repr__(self) -> str:
         return f"ChildHandle({self.agent_id!r})"
 
+    def to_dict(self) -> dict:
+        return {"child_handle": self.agent_id}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ChildHandle:
+        return cls(data["child_handle"])
+
 
 class WaitRequest:
     """Yielded by wait() to request suspension until children finish."""
@@ -69,6 +76,13 @@ class WaitRequest:
 
     def __repr__(self) -> str:
         return f"WaitRequest({self.agent_ids!r})"
+
+    def to_dict(self) -> dict:
+        return {"wait_request": self.agent_ids}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> WaitRequest:
+        return cls(data["wait_request"])
 
 
 # ── RLMState ─────────────────────────────────────────────────────────

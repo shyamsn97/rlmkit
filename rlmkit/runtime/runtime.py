@@ -57,7 +57,7 @@ class Runtime(ABC):
 
     def __init__(self, workspace: Path | str = ".") -> None:
         self.workspace = Path(workspace).resolve()
-        self._tools: dict[str, tuple[Callable, str, bool]] = {}
+        self.tools: dict[str, tuple[Callable, str, bool]] = {}
 
     # ── required ─────────────────────────────────────────────────────
 
@@ -96,8 +96,8 @@ class Runtime(ABC):
         Subclasses should override if they have extra state to copy.
         """
         new = type(self)(workspace=self.workspace)
-        for name, (fn, doc, core) in self._tools.items():
-            new._tools[name] = (fn, doc, core)
+        for name, (fn, doc, core) in self.tools.items():
+            new.tools[name] = (fn, doc, core)
             new.inject(name, fn)
         return new
 
@@ -111,7 +111,7 @@ Returns:
 - str: The file contents."""
     )
     def read_file(self, path: str) -> str:
-        return self._resolve(path).read_text()
+        return self.resolve_path(path).read_text()
 
     @tool_decorator(
         """Write content to a file, creating parent directories if needed.
@@ -122,7 +122,7 @@ Returns:
 - str: Confirmation with byte count."""
     )
     def write_file(self, path: str, content: str) -> str:
-        resolved = self._resolve(path)
+        resolved = self.resolve_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content)
         return f"Wrote {len(content)} bytes to {path}"
@@ -136,7 +136,7 @@ Returns:
 - str: Confirmation with byte count."""
     )
     def append_file(self, path: str, content: str) -> str:
-        resolved = self._resolve(path)
+        resolved = self.resolve_path(path)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         with resolved.open("a") as f:
             f.write(content)
@@ -151,7 +151,7 @@ Returns:
 - str: Summary of how many edits were applied."""
     )
     def edit_file(self, path: str, *edits: tuple[str, str]) -> str:
-        resolved = self._resolve(path)
+        resolved = self.resolve_path(path)
         text = resolved.read_text()
         count = 0
         for old, new in edits:
@@ -169,7 +169,7 @@ Returns:
 - list[str]: Sorted list of entry names."""
     )
     def ls(self, path) -> list[str]:
-        resolved = self._resolve(path)
+        resolved = self.resolve_path(path)
         if resolved.is_file():
             return [resolved.name]
         return sorted(p.name for p in resolved.iterdir())
@@ -184,7 +184,7 @@ Returns:
 - str: Matching lines as "relpath:lineno: line", or empty string if none."""
     )
     def grep(self, pattern: str, path: str = ".", *, max_results: int = 50) -> str:
-        resolved = self._resolve(path)
+        resolved = self.resolve_path(path)
         regex = re.compile(pattern)
         matches: list[str] = []
         files = [resolved] if resolved.is_file() else sorted(resolved.rglob("*"))
@@ -202,7 +202,7 @@ Returns:
                 continue
         return "\n".join(matches)
 
-    def _resolve(self, path: str) -> Path:
+    def resolve_path(self, path: str) -> Path:
         p = Path(path)
         if p.is_absolute():
             return p
@@ -220,7 +220,7 @@ Returns:
         """Register a function as a tool — injects it and makes it discoverable."""
         name = resolve_tool_name(fn)
         doc = resolve_tool_description(fn, description)
-        self._tools[name] = (fn, doc, core)
+        self.tools[name] = (fn, doc, core)
         self.inject(name, fn)
 
     def tool(self, description: str, *, name: str | None = None, core: bool = False):
@@ -257,7 +257,7 @@ Returns:
             ToolDef(
                 name=n, signature=resolve_tool_signature(fn), description=doc, core=c
             )
-            for n, (fn, doc, c) in self._tools.items()
+            for n, (fn, doc, c) in self.tools.items()
         ]
 
     def available_modules(self) -> list[str]:

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, fields, replace
+from typing import Any
 
 from .context import Context, FileContext
 from .llm import LLMClient
+from .pool import CallablePool, ThreadPool
 from .prompts.default import TOOLS_TEXT, make_default_builder
 from .runtime import Runtime
 from .state import (
@@ -22,7 +23,6 @@ from .state import (
     WaitRequest,
 )
 from .utils import OrphanedDelegatesError, find_code_blocks, tool
-
 
 # ── AST yield checker ────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ class RLMConfig:
     max_iterations: int = 30
     max_output_length: int = 12_000
     max_messages: int | None = None
-    max_concurrent_children: int = 8
+    max_concurrency: int = 8
     child_max_iterations: int | None = None
     single_block: bool = True
     context: Context | str | None = None
@@ -93,6 +93,7 @@ class RLM:
         depth: int = 0,
         runtime_factory: Callable[[], Runtime] | None = None,
         llm_clients: dict[str, dict] | None = None,
+        pool: Any = None,
     ) -> None:
         self.llm_client = llm_client
         self.runtime = runtime
@@ -100,6 +101,12 @@ class RLM:
         self.agent_id = agent_id
         self.depth = depth
         self.runtime_factory = runtime_factory
+
+        if pool is None:
+            pool = ThreadPool(self.config.max_concurrency)
+        elif callable(pool) and not hasattr(pool, "execute"):
+            pool = CallablePool(pool)
+        self.pool = pool
 
         self.llm_clients: dict[str, LLMClient] = {}
         self.model_descriptions: dict[str, str] = {}
@@ -185,7 +192,7 @@ class RLM:
             case Status.HAS_REPLY:
                 return self.step_exec(state)
             case Status.SUPERVISING:
-                return self.step_children(state)
+                return self.step_supervise(state)
             case _:
                 return state
 
@@ -268,7 +275,9 @@ class RLM:
             output = "" if suspended else result
 
         if suspended:
-            self.waiting_on = result.agent_ids if isinstance(result, WaitRequest) else []
+            self.waiting_on = (
+                result.agent_ids if isinstance(result, WaitRequest) else []
+            )
             for cid in new_child_ids:
                 children.append(self.children[cid].last_state)
 
@@ -298,105 +307,142 @@ class RLM:
             waiting_on=self.waiting_on if suspended else [],
         )
 
-    def execute_child_steps(
-        self, active: list[tuple[RLMState, RLM]]
-    ) -> dict[str, RLMState]:
-        """Step active children and return {agent_id: new_state}.
+    def step_supervise(self, state: RLMState) -> RLMState:
+        """Flatten tree, step one round of leaves, cascade parent resumes.
 
-        Override to swap in a custom executor (e.g. process pool,
-        remote dispatch, rate-limited queue).
+        Each call does a single round: step all steppable leaves in the
+        pool, then apply results (which may resume parents).  The outer
+        ``step()`` loop calls this repeatedly until no longer SUPERVISING.
+        This keeps each step granular so live UIs can show progress.
         """
-        cap = self.config.max_concurrent_children
-        results: dict[str, RLMState] = {}
-        with ThreadPoolExecutor(max_workers=min(len(active), cap)) as pool:
-            futures = {pool.submit(e.step, cs): cs.agent_id for cs, e in active}
-            for future in as_completed(futures):
-                aid = futures[future]
-                results[aid] = future.result()
-                self.on_child_stepped(aid, results[aid], len(results), len(active))
-        return results
-
-    def on_child_stepped(
-        self, agent_id: str, state: RLMState, completed: int, total: int
-    ) -> None:
-        """Called after each child completes a step. Override for progress."""
-
-    def step_children(self, state: RLMState) -> RLMState:
-        """Step all active children in parallel → check if wait is satisfied."""
-
-        active = [
-            (cs, self.children[cs.agent_id]) for cs in state.children if not cs.finished
+        nodes = self.flatten_all(state)
+        nodes.sort(key=lambda x: -x[0])
+        steppable = [
+            (cs, engine) for _, cs, engine in nodes if cs.status != Status.SUPERVISING
         ]
-        stepped = self.execute_child_steps(active) if active else {}
-
-        new_children, events = [], []
-        for cs in state.children:
-            if cs.finished:
-                new_children.append(cs)
-            else:
-                new_cs = stepped[cs.agent_id]
-                new_children.append(new_cs)
-                if new_cs.event:
-                    events.append(new_cs.event)
-
-        all_done = all(
-            cs.agent_id not in self.waiting_on or cs.finished for cs in new_children
-        )
-
-        if all_done:
-            results = [
-                self.children[aid].result or "" for aid in self.waiting_on
-            ]
-            suspended, resume_result = self.runtime.resume_code(results)
-
-            if self.is_done:
-                new_status = Status.FINISHED
-            elif suspended:
-                self.waiting_on = (
-                    resume_result.agent_ids
-                    if isinstance(resume_result, WaitRequest)
-                    else []
-                )
-                new_status = Status.SUPERVISING
-            else:
-                new_status = Status.WAITING
-
-            output = "" if suspended else resume_result
-
-            new_messages = list(state.messages)
-            if not suspended and not self.is_done and output:
-                new_messages.append(
-                    {
-                        "role": "user",
-                        "content": f"REPL output:\n{output}",
-                    }
-                )
-
-            return state.update(
-                status=new_status,
-                event=ChildStep(
-                    agent_id=state.agent_id,
-                    iteration=state.iteration,
-                    child_events=events,
-                    all_done=True,
-                    exec_output=output if not suspended else None,
-                    agent_finished=self.is_done,
-                ),
-                messages=new_messages,
-                result=self.result if self.is_done else None,
-                children=new_children,
-                waiting_on=self.waiting_on if suspended else [],
+        if not steppable:
+            pending = [cs.agent_id for cs in state.children if not cs.finished]
+            raise RuntimeError(
+                f"Supervise stall: no steppable leaves but {len(pending)} "
+                f"pending children: {pending[:5]}"
             )
+
+        stepped = self.pool.execute(steppable)
+        child_events = [new_cs.event for new_cs in stepped.values() if new_cs.event]
+
+        state, resume_output = self.apply_results(state, stepped)
 
         return state.update(
             event=ChildStep(
                 agent_id=state.agent_id,
                 iteration=state.iteration,
-                child_events=events,
-                all_done=False,
+                child_events=child_events,
+                all_done=state.status != Status.SUPERVISING,
+                exec_output=resume_output,
+                agent_finished=self.is_done,
             ),
-            children=new_children,
         )
+
+    def flatten_all(self, state: RLMState, depth: int = 0) -> list:
+        """Collect all non-finished nodes in the subtree as (depth, state, engine)."""
+        nodes = []
+        for cs in state.children:
+            if cs.finished:
+                continue
+            engine = self.children[cs.agent_id]
+            nodes.append((depth, cs, engine))
+            if cs.status == Status.SUPERVISING:
+                nodes.extend(engine.flatten_all(cs, depth + 1))
+        return nodes
+
+    def apply_results(
+        self, state: RLMState, stepped: dict[str, RLMState]
+    ) -> tuple[RLMState, str | None]:
+        """Rebuild the state tree bottom-up, resuming parents whose children are done.
+
+        Returns (new_state, resume_output). resume_output is the stdout
+        captured when the parent's generator was resumed, or None.
+        """
+        new_children = []
+        for cs in state.children:
+            if cs.finished:
+                new_children.append(cs)
+                continue
+            engine = self.children[cs.agent_id]
+            if cs.agent_id in stepped:
+                new_children.append(stepped[cs.agent_id])
+            elif cs.status == Status.SUPERVISING:
+                updated, _ = engine.apply_results(cs, stepped)
+                new_children.append(updated)
+            else:
+                new_children.append(cs)
+
+        state = state.update(children=new_children)
+
+        if self.waiting_on:
+            all_done = all(
+                cs.agent_id not in self.waiting_on or cs.finished for cs in new_children
+            )
+            if all_done:
+                return self.resume_after_children(state)
+        return state, None
+
+    def resume_after_children(self, state: RLMState) -> tuple[RLMState, str | None]:
+        """Resume this agent's generator after waited-on children finished.
+
+        Returns (new_state, exec_output).
+        """
+        existing = {cs.agent_id for cs in state.children}
+
+        results = [self.children[aid].result or "" for aid in self.waiting_on]
+        suspended, resume_result = self.runtime.resume_code(results)
+
+        children = list(state.children)
+        new_child_ids = [cid for cid in self.children if cid not in existing]
+
+        if new_child_ids and not suspended and not self.is_done:
+            for cid in new_child_ids:
+                del self.children[cid]
+            names = ", ".join(new_child_ids)
+            msg = (
+                f"delegate() was called for [{names}] but wait() was never "
+                f"called. You must use `yield wait(*handles)` to collect results."
+            )
+            err_output = self.execute_code(f"raise OrphanedDelegatesError({msg!r})")
+            output = resume_result if isinstance(resume_result, str) else ""
+            resume_result = (
+                output + "\n\n" + err_output if output.strip() else err_output
+            )
+            new_child_ids = []
+
+        if self.is_done:
+            new_status = Status.FINISHED
+        elif suspended:
+            self.waiting_on = (
+                resume_result.agent_ids
+                if isinstance(resume_result, WaitRequest)
+                else []
+            )
+            for cid in new_child_ids:
+                children.append(self.children[cid].last_state)
+            new_status = Status.SUPERVISING
+        else:
+            new_status = Status.WAITING
+
+        output = "" if suspended else resume_result
+
+        new_messages = list(state.messages)
+        if not suspended and not self.is_done and output:
+            new_messages.append({"role": "user", "content": f"REPL output:\n{output}"})
+
+        new_state = state.update(
+            status=new_status,
+            messages=new_messages,
+            result=self.result if self.is_done else None,
+            children=children,
+            waiting_on=self.waiting_on if suspended else [],
+        )
+        return new_state, output if not suspended else None
 
     # ── prompt & messages ────────────────────────────────────────────
 
@@ -653,4 +699,5 @@ class RLM:
             depth=self.depth + 1,
             runtime_factory=self.runtime_factory,
             llm_clients=self._packed_llm_clients(),
+            pool=self.pool,
         )
