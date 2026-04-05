@@ -12,8 +12,11 @@ class Context(ABC):
     """Durable scratchpad that persists across REPL turns.
 
     Agents interact via read_context() and append_context() tools.
-    Each child gets an isolated clone.
+    Each child gets an isolated clone. Children can read their parent's
+    context via read_parent_context().
     """
+
+    parent: Context | None = None
 
     @abstractmethod
     def read(self) -> str:
@@ -31,13 +34,25 @@ class Context(ABC):
     def clone(self, agent_id: str) -> Context:
         """Create an isolated context for a child agent."""
 
+    def read_parent(self) -> str:
+        """Read the parent agent's context. Empty string if no parent."""
+        if self.parent is None:
+            return ""
+        return self.parent.read()
+
 
 class FileContext(Context):
     """Context backed by a single file in the runtime workspace."""
 
-    def __init__(self, path: str, runtime: Runtime) -> None:
+    def __init__(
+        self,
+        path: str,
+        runtime: Runtime,
+        parent: FileContext | None = None,
+    ) -> None:
         self.path = path
         self.runtime = runtime
+        self.parent = parent
 
     def read(self) -> str:
         try:
@@ -53,5 +68,6 @@ class FileContext(Context):
 
     def clone(self, agent_id: str) -> FileContext:
         p = PurePosixPath(self.path)
-        child_path = str(p.parent / agent_id / p.name)
-        return FileContext(child_path, self.runtime)
+        short_name = agent_id.rsplit(".", 1)[-1]
+        child_path = str(p.parent / short_name / p.name)
+        return FileContext(child_path, self.runtime, parent=self)

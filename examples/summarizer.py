@@ -303,7 +303,7 @@ When summarizing, follow these rules:
         )
 
         if args.viz:
-            from rlmkit.utils.viz import live
+            from viz import live
             states = live(agent, state)
         else:
             step = 0

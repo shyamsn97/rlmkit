@@ -142,6 +142,8 @@ class RLM:
         if self.context:
             self.runtime.register_tool(self.read_context, core=True)
             self.runtime.register_tool(self.append_context, core=True)
+            if self.context.parent is not None:
+                self.runtime.register_tool(self.read_parent_context, core=True)
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -673,6 +675,12 @@ class RLM:
             return "No context configured."
         self.context.append(text)
         return "ok"
+
+    @tool("Read the parent agent's durable context. Returns the full context string, or empty if no parent.")
+    def read_parent_context(self) -> str:
+        if not self.context:
+            return ""
+        return self.context.read_parent()
 
     # ── children ─────────────────────────────────────────────────────
 

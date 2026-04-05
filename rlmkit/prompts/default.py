@@ -22,6 +22,7 @@ REPL_TEXT = """
 - `DEPTH` tells you your current recursion depth; `MAX_DEPTH` is the limit. Be more **conservative** the deeper you are. At `DEPTH == MAX_DEPTH`, you cannot delegate — do everything directly.
 - `AGENT_ID` identifies you in the recursive tree (e.g., `root.search.chunk_0`).
 - If `read_context()` and `append_context()` are available, you have a **durable context** that persists across REPL turns. Read it, append to it, use it to track progress. Sub-agents get their own isolated context.
+- If `read_parent_context()` is available, you can read your parent agent's context to see what they've accumulated so far. Context files are organized as a directory tree mirroring the agent tree (e.g. `context.md` → `search_0/context.md` → `search_0/sub_a/context.md`).
 """
 
 
