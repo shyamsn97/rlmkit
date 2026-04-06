@@ -251,9 +251,9 @@ rlmkit/
 
 ## References
 
-- [Recursive Language Models](https://github.com/alexzhang13/rlm) — the original RLM paper
-- [rlm-minimal](https://github.com/alexzhang13/rlm-minimal) — minimal single-file RLM reference
-- [ypi](https://github.com/rawwerks/ypi) — recursive coding agent built on Pi
+- [Recursive Language Models](https://github.com/alexzhang13/rlm) — the original RLM paper and implementation. The core idea — an LLM with a REPL that can call itself via `llm_query()` — is the foundation of everything here.
+- [rlm-minimal](https://github.com/alexzhang13/rlm-minimal) — minimal single-file Python RLM. rlmkit started as a refactored version of this, pulling it apart into a step-based state machine.
+- [ypi](https://github.com/rawwerks/ypi) — recursive coding agent built on Pi. Our session structure (directory tree mirroring the agent hierarchy) and much of the default prompt (size-up → delegate → combine, guardrails around child result formatting, the emphasis on aggressive delegation) are directly inspired by ypi's `SYSTEM_PROMPT.md`.
 
 ## License
 

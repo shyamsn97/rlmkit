@@ -1,4 +1,5 @@
 """Default system prompt sections for a recursive coding agent.
+Heavily inspired by ypi's prompt
 
 Key reusable sections: ``role``, ``repl``, ``recursion``.
 Dynamic sections (``tools``, ``status``) are placeholders — the engine
