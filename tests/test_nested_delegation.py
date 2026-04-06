@@ -377,6 +377,101 @@ done("fixed")
         print(f"  error surfaced: {orphan_output.splitlines()[-1][:80]}")
 
 
+def test_variable_persistence_no_yield():
+    """Variables set in one code block persist in the next (no yield path)."""
+    replies = [
+        '```repl\nx = 42\nprint("set x")\n```',
+        '```repl\nprint(f"x is {x}")\ndone(str(x))\n```',
+    ]
+
+    class ScriptedLLM(LLMClient):
+        def __init__(self):
+            self.call_count = 0
+
+        def chat(self, messages, *args, **kwargs):
+            self.call_count += 1
+            return replies[min(self.call_count - 1, len(replies) - 1)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rt = LocalRuntime(workspace=Path(tmpdir))
+        agent = RLM(llm_client=ScriptedLLM(), runtime=rt, config=RLMConfig(max_depth=0))
+
+        steps, final = run_to_completion(agent, agent.start("test"))
+
+        assert final.finished
+        assert final.result == "42"
+        print(f"  result: {final.result}")
+
+
+def test_variable_persistence_with_yield():
+    """Variables set before yield persist after resume."""
+    root_reply = '''```repl
+x = 100
+h = delegate("worker", "compute")
+[result] = yield wait(h)
+done(f"{x}+{result}")
+```'''
+
+    class ScriptedLLM(LLMClient):
+        def __init__(self):
+            self.call_count = 0
+
+        def chat(self, messages, *args, **kwargs):
+            self.call_count += 1
+            if self.call_count == 1:
+                return root_reply
+            return '```repl\ndone("7")\n```'
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rt = LocalRuntime(workspace=Path(tmpdir))
+        agent = RLM(llm_client=ScriptedLLM(), runtime=rt, config=RLMConfig(max_depth=1))
+
+        steps, final = run_to_completion(agent, agent.start("test"))
+
+        assert final.finished
+        assert final.result == "100+7"
+        print(f"  result: {final.result}")
+
+
+def test_redelegate_resumes_finished_agent():
+    """Delegating to a name that already finished resumes the same agent."""
+    root_reply = '''```repl
+h = delegate("worker", "round 1")
+[r1] = yield wait(h)
+
+h = delegate("worker", "round 2")
+[r2] = yield wait(h)
+
+done(r1 + "|" + r2)
+```'''
+
+    class ScriptedLLM(LLMClient):
+        def __init__(self):
+            self.call_count = 0
+
+        def chat(self, messages, *args, **kwargs):
+            self.call_count += 1
+            if self.call_count == 1:
+                return root_reply
+            return '```repl\ndone("result-" + AGENT_ID + "-" + str(len(dir())))\n```'
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        rt = LocalRuntime(workspace=Path(tmpdir))
+        agent = RLM(llm_client=ScriptedLLM(), runtime=rt, config=RLMConfig(max_depth=1))
+
+        steps, final = run_to_completion(agent, agent.start("test"))
+
+        assert final.finished
+        # Both rounds used the same agent_id (no _2 suffix)
+        child_ids = [c.agent_id for c in final.children]
+        assert child_ids == ["root.worker"], f"Expected single child, got {child_ids}"
+        # Both results should be present
+        assert "result-root.worker" in final.result
+        assert "|" in final.result
+        print(f"  result: {final.result}")
+        print(f"  children: {child_ids}")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -7,11 +7,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from typing import Any
 
-from .context import Context, FileContext
 from .llm import LLMClient
 from .pool import CallablePool, ThreadPool
 from .prompts.default import make_default_builder
 from .runtime import Runtime
+from .session import FileSession, Session
 from .state import (
     ChildHandle,
     ChildStep,
@@ -68,7 +68,7 @@ class RLMConfig:
     max_concurrency: int = 8
     child_max_iterations: int | None = None
     single_block: bool = True
-    context: Context | str | None = None
+    session: Session | str | None = None
     system_prompt: str | None = None
 
 
@@ -125,12 +125,9 @@ class RLM:
         self.result: str | None = None
         self.last_state: RLMState | None = None
 
-        # Auto-create FileContext from string path
-        if isinstance(self.config.context, str):
-            self.config = replace(
-                self.config, context=FileContext(self.config.context, self.runtime)
-            )
-        self.context: Context | None = self.config.context
+        if isinstance(self.config.session, str):
+            self.config = replace(self.config, session=FileSession(self.config.session))
+        self.session: Session | None = self.config.session
 
         self.runtime.inject("OrphanedDelegatesError", OrphanedDelegatesError)
         self.runtime.inject("AGENT_ID", self.agent_id)
@@ -139,9 +136,9 @@ class RLM:
         self.runtime.register_tool(self.done, core=True)
         self.runtime.register_tool(self.delegate, core=True)
         self.runtime.register_tool(self.wait, core=True)
-        if self.context:
-            self.runtime.register_tool(self.read_context, core=True)
-            self.runtime.register_tool(self.append_context, core=True)
+        if self.session:
+            self.runtime.register_tool(self.list_sessions, core=True)
+            self.runtime.register_tool(self.read_history, core=True)
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -149,18 +146,16 @@ class RLM:
         """Build initial state. Override to inject custom fields."""
         return self.state_cls(**fields)
 
-    def initialize_state(self, task: str, *, reset_context: bool = True) -> RLMState:
+    def initialize_state(self, task: str) -> RLMState:
         """Create initial state for a task, reset engine for a fresh run."""
         self.children.clear()
         self.waiting_on.clear()
         self.is_done = False
         self.result = None
-        if self.context and reset_context:
-            self.context.write(task if self.depth == 0 else "")
         config_dict = {
             f.name: getattr(self.config, f.name)
             for f in fields(self.config)
-            if f.name != "context"
+            if f.name != "session"
         }
         config_dict.update(depth=self.depth)
         state = self.make_state(
@@ -168,18 +163,17 @@ class RLM:
             task=task,
             status=Status.WAITING,
             config=config_dict,
-            context=self.context.read() if self.context else None,
         )
         self.last_state = state
         return state
 
-    def start(self, task: str, *, reset_context: bool = True) -> RLMState:
+    def start(self, task: str) -> RLMState:
         """Alias for initialize_state (backwards compat)."""
-        return self.initialize_state(task, reset_context=reset_context)
+        return self.initialize_state(task)
 
-    def run(self, task: str, *, reset_context: bool = True) -> str:
+    def run(self, task: str) -> str:
         """Run to completion. Returns the result string."""
-        state = self.initialize_state(task, reset_context=reset_context)
+        state = self.initialize_state(task)
         while not state.finished:
             state = self.step(state)
         return state.result or ""
@@ -258,6 +252,19 @@ class RLM:
 
         children = list(state.children)
         existing = {cs.agent_id for cs in children}
+
+        redelegated = [
+            cid
+            for cid in self.children
+            if cid in existing and not self.children[cid].is_done
+        ]
+        for cid in redelegated:
+            children = [
+                self.children[cid].last_state if cs.agent_id == cid else cs
+                for cs in children
+            ]
+            existing = {cs.agent_id for cs in children}
+
         new_child_ids = [cid for cid in self.children if cid not in existing]
 
         if new_child_ids and not suspended:
@@ -293,7 +300,7 @@ class RLM:
         exec_message = self.execution_output_message(code, output)
         new_messages = state.messages + [exec_message]
 
-        return state.update(
+        new_state = state.update(
             status=new_status,
             event=CodeExec(
                 agent_id=state.agent_id,
@@ -304,10 +311,11 @@ class RLM:
             ),
             messages=new_messages,
             result=self.result if self.is_done else None,
-            context=self.context.read() if self.context else None,
             children=children,
             waiting_on=self.waiting_on if suspended else [],
         )
+        self._write_session(new_state)
+        return new_state
 
     def step_supervise(self, state: RLMState) -> RLMState:
         """Flatten tree, step one round of leaves, cascade parent resumes.
@@ -400,6 +408,19 @@ class RLM:
         suspended, resume_result = self.runtime.resume_code(results)
 
         children = list(state.children)
+
+        redelegated = [
+            cid
+            for cid in self.children
+            if cid in existing and not self.children[cid].is_done
+        ]
+        for cid in redelegated:
+            children = [
+                self.children[cid].last_state if cs.agent_id == cid else cs
+                for cs in children
+            ]
+            existing = {cs.agent_id for cs in children}
+
         new_child_ids = [cid for cid in self.children if cid not in existing]
 
         if new_child_ids and not suspended and not self.is_done:
@@ -445,6 +466,11 @@ class RLM:
             waiting_on=self.waiting_on if suspended else [],
         )
         return new_state, output if not suspended else None
+
+    def _write_session(self, state: RLMState) -> None:
+        """Persist the agent's message history to the session store."""
+        if self.session and state.messages:
+            self.session.write(state.agent_id, state.messages)
 
     # ── prompt & messages ────────────────────────────────────────────
 
@@ -514,15 +540,18 @@ class RLM:
         self, state: RLMState, msgs: list[dict], cap: int
     ) -> list[dict]:
         """Build a condensed message list when history exceeds max_messages."""
-        context = self.context.read() if self.context else ""
         recent = msgs[-cap:]
 
         parts = [f"## Task\n{state.task}"]
-        if context:
-            parts.append(f"## Context\n{context}")
+        hint = (
+            "Use `read_history()` to review earlier messages, "
+            "or `list_sessions()` to see other agents' progress."
+            if self.session
+            else ""
+        )
         parts.append(
             f"## History\n{len(msgs)} messages so far, showing the last {cap}. "
-            "Call read_context() for full progress."
+            f"{hint}"
         )
 
         summary = {"role": "user", "content": "\n\n".join(parts)}
@@ -530,17 +559,16 @@ class RLM:
 
     def next_action_message(self, task: str, *, iteration: int) -> dict[str, str]:
         """Format the user message that prompts the LLM to act."""
-        ctx_hint = (
-            "IMPORTANT: Context is available — start by calling `read_context()` "
-            "to check prior progress before doing anything else. "
-            "Use `append_context(text)` to record progress as you go.\n\n"
-            if self.context
+        session_hint = (
+            "You can call `read_history()` to review your earlier messages, "
+            "or `list_sessions()` to see all agents in the tree.\n\n"
+            if self.session
             else ""
         )
         if iteration == 0:
             content = (
                 f"Task: {task}\n\n"
-                f"{ctx_hint}"
+                f"{session_hint}"
                 "Your response MUST contain exactly one ```repl``` code block. "
                 "Put any reasoning as comments inside the block. "
                 "Do NOT reply with only text — every response needs a ```repl``` block."
@@ -548,7 +576,7 @@ class RLM:
         else:
             content = (
                 f"Continue working on the task: {task}\n\n"
-                f"{ctx_hint}"
+                f"{session_hint}"
                 "Your response MUST contain exactly one ```repl``` code block "
                 "with the next concrete action. "
                 "If you are done, call `done(result)` inside the block."
@@ -595,6 +623,8 @@ class RLM:
         "Mark the current agent as finished.\nArgs:\n- message (str): Required. An informative result message — the actual data, answer, or summary. Never pass empty string unless you truly found nothing.\nReturns:\n- str: The result."
     )
     def done(self, message: str) -> str:
+        if self.is_done:
+            return self.result
         self.is_done = True
         self.result = message.strip()
         return self.result
@@ -620,7 +650,17 @@ class RLM:
         if model not in self.llm_clients:
             keys = ", ".join(sorted(self.llm_clients))
             return f"[error: unknown model {model!r}. available: {keys}]"
-        agent_id = self._resolve_child_id(name)
+
+        agent_id = f"{self.agent_id}.{name}"
+
+        if agent_id in self.children and self.children[agent_id].is_done:
+            child = self.children[agent_id]
+            child.last_state = child.start(task)
+            return ChildHandle(agent_id)
+
+        if agent_id in self.children:
+            agent_id = self._resolve_child_id(name)
+
         client = self.llm_clients[model]
         child = self.create_child(
             agent_id, max_iterations=max_iterations, llm_client=client
@@ -657,22 +697,51 @@ class RLM:
     def wait(self, *handles: ChildHandle) -> WaitRequest:
         return WaitRequest(agent_ids=[h.agent_id for h in handles])
 
-    # ── context tools ──────────────────────────────────────────────
-
-    @tool("Read the agent's durable context. Returns the full context string.")
-    def read_context(self) -> str:
-        if not self.context:
-            return ""
-        return self.context.read()
+    # ── session tools ─────────────────────────────────────────────
 
     @tool(
-        "Append text to the agent's durable context.\nArgs:\n- text (str): Text to append.\nReturns:\n- str: Confirmation."
+        "List all agent sessions in the tree.\n"
+        "Returns a summary of each agent's ID and task."
     )
-    def append_context(self, text: str) -> str:
-        if not self.context:
-            return "No context configured."
-        self.context.append(text)
-        return "ok"
+    def list_sessions(self) -> str:
+        if not self.session:
+            return ""
+        agents = self.session.list_agents()
+        if not agents:
+            return "No sessions found."
+        lines = []
+        for aid in agents:
+            msgs = self.session.read(aid)
+            task = ""
+            for m in msgs:
+                if m.get("role") == "user":
+                    task = m.get("content", "")[:120]
+                    break
+            lines.append(f"{aid}: {task}")
+        return "\n".join(lines)
+
+    @tool(
+        "Read an agent's message history.\nArgs:\n"
+        "- agent_id (str | None): Agent to read. Defaults to self.\n"
+        "- last_n (int): Number of recent messages. Default 20.\n"
+        "Returns:\n- str: Formatted message history."
+    )
+    def read_history(self, agent_id: str | None = None, last_n: int = 20) -> str:
+        if not self.session:
+            return ""
+        aid = agent_id or self.agent_id
+        msgs = self.session.read(aid)
+        if not msgs:
+            return f"No session found for {aid}."
+        recent = msgs[-last_n:]
+        lines = []
+        for m in recent:
+            role = m.get("role", "?")
+            content = m.get("content", "")
+            if len(content) > 500:
+                content = content[:500] + "..."
+            lines.append(f"[{role}] {content}")
+        return "\n\n".join(lines)
 
     # ── children ─────────────────────────────────────────────────────
 
@@ -689,9 +758,8 @@ class RLM:
             or self.config.child_max_iterations
             or self.config.max_iterations // 3
         )
-        child_context = self.context.clone(agent_id) if self.context else None
         child_config = replace(
-            self.config, max_iterations=child_iters, context=child_context
+            self.config, max_iterations=child_iters, session=self.session
         )
         rt = self.runtime_factory() if self.runtime_factory else self.runtime.clone()
         return self.__class__(

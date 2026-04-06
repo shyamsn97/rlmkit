@@ -23,7 +23,6 @@ from rlmkit.llm import OpenAIClient
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.state import RLMState
-from rlmkit.utils import tool
 
 
 # ── Generate the haystack ───────────────────────────────────────────
@@ -169,53 +168,29 @@ def main():
         workspace = Path(tmpdir)
         haystack_path = workspace / "haystack.txt"
         haystack_path.write_text(haystack)
-        print(f"Wrote {len(haystack):,} chars to haystack.txt")
+        num_lines = len(haystack.splitlines())
+        print(f"Wrote {num_lines:,} lines to haystack.txt")
 
         runtime = LocalRuntime(workspace=workspace)
-
-        @tool("Read lines start:end (0-indexed) from a file. Returns the text.")
-        def read_lines(path: str, start: int, end: int) -> str:
-            p = workspace / path
-            lines = p.read_text().splitlines()
-            return "\n".join(lines[start:end])
-
-        @tool("Count the number of lines in a file.")
-        def line_count(path: str) -> int:
-            p = workspace / path
-            return len(p.read_text().splitlines())
-
-        @tool("Search for a regex pattern in a line range. Returns matching lines.")
-        def search_lines(path: str, pattern: str, start: int = 0, end: int = -1) -> str:
-            import re
-            p = workspace / path
-            lines = p.read_text().splitlines()
-            chunk = lines[start:end] if end > 0 else lines[start:]
-            regex = re.compile(pattern)
-            matches = []
-            for i, line in enumerate(chunk, start=start):
-                if regex.search(line):
-                    matches.append(f"line {i}: {line}")
-            return "\n".join(matches)
-
-        runtime.register_tool(read_lines)
-        runtime.register_tool(line_count)
-        runtime.register_tool(search_lines)
+        runtime.tools.pop("grep", None)
 
         agent = RLM(
             llm_client=strong,
             runtime=runtime,
-            config=RLMConfig(max_depth=3, max_iterations=15, context="context.md"),
+            config=RLMConfig(max_depth=3, max_iterations=15, session="context"),
             llm_clients={
                 "fast": {"model": fast, "description": "Cheap model for simple search tasks"},
             },
         )
 
         state = agent.start(
-            "I'm looking for a magic number in haystack.txt. What is it? You can only read around 50000 lines at a time."
+            f"haystack.txt has {num_lines:,} lines of noise with one line that says "
+            f"'The magic number is <N>'. Find the number. The file is too large to "
+            f"read at once — chunk it and delegate search to sub-agents. Return just the number."
         )
 
         if "--viz" in sys.argv:
-            from rlmkit.utils.viz import live
+            from viz import live
             states = live(agent, state)
         else:
             step = 0
@@ -228,6 +203,7 @@ def main():
 
         final = states[-1] if states else state
         print(f"\n{'='*40}")
+        print(f"Agent answer:   {final.result}")
         print(f"Actual answer:  {answer}")
         print(f"Correct:        {answer in (final.result or '')}")
         print(f"Trace saved to {LOG_PATH}")

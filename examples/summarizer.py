@@ -292,7 +292,7 @@ When summarizing, follow these rules:
         agent = RLM(
             llm_client=llm,
             runtime=runtime,
-            config=RLMConfig(max_depth=3, max_iterations=15, context="context.md"),
+            config=RLMConfig(max_depth=3, max_iterations=15, session="context"),
             prompt_builder=builder,
         )
 
@@ -303,7 +303,7 @@ When summarizing, follow these rules:
         )
 
         if args.viz:
-            from rlmkit.utils.viz import live
+            from viz import live
             states = live(agent, state)
         else:
             step = 0

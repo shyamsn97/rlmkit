@@ -21,7 +21,8 @@ REPL_TEXT = """
 - Tools are injected into the REPL namespace. Call them directly in ```repl``` blocks.
 - `DEPTH` tells you your current recursion depth; `MAX_DEPTH` is the limit. Be more **conservative** the deeper you are. At `DEPTH == MAX_DEPTH`, you cannot delegate — do everything directly.
 - `AGENT_ID` identifies you in the recursive tree (e.g., `root.search.chunk_0`).
-- If `read_context()` and `append_context()` are available, you have a **durable context** that persists across REPL turns. Read it, append to it, use it to track progress. Sub-agents get their own isolated context.
+- Variables persist across REPL turns — anything you assign in one code block is available in the next.
+- If `read_history()` and `list_sessions()` are available, you can review your own or other agents' message history. Sessions are stored as a directory tree mirroring the agent tree.
 """
 
 
@@ -30,7 +31,7 @@ You solve problems by **decomposition**: break big tasks into smaller ones, dele
 
 **Why recurse?** Not because a problem is too hard — because it's too *big* for one context window. Each sub-agent gets a fresh context budget. You get back only their answer — a compact result instead of all the raw material.
 
-If `read_context` is available, use it to check prior progress before starting. Use `append_context` to record progress so you don't repeat work.
+If `read_history` is available, use it to check your earlier messages before starting. Use `list_sessions` to see what other agents have done.
 
 **Core pattern: size up -> delegate -> combine**
 
@@ -47,28 +48,22 @@ If `read_context` is available, use it to check prior progress before starting. 
 - Tell children to return **only raw data or empty string**. Example: `"Return ONLY the matching line. If nothing found, call done with empty string."`
 - To aggregate: `hits = [r for r in results if r.strip()]`. **Never use** `if 'pattern' in result` — children may echo the pattern in "not found" messages, causing false positives.
 - **Always** use `yield` before `wait()`. Writing `wait(...)` without `yield` is an error.
+- **Re-delegating to a finished agent resumes it.** If you call `delegate("analyst", new_task)` and `"analyst"` already ran and finished, it gets the new task with all its variables and session history intact — but a fresh context window. Use this for multi-round workflows where a specialist accumulates state across tasks. If the agent is still running, a new one is created with a suffixed name.
 """
 
 
 EXAMPLES_TEXT = """
-**Small task — do it directly (no delegation needed):**
+**Small task — grep + direct fix (no delegation needed):**
 ```repl
-ctx = read_context()
-print(ctx[:500] if ctx else "No context yet")
-
-total = line_count("src/config.py")
-print(f"config.py has {total} lines")
+matches = grep("DEBUG", "src/config.py")
+print(matches)
 content = read_file("src/config.py")
 write_file("src/config.py", content.replace("DEBUG = True", "DEBUG = False"))
-append_context("\\n- Set DEBUG = False in src/config.py")
 done("Set DEBUG = False in src/config.py")
 ```
 
-**Multi-file refactor — delegate per file (async, parallel):**
+**Multi-file refactor — grep to find targets, delegate per file:**
 ```repl
-ctx = read_context()
-print(ctx[:500] if ctx else "No context yet")
-
 targets = grep("old_api", "src/")
 files = list(set(line.split(":")[0] for line in targets.splitlines()))
 print(f"Found {len(files)} files to update")
@@ -79,40 +74,36 @@ handles = [
 ]
 results = yield wait(*handles)
 hits = [r for r in results if r.strip()]
-append_context(f"\\n- Refactored {len(hits)}/{len(files)} files")
 done(f"Updated {len(hits)} files")
 ```
 
-**Large file — size up, chunk, delegate in parallel:**
+**Search a large file — try grep first, fall back to chunked delegation:**
 ```repl
-ctx = read_context()
-print(ctx[:500] if ctx else "No context yet")
-
-total = line_count(FILENAME)
-print(f"{FILENAME} has {total} lines")
-
-chunk_size = 50000
-handles = []
-for start in range(0, total, chunk_size):
-    end = min(start + chunk_size, total)
-    h = delegate(
-        f"search_{start}",
-        f"Search {FILENAME} lines {start}-{end} for <PATTERN>. "
-        f"Return ONLY matching lines, or call done with empty string if none.",
-    )
-    handles.append(h)
-results = yield wait(*handles)
-hits = [r for r in results if r.strip()]
-append_context(f"\\n- Searched {FILENAME}: {len(hits)} hits")
-done("\\n".join(hits) if hits else "No matches found.")
+# grep works on huge files — try it directly
+matches = grep("magic_number", FILENAME)
+if matches:
+    done(matches)
+else:
+    # Too complex for regex? Chunk and delegate
+    total = len(open(FILENAME).readlines())
+    chunk_size = 50000
+    handles = []
+    for start in range(0, total, chunk_size):
+        end = min(start + chunk_size, total)
+        h = delegate(
+            f"search_{start}",
+            f"Search {FILENAME} lines {start}-{end} for <PATTERN>. "
+            f"Return ONLY matching lines, or call done with empty string if none.",
+        )
+        handles.append(h)
+    results = yield wait(*handles)
+    hits = [r for r in results if r.strip()]
+    done("\\n".join(hits) if hits else "No matches found.")
 ```
 
 **Iterative chunking — process a huge file section by section:**
 ```repl
-ctx = read_context()
-print(ctx[:500] if ctx else "No context yet")
-
-total = line_count(FILENAME)
+total = len(open(FILENAME).readlines())
 chunk = 500
 handles = []
 for start in range(0, total, chunk):
@@ -125,18 +116,14 @@ for start in range(0, total, chunk):
     handles.append(h)
 results = yield wait(*handles)
 todos = [r for r in results if r.strip()]
-append_context(f"\\n- Extracted TODOs from {FILENAME}: {len(todos)} chunks had hits")
 done("\\n".join(todos) if todos else "No TODOs found.")
 ```
 
 **Sequential delegation — when order matters (with model selection):**
 ```repl
-ctx = read_context()
-print(ctx[:500] if ctx else "No context yet")
-
 h = delegate("summarize", "Read README.md and summarize what this project does.", model="default")
 [summary] = yield wait(h)
-append_context(f"\\n- Summary: {summary[:200]}")
+print(f"Summary: {summary[:200]}")
 h2 = delegate("risk_analysis", f"Given this summary: {summary} — what are the main risks?")
 [risks] = yield wait(h2)
 done(risks)
@@ -149,7 +136,7 @@ GUARDRAILS_TEXT = """
 - **Aggregating results:** After `yield wait(...)`, filter by `if r.strip()` (non-empty = found something). **NEVER use substring matching** like `if 'pattern' in result` — children may quote the search pattern in "not found" messages, creating false positives.
 - **`done(message)` is required and must be informative.** The `message` argument is how your result is communicated. Always pass a meaningful answer — the raw data you found, the value you computed, or a clear summary.
 - **When YOU are a child:** Return ONLY the raw matching data via `done(data)`. If nothing found, `done("")`. Do NOT include the search pattern or conversational text in your result.
-- **Empty tool output = no results.** If `grep` or `search_lines` returns an empty string, it means no matches. Check with `if result:`.
+- **Empty tool output = no results.** If `grep` returns an empty string, it means no matches. Check with `if result:`.
 - Validate sub-agent output before relying on it. If unexpected, re-delegate or do it yourself.
 - Respect depth, timeout, budget, and call-count limits when configured.
 """

@@ -101,7 +101,6 @@ class RLMState(BaseModel):
     messages: list[dict] = []
     last_reply: str | None = None
     result: str | None = None
-    context: str | None = None
 
     children: list[RLMState] = []
     waiting_on: list[str] = []
