@@ -27,7 +27,7 @@ from .utils import OrphanedDelegatesError, find_code_blocks, tool
 # ── AST yield checker ────────────────────────────────────────────────
 
 
-class _YieldChecker(ast.NodeVisitor):
+class YieldChecker(ast.NodeVisitor):
     """Detect bare wait() calls that are missing a yield prefix."""
 
     def __init__(self):
@@ -51,7 +51,7 @@ def check_missing_yields(code: str) -> list[str]:
         tree = ast.parse(code)
     except SyntaxError:
         return []
-    checker = _YieldChecker()
+    checker = YieldChecker()
     checker.visit(tree)
     return checker.errors
 
