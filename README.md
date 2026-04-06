@@ -1,6 +1,6 @@
 # rlmkit
 
-A **step-based state machine** for [Recursive Language Model](https://github.com/alexzhang13/rlm-minimal) agents (~2,300 lines of Python).
+A **step-based state machine** for [Recursive Language Model](https://github.com/alexzhang13/rlm-minimal) agents
 
 ```
 pip install rlmkit
