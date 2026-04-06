@@ -222,7 +222,7 @@ Each `step(state) → state` is a single atomic transition:
                             │
 ┌───────────────────────────┴───────────────────────────┐
 │                      RLM Engine                       │
-│                  (stateless stepper)                   │
+│                  (stateless stepper)                  │
 │                                                       │
 │  immutable infra: llm_client, runtime, config, pool   │
 │  ephemeral working memory: is_done, result            │
