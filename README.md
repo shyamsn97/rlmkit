@@ -38,7 +38,7 @@ runtime = LocalRuntime(workspace=".")
 agent = RLM(
     llm_client=OpenAIClient("gpt-5"),
     runtime=runtime,
-    config=RLMConfig(max_depth=3, max_iterations=15, context="context.md"),
+    config=RLMConfig(max_depth=3, max_iterations=15, session="context"),
 )
 
 # You drive the loop. Every step is visible.
@@ -97,7 +97,7 @@ The engine is a stateless stepper. The state is the single source of truth. A gl
 │           (immutable, serializable, recursive)        │
 │                                                       │
 │  task, status, messages, events, result, waiting_on,  │
-│  context, config                                      │
+│  config                                               │
 │                                                       │
 │  children: [RLMState, RLMState, ...]                  │
 │             └── full recursive state tree             │
@@ -168,7 +168,7 @@ In vanilla rlmkit, the LLM **is** the policy — it picks the action (code to ru
 ```python
 while not state.finished:
     if stuck(state):
-        state = state.update(context=state.context + "\nHint: try a different approach")
+        state = state.update(task=state.task + "\nHint: try a different approach")
     state = agent.step(state)
 ```
 
@@ -240,7 +240,6 @@ state.result      # final result string (when finished)
 state.waiting_on  # agent IDs currently waiting on (during SUPERVISING)
 state.children    # list[RLMState] — the full recursive tree
 state.config      # dict of config + runtime info
-state.context     # context file contents (if configured)
 state.finished    # shorthand for status == FINISHED
 
 new_state = state.update(iteration=5)  # immutable update
@@ -274,7 +273,7 @@ RLMConfig(
     max_concurrency=8,         # global parallel execution cap
     child_max_iterations=None, # override for child iteration limit
     single_block=True,         # only execute first ```repl``` block
-    context=None,              # durable scratchpad: str path, Context object, or None
+    session=None,              # session persistence: str path, Session object, or None
     system_prompt=None,        # raw override (skips default builder)
 )
 ```
@@ -376,35 +375,50 @@ def now() -> str:
 runtime.register_tool(now)
 ```
 
-### Context
+### Sessions
 
-Agents can have a **durable scratchpad** that persists across REPL turns. Pass a string path to auto-create a file-backed context, or implement your own `Context` subclass for other backends (database, in-memory, etc.):
+Agent message histories can be persisted to a **session store**. The engine writes after each step, and agents can read their own or other agents' sessions via built-in tools.
+
+Pass a string path to auto-create a file-backed session directory, or provide a `Session` object for other backends:
 
 ```python
-# String path → auto-creates FileContext
-agent = RLM(llm_client=llm, runtime=runtime, config=RLMConfig(context="context.md"))
+# String path → auto-creates FileSession backed by a directory
+agent = RLM(llm_client=llm, runtime=runtime, config=RLMConfig(session="context"))
 
-# Or provide a Context object directly
-from rlmkit.context import FileContext, Context
-agent = RLM(llm_client=llm, runtime=runtime, config=RLMConfig(context=FileContext("ctx.md", runtime)))
+# Or provide a Session object directly
+from rlmkit.session import FileSession, Session
+agent = RLM(llm_client=llm, runtime=runtime, config=RLMConfig(session=FileSession("context")))
 ```
 
-When context is configured, two tools are registered into the REPL:
-- `read_context()` — returns the full context string
-- `append_context(text)` — appends text to the context
+When a session is configured, two tools are registered:
+- `list_sessions()` — list all agent IDs with stored sessions, plus a task preview
+- `read_history(agent_id=None, last_n=20)` — read any agent's message history
 
-Children get an **isolated clone** via `Context.clone(agent_id)`. For `FileContext`, this creates a sibling file under `{parent_dir}/{agent_id}/{filename}`.
+`FileSession` stores JSON files in a directory tree mirroring the agent hierarchy:
 
-To implement a custom context backend, subclass `Context` and implement `read()`, `append()`, `write()`, and `clone()`:
+```
+context/
+├── session.json              ← root
+├── search_0/
+│   ├── session.json          ← root.search_0
+│   └── sub_a/
+│       └── session.json      ← root.search_0.sub_a
+└── search_1/
+    └── session.json
+```
+
+Children share the same session store — each writes using its own `agent_id`. No cloning needed.
+
+To implement a custom backend (Redis, S3, database), subclass `Session`:
 
 ```python
-from rlmkit.context import Context
+from rlmkit.session import Session
 
-class RedisContext(Context):
-    def read(self) -> str: ...
-    def append(self, text: str) -> None: ...
-    def write(self, text: str) -> None: ...
-    def clone(self, agent_id: str) -> RedisContext: ...
+class RedisSession(Session):
+    def write(self, agent_id: str, messages: list[dict]) -> None: ...
+    def read(self, agent_id: str) -> list[dict]: ...
+    def list_agents(self) -> list[str]: ...
+    def exists(self, agent_id: str) -> bool: ...
 ```
 
 ### Model Selection
@@ -670,7 +684,7 @@ rlmkit/
 ├── rlm.py           # RLM engine, RLMConfig, step logic
 ├── state.py         # RLMState, Status, StepEvent hierarchy, ChildHandle, WaitRequest
 ├── pool.py          # Pool ABC, ThreadPool, SequentialPool, CallablePool
-├── context.py       # Context ABC, FileContext
+├── session.py       # Session ABC, FileSession
 ├── llm.py           # LLMClient ABC, OpenAIClient, AnthropicClient
 ├── utils.py         # @tool decorator, code block parsing
 ├── runtime/

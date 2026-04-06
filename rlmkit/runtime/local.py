@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ class LocalRuntime(Runtime):
     """Execute Python code in a persistent local namespace.
 
     Comes with all the builtin file/shell tools registered by default.
+    Sets cwd to the workspace so ``open("file.txt")`` works naturally.
     """
 
     def __init__(
@@ -20,6 +22,7 @@ class LocalRuntime(Runtime):
         workspace: Path | str = ".",
     ) -> None:
         super().__init__(workspace=workspace)
+        os.chdir(self.workspace)
         self.namespace: dict[str, Any] = {"__builtins__": __builtins__}
         self.sandbox = Sandbox(self.namespace)
         for mod in self.available_modules():

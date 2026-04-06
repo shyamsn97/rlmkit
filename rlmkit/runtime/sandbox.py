@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import inspect
 import io
 import json
 import sys
@@ -147,11 +146,23 @@ class Sandbox:
             exec(code, self.namespace)
         return self.buf.getvalue().strip()
 
-    def wrap_as_function(self, code: str):
-        """Wrap a code block in a function via AST — no string templating."""
-        tree = ast.parse(code)
+    def _wrap_generator(self, code: str, tree: ast.Module):
+        """Wrap code in a generator function with auto-global declarations.
+
+        Every assigned name gets a ``global`` declaration so variables
+        persist in ``self.namespace`` across generator yields.
+        """
+        assigned = {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        }
         func = ast.parse("def __rlm_gen__(): pass").body[0]
-        func.body = tree.body or [ast.Pass()]
+        body: list[ast.stmt] = []
+        if assigned:
+            body.append(ast.Global(names=sorted(assigned)))
+        body.extend(tree.body or [ast.Pass()])
+        func.body = body
         module = ast.Module(body=[func], type_ignores=[])
         ast.fix_missing_locations(module)
         exec(compile(module, "<rlm>", "exec"), self.namespace)
@@ -165,14 +176,21 @@ class Sandbox:
         """
         self.buf = io.StringIO()
         try:
-            fn = self.wrap_as_function(code)
+            tree = ast.parse(code)
         except SyntaxError as exc:
             self.buf.write(f"\nSyntaxError: {exc}")
             return False, self.buf.getvalue().strip()
-        if not inspect.isgeneratorfunction(fn):
+
+        has_yield = any(
+            isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(tree)
+        )
+
+        if not has_yield:
             with self.captured():
-                fn()
+                exec(code, self.namespace)
             return False, self.buf.getvalue().strip()
+
+        fn = self._wrap_generator(code, tree)
         self.gen = fn()
         return self.advance()
 
