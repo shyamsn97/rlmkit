@@ -112,3 +112,54 @@ class RLMState(BaseModel):
     def update(self, **changes) -> RLMState:
         """Return a new state with the given fields changed."""
         return self.model_copy(update=changes)
+
+    def tree(self, *, color: bool = True) -> str:
+        """Render the full state tree as a string.
+
+        >>> print(state.tree())
+        root [supervising] iter 5
+        ├── root.search_0 [finished] → "Found it on line 42"
+        ├── root.search_1 [waiting] iter 2
+        └── root.search_2 [finished] → ""
+        """
+        lines: list[str] = []
+        _render_tree(self, lines, "", "", color)
+        return "\n".join(lines)
+
+
+# ── Tree rendering ───────────────────────────────────────────────────
+
+_STATUS_COLORS = {
+    "waiting": "\033[34m",
+    "has_reply": "\033[33m",
+    "supervising": "\033[35m",
+    "finished": "\033[32m",
+}
+
+
+def _node_label(state: RLMState, color: bool) -> str:
+    B, D, R = ("\033[1m", "\033[2m", "\033[0m") if color else ("", "", "")
+    sc = _STATUS_COLORS.get(state.status.value, "") if color else ""
+
+    label = f"{B}{state.agent_id or 'root'}{R} {sc}[{state.status.value}]{R} iter {state.iteration}"
+    if state.finished and state.result is not None:
+        preview = state.result[:80].replace("\n", " ")
+        label += f' {D}→ "{preview}"{R}'
+    return label
+
+
+def _render_tree(
+    state: RLMState,
+    out: list[str],
+    prefix: str,
+    child_prefix: str,
+    color: bool,
+) -> None:
+    out.append(prefix + _node_label(state, color))
+    for i, child in enumerate(state.children):
+        is_last = i == len(state.children) - 1
+        connector = "└── " if is_last else "├── "
+        extension = "    " if is_last else "│   "
+        _render_tree(
+            child, out, child_prefix + connector, child_prefix + extension, color
+        )
