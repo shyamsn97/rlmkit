@@ -8,25 +8,21 @@ pip install rlmkit
 
 ## The Idea
 
-An LLM with a code REPL can solve problems by writing and executing code in a loop. When the problem is too big for one context window, it spawns sub-agents — each a fresh LLM+REPL with its own context — to handle pieces in parallel. Sub-agents can spawn their own. A tree grows:
+An LLM with a code REPL can recursively spawn sub-agents to handle pieces of a problem in parallel. rlmkit makes this tree a **state machine** — every agent advances one step at a time, and the entire computation is one object you can inspect, checkpoint, fork, or serialize at any step boundary. Call `state.tree()` to see it:
 
 ```
-root: "Find the security vulnerability in this repo"
-├── scanner_auth: "Audit authentication in src/auth/"
-│   ├── chunk_0: "Check login.py for injection"
-│   ├── chunk_1: "Check session.py for fixation"
-│   └── chunk_2: "Check tokens.py for leaks"
-├── scanner_api: "Audit all API endpoints in src/api/"
-│   ├── chunk_0: "Check users.py"
-│   ├── chunk_1: "Check payments.py"
-│   │   └── deep_scan: "Trace the payment flow end-to-end"
-│   └── chunk_2: "Check admin.py"
-└── scanner_db: "Audit database queries in src/db/"
-    ├── chunk_0: "Check queries.py for SQLi"
-    └── chunk_1: "Check migrations.py"
+root [supervising] iter 5
+├── root.scanner_auth [finished] iter 3 → "Found SQL injection in login.py"
+│   ├── root.scanner_auth.chunk_0 [finished] iter 2 → "No issues"
+│   ├── root.scanner_auth.chunk_1 [finished] iter 2 → "SQL injection on line 42"
+│   └── root.scanner_auth.chunk_2 [finished] iter 2 → "No issues"
+├── root.scanner_api [supervising] iter 3
+│   ├── root.scanner_api.chunk_0 [waiting] iter 1
+│   ├── root.scanner_api.chunk_1 [finished] iter 2 → "Clean"
+│   │   └── root.scanner_api.chunk_1.deep_scan [finished] iter 2 → "Payment flow is safe"
+│   └── root.scanner_api.chunk_2 [finished] iter 2 → "Clean"
+└── root.scanner_db [finished] iter 2 → "No issues found"
 ```
-
-In most frameworks, this tree is a black box — you call `agent.run()` and wait. rlmkit makes it a **state machine**. You own the loop, you see every transition, you can checkpoint/fork/intervene between any two steps.
 
 ## Quick Start
 
@@ -44,7 +40,7 @@ agent = RLM(
 state = agent.start("Find and fix all type errors in src/")
 while not state.finished:
     state = agent.step(state)
-    print(state.event)
+    print(state.tree())   # see the full agent tree at every step
 print(state.result)
 ```
 
@@ -111,6 +107,7 @@ state.messages    # full LLM message history
 state.result      # final result (when finished)
 state.children    # list[RLMState] — recursive
 state.finished    # shorthand for status == FINISHED
+state.tree()      # render the full tree as a string (color=True by default)
 ```
 
 ## Core API
