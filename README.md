@@ -232,11 +232,10 @@ All examples log a full step-by-step trace. Run with `--viz` for a live terminal
 
 | Example | What it shows |
 |---------|--------------|
-| [`agent.py`](examples/agent.py) | Interactive coding agent REPL — give it tasks, it writes and edits files |
+| [`agent.py`](examples/coding-agent/agent.py) | Interactive coding agent REPL — give it tasks, it writes and edits files |
 | [`summarizer.py`](examples/summarizer.py) | Recursive map-reduce: chunk a 10k-line doc, summarize in parallel, combine results |
 | [`basic.py`](examples/basic.py) | Parallel chunked search over 1M lines — the "hello world" of recursive agents |
 | [`needle_haystack.py`](examples/needle_haystack.py) | 500-file search with `runtime_factory` — each child gets its own sandboxed runtime |
-| [`custom_agent.py`](examples/custom_agent.py) | Subclassed RLM with custom state: a code reviewer that accumulates findings across steps |
 
 ## Project Structure
 
