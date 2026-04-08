@@ -13,7 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import OpenAIClient
+from rlmkit.llm import AnthropicClient
 from rlmkit.prompts import make_default_builder
 from rlmkit.prompts.default import ROLE_TEXT
 from rlmkit.rlm import RLM, RLMConfig
@@ -106,7 +106,7 @@ Output format for each file:
 # ── 4. Run it ───────────────────────────────────────────────────────
 
 def main():
-    llm = OpenAIClient()
+    llm = AnthropicClient("claude-opus-4-6")
 
     logger = StepLogger(Path(__file__).parent / "custom_agent_log.md")
 
@@ -137,14 +137,19 @@ def main():
             "findings into a final summary."
         )
 
-        step = 0
-        while not state.finished:
-            state = agent.step(state)
-            step += 1
-            extra = ""
-            if isinstance(state, ReviewState) and state.findings:
-                extra = f"{DIM}({len(state.findings)} findings){RESET}"
-            logger.log(step, state, extra_term=extra)
+        if "--viz" in sys.argv:
+            from rlmkit.utils.viz import live
+            states = live(agent, state)
+            state = states[-1]
+        else:
+            step = 0
+            while not state.finished:
+                state = agent.step(state)
+                step += 1
+                extra = ""
+                if isinstance(state, ReviewState) and state.findings:
+                    extra = f"{DIM}({len(state.findings)} findings){RESET}"
+                logger.log(step, state, extra_term=extra)
 
         print(f"\n{'='*60}")
         print(state.result)

@@ -2,8 +2,20 @@
 
 A state machine for [Recursive Language Model](https://github.com/alexzhang13/rlm-minimal) agents. Every agent — root and all descendants — advances one step at a time. The entire computation tree is a single immutable, serializable object at every step boundary.
 
+## Installation
+
+### from pip
+
 ```
 pip install rlmkit
+```
+
+### from source
+
+```
+git clone https://github.com/shyamsn97/rlmkit
+cd rlmkit
+pip install -e .
 ```
 
 ## The Idea
@@ -17,7 +29,7 @@ root [supervising] iter 5
 │   ├── root.scanner_auth.chunk_1 [finished] iter 2 → "SQL injection on line 42"
 │   └── root.scanner_auth.chunk_2 [finished] iter 2 → "No issues"
 ├── root.scanner_api [supervising] iter 3
-│   ├── root.scanner_api.chunk_0 [waiting] iter 1
+│   ├── root.scanner_api.chunk_0 [ready] iter 1
 │   ├── root.scanner_api.chunk_1 [finished] iter 2 → "Clean"
 │   │   └── root.scanner_api.chunk_1.deep_scan [finished] iter 2 → "Payment flow is safe"
 │   └── root.scanner_api.chunk_2 [finished] iter 2 → "Clean"
@@ -51,22 +63,22 @@ Or: `result = agent.run("Find and fix all type errors in src/")`
 Each `step(state) → state` is one atomic transition. Four statuses:
 
 ```
-                    ┌─────────────────────────────────────────┐
-                    │                                         │
-                    ▼                                         │
-                WAITING ──── step_llm() ────→ HAS_REPLY       │
-                  ▲  ▲                           │            │
-                  │  │                     step_exec()        │
-                  │  │                      ╱        ╲        │
-                  │  └── no children ──────╴          ╲       │
-                  │                                    ▼      │
-                  │  done() ───────────────────→ FINISHED     │
-                  │                                           │
-                  │                              SUPERVISING ─┘
-                  │                                  │
-                  │                          step_supervise()
-                  │                          flatten tree → step
-                  └── children done ──────── leaves first → cascade
+                    ┌──────────────────────────────────────────┐
+                    │                                          │
+                    ▼                                          │
+                  READY ──── step_llm() ────→ EXECUTING        │
+                  ▲  ▲                            │            │
+                  │  │                      step_exec()        │
+                  │  │                       ╱        ╲        │
+                  │  └── no children ───────╴          ╲       │
+                  │                                     ▼      │
+                  │  done() ────────────────────→ FINISHED     │
+                  │                                            │
+                  │                               SUPERVISING ─┘
+                  │                                   │
+                  │                           step_supervise()
+                  │                           flatten tree → step
+                  └── children done ───────── leaves first → cascade
 ```
 
 When code calls `delegate()` + `yield wait()`, the generator suspends. The engine flattens the entire tree, sorts deepest-first, and steps all leaves in parallel. Parents resume automatically when their children finish.
@@ -100,7 +112,7 @@ Frozen, recursive Pydantic model — the entire computation in one object:
 ```python
 state.agent_id    # "root", "root.search_0", "root.search_0.chunk_2"
 state.task        # the task string
-state.status      # WAITING | HAS_REPLY | SUPERVISING | FINISHED
+state.status      # READY | EXECUTING | SUPERVISING | FINISHED
 state.iteration   # current step count
 state.event       # last StepEvent — LLMReply, CodeExec, ChildStep, or NoCodeBlock
 state.messages    # full LLM message history

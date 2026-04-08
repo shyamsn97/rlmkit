@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boids Flocking Simulation</title>
+<style>
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    background: #0a0a1a;
+    overflow: hidden;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    color: #e0e0e0;
+  }
+
+  #canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+
+  /* Control Panel */
+  #control-panel {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    width: 300px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+    background: rgba(14, 14, 36, 0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(106, 159, 255, 0.2);
+    border-radius: 16px;
+    padding: 24px 20px 20px;
+    z-index: 100;
+    transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.35s ease;
+  }
+
+  #control-panel.hidden {
+    transform: translateX(340px);
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  #control-panel h2 {
+    text-align: center;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: #8ab4ff;
+    margin-bottom: 20px;
+    text-transform: uppercase;
+  }
+
+  .control-group {
+    margin-bottom: 14px;
+  }
+
+  .control-group label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12.5px;
+    color: #b0b8c8;
+    margin-bottom: 6px;
+    font-weight: 500;
+  }
+
+  .control-group label span.value {
+    color: #6a9fff;
+    font-weight: 700;
+    font-size: 13px;
+    min-width: 36px;
+    text-align: right;
+  }
+
+  /* Slider styling */
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(106, 159, 255, 0.15);
+    outline: none;
+    cursor: pointer;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #6a9fff;
+    border: 2px solid #0a0a1a;
+    box-shadow: 0 0 8px rgba(106, 159, 255, 0.5);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+    box-shadow: 0 0 14px rgba(106, 159, 255, 0.8);
+  }
+
+  input[type="range"]::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #6a9fff;
+    border: 2px solid #0a0a1a;
+    box-shadow: 0 0 8px rgba(106, 159, 255, 0.5);
+    cursor: pointer;
+  }
+
+  /* Checkbox styling */
+  .checkbox-group {
+    display: flex;
+    align-items: center;
+    margin-bottom: 10px;
+    font-size: 12.5px;
+    color: #b0b8c8;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .checkbox-group input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    border: 2px solid rgba(106, 159, 255, 0.4);
+    border-radius: 4px;
+    background: rgba(106, 159, 255, 0.08);
+    margin-right: 10px;
+    cursor: pointer;
+    position: relative;
+    flex-shrink: 0;
+    transition: background 0.2s ease, border-color 0.2s ease;
+  }
+
+  .checkbox-group input[type="checkbox"]:checked {
+    background: #6a9fff;
+    border-color: #6a9fff;
+  }
+
+  .checkbox-group input[type="checkbox"]:checked::after {
+    content: '✓';
+    position: absolute;
+    top: -1px;
+    left: 2px;
+    font-size: 13px;
+    color: #0a0a1a;
+    font-weight: 700;
+  }
+
+  /* Buttons */
+  .button-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 18px;
+  }
+
+  .btn {
+    flex: 1;
+    padding: 10px 0;
+    border: 1px solid rgba(106, 159, 255, 0.3);
+    border-radius: 10px;
+    background: rgba(106, 159, 255, 0.1);
+    color: #8ab4ff;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease, transform 0.1s ease;
+    text-transform: uppercase;
+  }
+
+  .btn:hover {
+    background: rgba(106, 159, 255, 0.22);
+    border-color: rgba(106, 159, 255, 0.5);
+  }
+
+  .btn:active {
+    transform: scale(0.97);
+  }
+
+  /* Toggle button */
+  #toggle-panel {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    border: 1px solid rgba(106, 159, 255, 0.3);
+    background: rgba(14, 14, 36, 0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    color: #8ab4ff;
+    font-size: 20px;
+    cursor: pointer;
+    z-index: 99;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s ease, opacity 0.35s ease;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  #toggle-panel.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  #toggle-panel:hover {
+    background: rgba(106, 159, 255, 0.18);
+  }
+
+  /* Stats display */
+  #stats {
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    background: rgba(14, 14, 36, 0.75);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(106, 159, 255, 0.15);
+    border-radius: 10px;
+    padding: 10px 16px;
+    font-size: 12px;
+    color: #7a8aa0;
+    z-index: 100;
+    font-family: 'Consolas', 'Monaco', monospace;
+    line-height: 1.6;
+  }
+
+  #stats span {
+    color: #6a9fff;
+    font-weight: 600;
+  }
+
+  /* Divider */
+  .divider {
+    height: 1px;
+    background: rgba(106, 159, 255, 0.12);
+    margin: 16px 0;
+  }
+
+  /* Scrollbar */
+  #control-panel::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  #control-panel::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  #control-panel::-webkit-scrollbar-thumb {
+    background: rgba(106, 159, 255, 0.25);
+    border-radius: 2px;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<!-- Toggle button (visible when panel is hidden) -->
+<button id="toggle-panel" title="Show controls">⚙</button>
+
+<!-- Control Panel -->
+<div id="control-panel">
+  <h2>🐦 BOIDS SIMULATION</h2>
+
+  <div class="control-group">
+    <label>Boid Count <span class="value" id="val-boidCount">200</span></label>
+    <input type="range" id="boidCount" min="10" max="600" value="200" step="1">
+  </div>
+
+  <div class="control-group">
+    <label>Separation <span class="value" id="val-separation">1.5</span></label>
+    <input type="range" id="separation" min="0" max="5" value="1.5" step="0.1">
+  </div>
+
+  <div class="control-group">
+    <label>Alignment <span class="value" id="val-alignment">1.0</span></label>
+    <input type="range" id="alignment" min="0" max="5" value="1.0" step="0.1">
+  </div>
+
+  <div class="control-group">
+    <label>Cohesion <span class="value" id="val-cohesion">1.0</span></label>
+    <input type="range" id="cohesion" min="0" max="5" value="1.0" step="0.1">
+  </div>
+
+  <div class="control-group">
+    <label>Visual Range <span class="value" id="val-visualRange">75</span></label>
+    <input type="range" id="visualRange" min="20" max="200" value="75" step="1">
+  </div>
+
+  <div class="control-group">
+    <label>Max Speed <span class="value" id="val-maxSpeed">4</span></label>
+    <input type="range" id="maxSpeed" min="1" max="12" value="4" step="0.5">
+  </div>
+
+  <div class="control-group">
+    <label>Trail Length <span class="value" id="val-trailLength">0</span></label>
+    <input type="range" id="trailLength" min="0" max="30" value="0" step="1">
+  </div>
+
+  <div class="divider"></div>
+
+  <label class="checkbox-group">
+    <input type="checkbox" id="mousePredator">
+    Mouse as predator
+  </label>
+
+  <label class="checkbox-group">
+    <input type="checkbox" id="wrapEdges" checked>
+    Wrap around edges
+  </label>
+
+  <div class="button-row">
+    <button class="btn" id="btn-reset">Reset</button>
+    <button class="btn" id="btn-pause">Pause</button>
+  </div>
+
+  <div style="text-align: center; margin-top: 14px;">
+    <button class="btn" id="btn-hide-panel" style="padding: 6px 20px; font-size: 11px; flex: none; display: inline-block;">Hide Panel</button>
+  </div>
+</div>
+
+<!-- Stats -->
+<div id="stats">
+  FPS: <span id="stat-fps">0</span><br>
+  Boids: <span id="stat-boids">0</span>
+</div>
+
+<script src="boids.js"></script>
+</body>
+</html>

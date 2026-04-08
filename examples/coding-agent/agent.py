@@ -4,9 +4,8 @@ A REPL interface to an RLM coding agent. Talk to it, give it tasks,
 it writes and edits files in your workspace using delegation.
 
 Usage:
-    python agent.py                        # workspace = current dir
     python agent.py --workspace ./myproject
-    python agent.py --model gpt-5-mini
+    python agent.py --workspace ./myproject --no-viz
 """
 
 from __future__ import annotations
@@ -15,13 +14,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from rlmkit.llm import OpenAIClient
+from rlmkit.llm import AnthropicClient
 from rlmkit.prompts import make_default_builder
 from rlmkit.prompts.default import ROLE_TEXT
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 
-from utils import StepLogger
 
 ROLE = f"""\
 You are a coding agent. You write, edit, and organize code.
@@ -37,18 +35,20 @@ When given a task:
 
 
 def main():
+    strong = AnthropicClient("claude-opus-4-6")
+    fast = AnthropicClient("claude-haiku-4-5")
+
     parser = argparse.ArgumentParser(description="Interactive coding agent")
-    parser.add_argument("--workspace", type=str, default=".", help="Workspace directory")
-    parser.add_argument("--model", type=str, default="gpt-5", help="OpenAI model name")
+    parser.add_argument("--workspace", type=str, required=True, help="Workspace directory")
     parser.add_argument("--max-iterations", type=int, default=30, help="Max steps per task")
+    parser.add_argument("--no-viz", action="store_true", help="Disable live tree visualization")
     args = parser.parse_args()
 
     workspace = Path(args.workspace).resolve()
-    workspace.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True)
     print(f"Workspace: {workspace}")
 
     runtime = LocalRuntime(workspace=workspace)
-    logger = StepLogger(workspace / ".agent_log.md", live=True)
 
     builder = (
         make_default_builder()
@@ -56,7 +56,7 @@ def main():
     )
 
     agent = RLM(
-        llm_client=OpenAIClient(args.model),
+        llm_client=strong,
         runtime=runtime,
         config=RLMConfig(
             max_depth=3,
@@ -64,6 +64,9 @@ def main():
             session="context",
         ),
         prompt_builder=builder,
+        llm_clients={
+            "fast": {"model": fast, "description": "Cheap model for smaller subtasks"},
+        },
     )
 
     print("Agent ready. Type a task, or 'quit' to exit.\n")
@@ -78,12 +81,13 @@ def main():
             break
 
         state = agent.start(task)
-        step = 0
-        while not state.finished:
-            logger.status(state)
-            state = agent.step(state)
-            step += 1
-            logger.log(step, state)
+        if args.no_viz:
+            while not state.finished:
+                state = agent.step(state)
+        else:
+            from rlmkit.utils.viz import live
+            states = live(agent, state)
+            state = states[-1]
 
         print(f"\n{state.result or '(no result)'}\n")
 

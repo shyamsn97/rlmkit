@@ -58,5 +58,5 @@ mlruns/*
 
 # Example trace logs
 examples/*_log.md
-examples/myproject/*
+examples/**/myproject/*
 .DS_Store

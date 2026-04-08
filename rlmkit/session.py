@@ -12,6 +12,17 @@ mirrors the agent hierarchy::
     │       └── session.json      ← root.search_0.sub_a
     └── search_1/
         └── session.json
+
+**Contract:** ``state.messages`` is the source of truth during execution.
+Session is a write-through mirror — the engine writes ``state.messages``
+to the session store after every step.  Session data is used for:
+
+- Cross-agent visibility (``read_history`` / ``list_sessions`` tools)
+- Crash recovery (``RLMState.from_session()``)
+- Context truncation recovery (agent re-reads its own earlier messages)
+
+To persist a full state tree at once, use ``session.write_tree(state)``.
+To reconstruct a state tree from session, use ``RLMState.from_session(session)``.
 """
 
 from __future__ import annotations
@@ -19,6 +30,22 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rlmkit.state import RLMState
+
+SESSION_TOOLS_HINT = """\
+
+**Tools for reading sessions:**
+- `list_sessions()` — lists every agent in the tree with its ID and task. Use this to see who has run and what they worked on.
+- `read_history(agent_id, last_n=20)` — reads the conversation transcript for any agent. Defaults to your own. Use this to review what you or any sibling/child agent has done.
+
+**When to use sessions:**
+- **Before starting work** — call `list_sessions()` to see if other agents have already done relevant work. Don't redo what a sibling already finished.
+- **After children return** — if a child's `done()` result is too terse, use `read_history(child_id)` to read the full transcript of what they did.
+- **On resumption** — if you are a re-delegated agent (same name, new task), call `read_history()` to recall your previous work. Your variables are still set, but your context window is fresh.
+- **When context is truncated** — if your history was trimmed, use `read_history()` to re-read your earlier messages."""
 
 
 class Session(ABC):
@@ -43,6 +70,17 @@ class Session(ABC):
     @abstractmethod
     def exists(self, agent_id: str) -> bool:
         """Check whether a session exists for the given agent."""
+
+    def write_tree(self, state: RLMState) -> None:
+        """Recursively persist messages for every node in the state tree."""
+        if state.messages:
+            self.write(state.agent_id or "root", state.messages)
+        for child in state.children:
+            self.write_tree(child)
+
+    def prompt_hint(self) -> str:
+        """Return prompt text explaining how sessions work for this backend."""
+        return SESSION_TOOLS_HINT
 
 
 class FileSession(Session):
@@ -84,3 +122,23 @@ class FileSession(Session):
 
     def exists(self, agent_id: str) -> bool:
         return self._agent_path(agent_id).exists()
+
+    def prompt_hint(self) -> str:
+        return (
+            f"""\
+`SESSION` points to the session store. Every agent's conversation history is \
+persisted as JSON files under `{self.base_dir}/`, mirroring the agent tree:
+```
+{self.base_dir}/
+├── session.json              ← root agent's history
+├── scanner_auth/
+│   ├── session.json          ← root.scanner_auth
+│   └── chunk_0/
+│       └── session.json      ← root.scanner_auth.chunk_0
+└── scanner_api/
+    └── session.json
+```
+
+You can also read session files directly via `read_file()` at the paths above."""
+            + SESSION_TOOLS_HINT
+        )
