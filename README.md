@@ -1,6 +1,6 @@
 # rlmkit
 
-A state machine for [Recursive Language Model](https://github.com/alexzhang13/rlm-minimal) agents. Every agent — root and all descendants — advances one step at a time. The entire computation tree is a single immutable, serializable object at every step boundary.
+A framework for building [Recursive Language Model](https://github.com/alexzhang13/rlm-minimal) agents as state machines. Every agent — root and all descendants — advances one step at a time, and the entire computation tree is a single immutable, serializable object at every step boundary.
 
 <p align="center">
   <img src="docs/rlm_animation.gif" alt="rlmkit animation" />
