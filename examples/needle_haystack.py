@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import OpenAIClient
+from rlmkit.llm import AnthropicClient
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 
@@ -87,7 +87,7 @@ def setup_runtime(workspace: Path) -> LocalRuntime:
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
-    llm = OpenAIClient()
+    llm = AnthropicClient("claude-opus-4-6")
 
     logger = StepLogger(Path(__file__).parent / "needle_haystack_log.md")
 
@@ -120,11 +120,16 @@ def main():
             "split them into batches and delegate each batch to a sub-agent."
         )
 
-        step = 0
-        while not state.finished:
-            state = agent.step(state)
-            step += 1
-            logger.log(step, state)
+        if "--viz" in sys.argv:
+            from rlmkit.utils.viz import live
+            states = live(agent, state)
+            state = states[-1]
+        else:
+            step = 0
+            while not state.finished:
+                state = agent.step(state)
+                step += 1
+                logger.log(step, state)
 
         print(f"\n{'='*40}")
         print(f"Actual answer:  {answer}")

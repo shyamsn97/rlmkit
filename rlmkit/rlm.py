@@ -136,9 +136,17 @@ class RLM:
         self.runtime.register_tool(self.done, core=True)
         self.runtime.register_tool(self.delegate, core=True)
         self.runtime.register_tool(self.wait, core=True)
+
         if self.session:
+            self.runtime.inject("SESSION", self.session)
             self.runtime.register_tool(self.list_sessions, core=True)
             self.runtime.register_tool(self.read_history, core=True)
+
+            self.prompt_builder = self.prompt_builder.section(
+                "session",
+                self.session.prompt_hint(),
+                title="Sessions",
+            )
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -157,11 +165,13 @@ class RLM:
             for f in fields(self.config)
             if f.name != "session"
         }
-        config_dict.update(depth=self.depth)
+        config_dict.update(
+            depth=self.depth, model=getattr(self.llm_client, "model", None)
+        )
         state = self.make_state(
             agent_id=self.agent_id,
             task=task,
-            status=Status.WAITING,
+            status=Status.READY,
             config=config_dict,
         )
         self.last_state = state
@@ -181,11 +191,11 @@ class RLM:
     # ── step ─────────────────────────────────────────────────────────
 
     def step(self, state: RLMState) -> RLMState:
-        """Advance one step. The state machine: WAITING→HAS_REPLY→EXEC→(SUPERVISING→)FINISHED."""
+        """Advance one step. The state machine: READY→EXECUTING→(SUPERVISING→)FINISHED."""
         match state.status:
-            case Status.WAITING:
+            case Status.READY:
                 return self.step_llm(state)
-            case Status.HAS_REPLY:
+            case Status.EXECUTING:
                 return self.step_exec(state)
             case Status.SUPERVISING:
                 return self.step_supervise(state)
@@ -193,7 +203,7 @@ class RLM:
                 return state
 
     def step_llm(self, state: RLMState) -> RLMState:
-        """Call the LLM → HAS_REPLY."""
+        """Call the LLM → EXECUTING."""
         # Bail if we've hit the iteration cap
         max_iters = state.config.get("max_iterations", self.config.max_iterations)
         if state.iteration >= max_iters:
@@ -206,7 +216,7 @@ class RLM:
         assistant_message = {"role": "assistant", "content": text}
 
         return state.update(
-            status=Status.HAS_REPLY,
+            status=Status.EXECUTING,
             iteration=state.iteration + 1,
             event=LLMReply(
                 agent_id=state.agent_id,
@@ -219,11 +229,11 @@ class RLM:
         )
 
     def step_exec(self, state: RLMState) -> RLMState:
-        """Execute the code block → WAITING / SUPERVISING / FINISHED."""
+        """Execute the code block → READY / SUPERVISING / FINISHED."""
         code = self.extract_code(state.last_reply or "")
         if not code:
             return state.update(
-                status=Status.WAITING,
+                status=Status.READY,
                 event=NoCodeBlock(
                     agent_id=state.agent_id,
                     iteration=state.iteration,
@@ -236,7 +246,7 @@ class RLM:
         if yield_errors:
             err_msg = "ERROR: " + "; ".join(yield_errors)
             return state.update(
-                status=Status.WAITING,
+                status=Status.READY,
                 event=CodeExec(
                     agent_id=state.agent_id,
                     iteration=state.iteration,
@@ -295,7 +305,7 @@ class RLM:
         elif suspended:
             new_status = Status.SUPERVISING
         else:
-            new_status = Status.WAITING
+            new_status = Status.READY
 
         exec_message = self.execution_output_message(code, output)
         new_messages = state.messages + [exec_message]
@@ -450,7 +460,7 @@ class RLM:
                 children.append(self.children[cid].last_state)
             new_status = Status.SUPERVISING
         else:
-            new_status = Status.WAITING
+            new_status = Status.READY
 
         output = "" if suspended else resume_result
 
@@ -468,7 +478,11 @@ class RLM:
         return new_state, output if not suspended else None
 
     def _write_session(self, state: RLMState) -> None:
-        """Persist the agent's message history to the session store."""
+        """Write-through: mirror state.messages to the session store.
+
+        state.messages is the source of truth during execution.  This
+        call keeps the durable session in sync after each step.
+        """
         if self.session and state.messages:
             self.session.write(state.agent_id, state.messages)
 
@@ -543,32 +557,19 @@ class RLM:
         recent = msgs[-cap:]
 
         parts = [f"## Task\n{state.task}"]
-        hint = (
-            "Use `read_history()` to review earlier messages, "
-            "or `list_sessions()` to see other agents' progress."
-            if self.session
-            else ""
-        )
-        parts.append(
-            f"## History\n{len(msgs)} messages so far, showing the last {cap}. "
-            f"{hint}"
-        )
+        history_note = f"{len(msgs)} messages so far, showing the last {cap}."
+        if self.session:
+            history_note += " Earlier messages were trimmed — call `read_history()` to recover them."
+        parts.append(f"## History\n{history_note}")
 
         summary = {"role": "user", "content": "\n\n".join(parts)}
         return [summary] + recent
 
     def next_action_message(self, task: str, *, iteration: int) -> dict[str, str]:
         """Format the user message that prompts the LLM to act."""
-        session_hint = (
-            "You can call `read_history()` to review your earlier messages, "
-            "or `list_sessions()` to see all agents in the tree.\n\n"
-            if self.session
-            else ""
-        )
         if iteration == 0:
             content = (
                 f"Task: {task}\n\n"
-                f"{session_hint}"
                 "Your response MUST contain exactly one ```repl``` code block. "
                 "Put any reasoning as comments inside the block. "
                 "Do NOT reply with only text — every response needs a ```repl``` block."
@@ -576,7 +577,6 @@ class RLM:
         else:
             content = (
                 f"Continue working on the task: {task}\n\n"
-                f"{session_hint}"
                 "Your response MUST contain exactly one ```repl``` code block "
                 "with the next concrete action. "
                 "If you are done, call `done(result)` inside the block."
@@ -700,8 +700,9 @@ class RLM:
     # ── session tools ─────────────────────────────────────────────
 
     @tool(
-        "List all agent sessions in the tree.\n"
-        "Returns a summary of each agent's ID and task."
+        "List all agents in the session tree with their IDs and tasks.\n"
+        "Use this first to see who has run, what they worked on, and whether anyone already did relevant work.\n"
+        "Returns:\n- str: One line per agent — 'agent_id: first task message'."
     )
     def list_sessions(self) -> str:
         if not self.session:
@@ -721,10 +722,12 @@ class RLM:
         return "\n".join(lines)
 
     @tool(
-        "Read an agent's message history.\nArgs:\n"
-        "- agent_id (str | None): Agent to read. Defaults to self.\n"
+        "Read the conversation transcript for any agent in the tree.\n"
+        "Defaults to your own history — use this to recall earlier work when your context was truncated.\n"
+        "Pass a sibling or child agent_id to see what they did.\nArgs:\n"
+        "- agent_id (str | None): Agent to read. Defaults to self (AGENT_ID).\n"
         "- last_n (int): Number of recent messages. Default 20.\n"
-        "Returns:\n- str: Formatted message history."
+        "Returns:\n- str: Formatted [role] content transcript."
     )
     def read_history(self, agent_id: str | None = None, last_n: int = 20) -> str:
         if not self.session:

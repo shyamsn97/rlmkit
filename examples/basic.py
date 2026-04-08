@@ -19,7 +19,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import OpenAIClient
+from rlmkit.llm import AnthropicClient
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 
@@ -48,8 +48,8 @@ def generate_haystack(num_lines: int = 1_000_000) -> tuple[str, str]:
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
-    strong = OpenAIClient("gpt-5")
-    fast = OpenAIClient("gpt-5-mini")
+    strong = AnthropicClient("claude-opus-4-6")
+    fast = AnthropicClient("claude-haiku-4-5")
 
     logger = StepLogger(Path(__file__).parent / "basic_log.md")
     haystack, answer = generate_haystack(num_lines=1_000_000)
@@ -80,18 +80,17 @@ def main():
         )
 
         if "--viz" in sys.argv:
-            from viz import live
+            from rlmkit.utils.viz import live
             states = live(agent, state)
+            state = states[-1]
         else:
             step = 0
-            states = []
             while not state.finished:
                 state = agent.step(state)
                 step += 1
-                states.append(state)
                 logger.log(step, state)
 
-        final = states[-1] if states else state
+        final = state
         print(f"\n{'='*40}")
         print(f"Agent answer:   {final.result}")
         print(f"Actual answer:  {answer}")

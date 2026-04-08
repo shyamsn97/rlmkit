@@ -88,9 +88,9 @@ def _status_label(state: RLMState) -> str:
     """Short human-readable label for what the next step will do."""
     n_children = len(state.children)
     match state.status:
-        case Status.WAITING:
+        case Status.READY:
             return f"{DIM}thinking...{RESET}"
-        case Status.HAS_REPLY:
+        case Status.EXECUTING:
             return f"{DIM}executing...{RESET}"
         case Status.SUPERVISING:
             active = sum(1 for c in state.children if not c.finished)

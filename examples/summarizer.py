@@ -25,7 +25,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import OpenAIClient
+from rlmkit.llm import AnthropicClient
 from rlmkit.prompts import make_default_builder
 from rlmkit.prompts.default import ROLE_TEXT
 from rlmkit.rlm import RLM, RLMConfig
@@ -131,7 +131,7 @@ def main():
     parser.add_argument("--viz", action="store_true", help="Live terminal visualization")
     args = parser.parse_args()
 
-    llm = OpenAIClient()
+    llm = AnthropicClient("claude-opus-4-6")
 
     logger = StepLogger(Path(__file__).parent / "summarizer_log.md")
     doc = generate_document(num_lines=args.lines)
@@ -193,21 +193,19 @@ When summarizing, follow these rules:
         )
 
         if args.viz:
-            from viz import live
+            from rlmkit.utils.viz import live
             states = live(agent, state)
+            state = states[-1]
         else:
             step = 0
-            states = []
             while not state.finished:
                 state = agent.step(state)
                 step += 1
-                states.append(state)
                 logger.log(step, state)
 
-        final = states[-1] if states else state
         print(f"\n{'='*60}")
-        print(f"SUMMARY ({len((final.result or '').splitlines())} lines):\n")
-        print(final.result or "(no result)")
+        print(f"SUMMARY ({len((state.result or '').splitlines())} lines):\n")
+        print(state.result or "(no result)")
         print(f"\nTrace saved to {logger.path}")
 
 
