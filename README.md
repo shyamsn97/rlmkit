@@ -2,6 +2,8 @@
 
 A state machine for [Recursive Language Model](https://github.com/alexzhang13/rlm-minimal) agents. Every agent — root and all descendants — advances one step at a time. The entire computation tree is a single immutable, serializable object at every step boundary.
 
+![rlmkit animation](docs/rlm_animation.gif)
+
 ## Installation
 
 ### from pip
