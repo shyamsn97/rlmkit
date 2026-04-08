@@ -64,28 +64,24 @@ Or: `result = agent.run("Find and fix all type errors in src/")`
 
 ## How It Works
 
-Each `step(state) → state` is one atomic transition. Four statuses:
+Each `step(state) → state'` is one atomic transition:
 
 ```
-                    ┌──────────────────────────────────────────┐
-                    │                                          │
-                    ▼                                          │
-                  READY ──── step_llm() ────→ EXECUTING        │
-                  ▲  ▲                            │            │
-                  │  │                      step_exec()        │
-                  │  │                       ╱        ╲        │
-                  │  └── no children ───────╴          ╲       │
-                  │                                     ▼      │
-                  │  done() ────────────────────→ FINISHED     │
-                  │                                            │
-                  │                               SUPERVISING ─┘
-                  │                                   │
-                  │                           step_supervise()
-                  │                           flatten tree → step
-                  └── children done ───────── leaves first → cascade
+READY --step_llm()--> EXECUTING --step_exec()--> SUPERVISING
+  ^                       |                          |
+  |                    done()                 step_supervise()
+  |                       |                   steps all children
+  |                       v                   deepest-first
+  |                   FINISHED                       |
+  |                                                  |
+  +------------- all children finished --------------+
 ```
 
-When code calls `delegate()` + `yield wait()`, the generator suspends. The engine flattens the entire tree, sorts deepest-first, and steps all leaves in parallel. Parents resume automatically when their children finish.
+1. **READY** — agent is queued for its next LLM call
+2. **EXECUTING** — LLM replied with a code block; the engine runs it
+3. **SUPERVISING** — code called `delegate()` + `yield wait()`; children are running
+4. Back to **READY** — all children finished, parent resumes with their results
+5. **FINISHED** — code called `done(result)`; agent is complete
 
 **Delegation:**
 
