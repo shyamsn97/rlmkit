@@ -43,14 +43,9 @@ def get_tool_metadata(fn: Any) -> ToolMetadata | None:
 class OrphanedDelegatesError(RuntimeError):
     """Raised when delegate() is called without a matching yield wait()."""
 
+_REPL_BLOCK_RE = re.compile(r"```repl\s*\n(.*?)\n```\s*(?:\n|$)", re.DOTALL)
+
 
 def find_code_blocks(text: str) -> list[str]:
     """Find REPL code blocks wrapped in triple backticks."""
-    pattern = r"```repl\s*\n(.*?)\n```"
-    results = []
-
-    for match in re.finditer(pattern, text, re.DOTALL):
-        code_content = match.group(1).strip()
-        results.append(code_content)
-
-    return results
+    return [m.group(1).strip() for m in _REPL_BLOCK_RE.finditer(text)]

@@ -228,14 +228,14 @@ class CodeReviewer(RLM):
 
 ## Examples
 
-All examples log a full step-by-step trace. Run with `--viz` for a live terminal UI.
+All examples show a live tree visualization by default. Pass `--no-viz` for plain output.
 
 | Example | What it shows |
 |---------|--------------|
+| [`showcase.py`](examples/showcase.py) | Checkpointing, forking, session persistence, time travel — the full API tour |
 | [`agent.py`](examples/coding-agent/agent.py) | Interactive coding agent REPL — give it tasks, it writes and edits files |
+| [`needle_haystack.py`](examples/needle_haystack.py) | Needle-in-a-haystack across 500 files with custom tools and `runtime_factory` |
 | [`summarizer.py`](examples/summarizer.py) | Recursive map-reduce: chunk a 10k-line doc, summarize in parallel, combine results |
-| [`basic.py`](examples/basic.py) | Parallel chunked search over 1M lines — the "hello world" of recursive agents |
-| [`needle_haystack.py`](examples/needle_haystack.py) | 500-file search with `runtime_factory` — each child gets its own sandboxed runtime |
 
 ## Project Structure
 

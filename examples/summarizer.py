@@ -32,8 +32,6 @@ from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.utils import tool
 
-from utils import StepLogger
-
 
 # ── Generate a long document ────────────────────────────────────────
 
@@ -128,12 +126,10 @@ def generate_document(num_lines: int = 10_000) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Recursive document summarizer")
     parser.add_argument("--lines", type=int, default=10_000, help="Number of lines to generate")
-    parser.add_argument("--viz", action="store_true", help="Live terminal visualization")
     args = parser.parse_args()
 
     llm = AnthropicClient("claude-opus-4-6")
 
-    logger = StepLogger(Path(__file__).parent / "summarizer_log.md")
     doc = generate_document(num_lines=args.lines)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -192,7 +188,7 @@ When summarizing, follow these rules:
             f"The file is too long to read at once — chunk it and delegate."
         )
 
-        if args.viz:
+        if "--no-viz" not in sys.argv:
             from rlmkit.utils.viz import live
             states = live(agent, state)
             state = states[-1]
@@ -201,12 +197,11 @@ When summarizing, follow these rules:
             while not state.finished:
                 state = agent.step(state)
                 step += 1
-                logger.log(step, state)
+                print(state.tree())
 
         print(f"\n{'='*60}")
         print(f"SUMMARY ({len((state.result or '').splitlines())} lines):\n")
         print(state.result or "(no result)")
-        print(f"\nTrace saved to {logger.path}")
 
 
 if __name__ == "__main__":

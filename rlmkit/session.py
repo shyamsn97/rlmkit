@@ -72,9 +72,13 @@ class Session(ABC):
         """Check whether a session exists for the given agent."""
 
     def write_tree(self, state: RLMState) -> None:
-        """Recursively persist messages for every node in the state tree."""
+        """Recursively persist messages for every node in the state tree.
+
+        Strips system messages — the prompt is rebuilt dynamically.
+        """
         if state.messages:
-            self.write(state.agent_id or "root", state.messages)
+            msgs = [m for m in state.messages if m.get("role") != "system"]
+            self.write(state.agent_id or "root", msgs)
         for child in state.children:
             self.write_tree(child)
 

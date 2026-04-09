@@ -19,8 +19,6 @@ from rlmkit.llm import AnthropicClient
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 
-from utils import StepLogger, DIM, RESET
-
 
 # ── Generate the haystack ───────────────────────────────────────────
 
@@ -89,8 +87,6 @@ def setup_runtime(workspace: Path) -> LocalRuntime:
 def main():
     llm = AnthropicClient("claude-opus-4-6")
 
-    logger = StepLogger(Path(__file__).parent / "needle_haystack_log.md")
-
     with tempfile.TemporaryDirectory() as tmpdir:
         workspace = Path(tmpdir)
         answer = generate_haystack(workspace, num_files=500)
@@ -104,15 +100,6 @@ def main():
             runtime_factory=lambda: setup_runtime(workspace),
         )
 
-        def _progress(aid, child_state, done, total):
-            status = child_state.status.value
-            print(f"  {DIM}[{done}/{total}]{RESET} {aid} → {status}")
-            with open(logger.path, "a") as f:
-                f.write(f"- [{done}/{total}] `{aid}` → {status}\n")
-            sys.stdout.flush()
-
-        agent.on_child_stepped = _progress
-
         state = agent.start(
             "There are 500 text files in the workspace (file_0000.txt to file_0499.txt). "
             "Exactly one line across all files says 'The magic number is XXXXXXX'. "
@@ -120,7 +107,7 @@ def main():
             "split them into batches and delegate each batch to a sub-agent."
         )
 
-        if "--viz" in sys.argv:
+        if "--no-viz" not in sys.argv:
             from rlmkit.utils.viz import live
             states = live(agent, state)
             state = states[-1]
@@ -129,12 +116,11 @@ def main():
             while not state.finished:
                 state = agent.step(state)
                 step += 1
-                logger.log(step, state)
+                print(state.tree())
 
         print(f"\n{'='*40}")
         print(f"Actual answer:  {answer}")
         print(f"Correct:        {answer in (state.result or '')}")
-        print(f"Trace saved to {logger.path}")
 
 
 if __name__ == "__main__":

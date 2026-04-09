@@ -14,7 +14,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from rlmkit.llm import AnthropicClient
+from rlmkit.llm import OpenAIClient
 from rlmkit.prompts import make_default_builder
 from rlmkit.prompts.default import ROLE_TEXT
 from rlmkit.rlm import RLM, RLMConfig
@@ -35,8 +35,8 @@ When given a task:
 
 
 def main():
-    strong = AnthropicClient("claude-opus-4-6")
-    fast = AnthropicClient("claude-haiku-4-5")
+    strong = OpenAIClient("gpt-5")
+    fast = OpenAIClient("gpt-5-mini")
 
     parser = argparse.ArgumentParser(description="Interactive coding agent")
     parser.add_argument("--workspace", type=str, required=True, help="Workspace directory")

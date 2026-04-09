@@ -482,9 +482,12 @@ class RLM:
 
         state.messages is the source of truth during execution.  This
         call keeps the durable session in sync after each step.
+        Strips the system prompt — it's rebuilt dynamically and would
+        bloat session files / pollute read_history results.
         """
         if self.session and state.messages:
-            self.session.write(state.agent_id, state.messages)
+            msgs = [m for m in state.messages if m.get("role") != "system"]
+            self.session.write(state.agent_id, msgs)
 
     # ── prompt & messages ────────────────────────────────────────────
 
