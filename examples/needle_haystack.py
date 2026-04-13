@@ -9,6 +9,7 @@ Uses the step-based API for full observability.
 
 from __future__ import annotations
 
+import os
 import random
 import string
 import sys
@@ -45,28 +46,29 @@ def generate_haystack(directory: Path, num_files: int = 500, lines_per_file: int
 # ── Runtime with custom tools ───────────────────────────────────────
 
 def setup_runtime(workspace: Path) -> LocalRuntime:
-    rt = LocalRuntime(workspace=workspace)
+    rt = LocalRuntime()
+    os.chdir(workspace)
 
     @rt.tool("List files matching a glob pattern.")
     def list_files(pattern: str = "*.txt") -> list[str]:
-        return sorted(str(p.relative_to(rt.workspace)) for p in rt.workspace.glob(pattern))
+        return sorted(str(p.relative_to(workspace)) for p in workspace.glob(pattern))
 
     @rt.tool("Count files matching a glob pattern.")
     def count_files(pattern: str = "*.txt") -> int:
-        return len(list(rt.workspace.glob(pattern)))
+        return len(list(workspace.glob(pattern)))
 
     @rt.tool("Grep for a regex across files. Pass a list of filenames to scope the search.")
     def grep(pattern: str, files: list[str] | None = None, max_results: int = 20) -> str:
         import re
         regex = re.compile(pattern)
         if files is None:
-            targets = sorted(str(p.relative_to(rt.workspace)) for p in rt.workspace.rglob("*.txt"))
+            targets = sorted(str(p.relative_to(workspace)) for p in workspace.rglob("*.txt"))
         else:
             targets = files
         matches = []
         for f in targets:
             try:
-                for i, line in enumerate((rt.workspace / f).read_text().splitlines(), 1):
+                for i, line in enumerate((workspace / f).read_text().splitlines(), 1):
                     if regex.search(line):
                         matches.append(f"{f}:{i}: {line}")
                         if len(matches) >= max_results:
@@ -77,7 +79,7 @@ def setup_runtime(workspace: Path) -> LocalRuntime:
 
     @rt.tool("Read a file's contents.")
     def read_file(path: str) -> str:
-        return (rt.workspace / path).read_text()
+        return (workspace / path).read_text()
 
     return rt
 

@@ -14,12 +14,13 @@ Shows:
 Usage:
     python summarizer.py
     python summarizer.py --lines 5000   # smaller doc
-    python summarizer.py --viz           # live terminal UI
+    python summarizer.py --no-viz       # disable live UI
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 import tempfile
@@ -139,7 +140,8 @@ def main():
         actual_lines = len(doc.splitlines())
         print(f"Generated {actual_lines:,} lines of meeting notes ({len(doc):,} chars)")
 
-        runtime = LocalRuntime(workspace=workspace)
+        runtime = LocalRuntime()
+        os.chdir(workspace)
 
         @tool("Read lines start:end (0-indexed, exclusive) from a file. Returns the text.")
         def read_lines(path: str, start: int, end: int) -> str:

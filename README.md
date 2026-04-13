@@ -49,7 +49,7 @@ from rlmkit.runtime.local import LocalRuntime
 
 agent = RLM(
     llm_client=OpenAIClient("gpt-5"),
-    runtime=LocalRuntime(workspace="."),
+    runtime=LocalRuntime(),
     config=RLMConfig(max_depth=3, max_iterations=15, session="context"),
 )
 
@@ -114,7 +114,7 @@ state.agent_id    # "root", "root.search_0", "root.search_0.chunk_2"
 state.task        # the task string
 state.status      # READY | EXECUTING | SUPERVISING | FINISHED
 state.iteration   # current step count
-state.event       # last StepEvent — LLMReply, CodeExec, ChildStep, or NoCodeBlock
+state.event       # last StepEvent — LLMReply, CodeExec, ResumeExec, or NoCodeBlock
 state.messages    # full LLM message history
 state.result      # final result (when finished)
 state.children    # list[RLMState] — recursive
@@ -161,12 +161,12 @@ class MyLLM(LLMClient):                        # or roll your own
 
 ### `Runtime`
 
+The base `Runtime` is minimal — `execute(code)`, `inject(name, value)`, `clone()`, plus tool registration. No file I/O, no workspace. `LocalRuntime` runs Python in-process with a persistent namespace. Common modules (`re`, `os`, `json`, `math`, etc.) are pre-imported. Variables persist across REPL turns.
+
 ```python
 from rlmkit.runtime.local import LocalRuntime
 
-runtime = LocalRuntime(workspace=".")
-# Builtins: read_file, write_file, edit_file, append_file, ls, grep
-# Common modules pre-imported: re, os, json, math, etc.
+runtime = LocalRuntime()
 ```
 
 Register custom tools:
@@ -176,6 +176,23 @@ Register custom tools:
 def search(pattern: str, path: str = ".") -> str:
     ...
 ```
+
+### Resume
+
+Save state at any point. Resume later from a fresh engine.
+
+```python
+# Save
+Path("checkpoint.json").write_text(state.model_dump_json())
+
+# Resume (workspace and session should already be in place)
+saved = RLMState.model_validate_json(Path("checkpoint.json").read_text())
+state = agent.resume(saved)
+while not state.finished:
+    state = agent.step(state)
+```
+
+The LLM gets a synthetic message with the task, previous tree summary, and recent session history. It inspects the workspace and picks up where the previous run left off.
 
 ### Sessions
 
@@ -241,14 +258,14 @@ All examples show a live tree visualization by default. Pass `--no-viz` for plai
 
 ```
 rlmkit/
-├── rlm.py           # RLM engine, RLMConfig, step logic
+├── rlm.py           # RLM engine, RLMConfig, step logic, resume
 ├── state.py         # RLMState, Status, StepEvent hierarchy
 ├── pool.py          # Pool ABC, ThreadPool, SequentialPool
 ├── session.py       # Session ABC, FileSession
 ├── llm.py           # LLMClient ABC, OpenAIClient, AnthropicClient
-├── utils.py         # @tool decorator, code block parsing
+├── utils/           # @tool decorator, code block parsing
 ├── runtime/
-│   ├── runtime.py   # Runtime ABC, ToolDef, builtins
+│   ├── runtime.py   # Runtime ABC, ToolDef (minimal — no file I/O)
 │   ├── local.py     # LocalRuntime (in-process via Sandbox)
 │   ├── sandbox.py   # Sandbox (code execution + JSON-over-stdio)
 │   └── modal.py     # ModalRuntime (remote via Modal containers)

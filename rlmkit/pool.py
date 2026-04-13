@@ -1,8 +1,8 @@
-"""Execution pools for stepping agents in parallel.
+"""Execution pools for running tasks in parallel.
 
-A pool has one method: ``execute(items) -> results``, where *items* is a
-list of ``(RLMState, RLM)`` pairs and *results* is a ``dict[str, RLMState]``
-mapping agent IDs to their new states.
+A pool has one method: ``execute(tasks) -> results``, where *tasks* is a
+list of ``(id, callable)`` pairs and *results* is a ``dict[str, Any]``
+mapping IDs to return values.
 
 Pass a pool to ``RLM(pool=...)``.  If you pass a plain callable instead
 of a Pool subclass, it gets wrapped in ``CallablePool`` automatically.
@@ -11,6 +11,7 @@ of a Pool subclass, it gets wrapped in ``CallablePool`` automatically.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -19,8 +20,8 @@ class Pool(ABC):
     """Base class for execution pools."""
 
     @abstractmethod
-    def execute(self, items: list[tuple[Any, Any]]) -> dict[str, Any]:
-        """Step a batch of (state, engine) pairs. Returns {agent_id: new_state}."""
+    def execute(self, tasks: list[tuple[str, Callable[[], Any]]]) -> dict[str, Any]:
+        """Run callables in parallel, keyed by ID."""
 
 
 class ThreadPool(Pool):
@@ -30,14 +31,9 @@ class ThreadPool(Pool):
         self.max_concurrency = max_concurrency
         self.executor = ThreadPoolExecutor(max_workers=max_concurrency)
 
-    def execute(self, items: list[tuple[Any, Any]]) -> dict[str, Any]:
-        results = {}
-        futures = {
-            self.executor.submit(engine.step, cs): cs.agent_id for cs, engine in items
-        }
-        for future in as_completed(futures):
-            results[futures[future]] = future.result()
-        return results
+    def execute(self, tasks: list[tuple[str, Callable[[], Any]]]) -> dict[str, Any]:
+        futures = {self.executor.submit(fn): task_id for task_id, fn in tasks}
+        return {futures[f]: f.result() for f in as_completed(futures)}
 
     def shutdown(self):
         self.executor.shutdown(wait=False)
@@ -46,8 +42,8 @@ class ThreadPool(Pool):
 class SequentialPool(Pool):
     """Runs everything one at a time — useful for testing and debugging."""
 
-    def execute(self, items: list[tuple[Any, Any]]) -> dict[str, Any]:
-        return {cs.agent_id: engine.step(cs) for cs, engine in items}
+    def execute(self, tasks: list[tuple[str, Callable[[], Any]]]) -> dict[str, Any]:
+        return {task_id: fn() for task_id, fn in tasks}
 
 
 class CallablePool(Pool):
@@ -56,5 +52,5 @@ class CallablePool(Pool):
     def __init__(self, fn) -> None:
         self.fn = fn
 
-    def execute(self, items: list[tuple[Any, Any]]) -> dict[str, Any]:
-        return self.fn(items)
+    def execute(self, tasks: list[tuple[str, Callable[[], Any]]]) -> dict[str, Any]:
+        return self.fn(tasks)
