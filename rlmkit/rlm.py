@@ -1,62 +1,44 @@
-"""Core RLM engine — step-based execution with generators."""
+"""Core RLM engine — step-based execution with delegation via generators.
+
+State machine: READY → EXECUTING → (SUPERVISING →) FINISHED
+See docs/internal/engine_flow.md for a full walkthrough.
+"""
 
 from __future__ import annotations
 
-import ast
 from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from typing import Any
 
 from .llm import LLMClient
 from .pool import CallablePool, ThreadPool
-from .prompts.default import make_default_builder
+from .prompts.default import DEFAULT_BUILDER
+from .prompts.messages import (
+    CONTINUE_ACTION,
+    EXECUTION_OUTPUT,
+    FIRST_ACTION,
+    NO_CODE_BLOCK,
+    ORPHANED_DELEGATES,
+    RESUME_MESSAGE,
+    STATUS_DEPTH_MID,
+    STATUS_DEPTH_NEAR_MAX,
+    STATUS_DEPTH_ROOT,
+    TRUNCATION_SESSION_HINT,
+    TRUNCATION_SUMMARY,
+)
 from .runtime import Runtime
 from .session import FileSession, Session
 from .state import (
     ChildHandle,
-    ChildStep,
     CodeExec,
     LLMReply,
     NoCodeBlock,
+    ResumeExec,
     RLMState,
     Status,
     WaitRequest,
 )
-from .utils import OrphanedDelegatesError, find_code_blocks, tool
-
-# ── AST yield checker ────────────────────────────────────────────────
-
-
-class YieldChecker(ast.NodeVisitor):
-    """Detect bare wait() calls that are missing a yield prefix."""
-
-    def __init__(self):
-        self.errors: list[str] = []
-
-    def visit_Yield(self, node):  # noqa: N802
-        pass  # yield <expr> — don't descend into the call
-
-    def visit_Call(self, node):  # noqa: N802
-        name = node.func.id if isinstance(node.func, ast.Name) else None
-        if name == "wait":
-            self.errors.append(
-                f"Line {node.lineno}: `wait(...)` must be prefixed with `yield`"
-            )
-        self.generic_visit(node)
-
-
-def check_missing_yields(code: str) -> list[str]:
-    """Return a list of error strings for any wait() calls missing yield."""
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return []
-    checker = YieldChecker()
-    checker.visit(tree)
-    return checker.errors
-
-
-# ── config ───────────────────────────────────────────────────────────
+from .utils import OrphanedDelegatesError, check_yield_errors, find_code_blocks, tool
 
 
 @dataclass
@@ -72,14 +54,12 @@ class RLMConfig:
     system_prompt: str | None = None
 
 
-# ── engine ───────────────────────────────────────────────────────────
-
-
 class RLM:
     """Recursive Language Model engine.
 
-    Owns mutable resources (LLM client, runtime, threads). All observable
-    state lives in RLMState — frozen, immutable, recursive.
+    Owns mutable resources (LLM client, runtime, thread pool).
+    All observable state lives in ``RLMState`` — frozen, immutable, recursive.
+    The engine advances state via ``step(state) → state``.
     """
 
     state_cls: type[RLMState] = RLMState
@@ -102,14 +82,16 @@ class RLM:
         self.agent_id = agent_id
         self.depth = depth
         self.runtime_factory = runtime_factory
-        self.prompt_builder = prompt_builder or make_default_builder()
+        self.prompt_builder = prompt_builder or DEFAULT_BUILDER
 
+        # Pool
         if pool is None:
             pool = ThreadPool(self.config.max_concurrency)
         elif callable(pool) and not hasattr(pool, "execute"):
             pool = CallablePool(pool)
         self.pool = pool
 
+        # Multi-model routing
         self.llm_clients: dict[str, LLMClient] = {}
         self.model_descriptions: dict[str, str] = {}
         for k, entry in (llm_clients or {}).items():
@@ -119,16 +101,19 @@ class RLM:
         if "default" not in self.llm_clients:
             self.llm_clients["default"] = self.llm_client
 
+        # Mutable engine state (side effects from code execution)
         self.children: dict[str, RLM] = {}
-        self.waiting_on: list[str] = []
         self.is_done = False
         self.result: str | None = None
-        self.last_state: RLMState | None = None
 
+        # Session
         if isinstance(self.config.session, str):
             self.config = replace(self.config, session=FileSession(self.config.session))
         self.session: Session | None = self.config.session
 
+        self.register_tools()
+
+    def register_tools(self) -> None:
         self.runtime.inject("OrphanedDelegatesError", OrphanedDelegatesError)
         self.runtime.inject("AGENT_ID", self.agent_id)
         self.runtime.inject("DEPTH", str(self.depth))
@@ -136,54 +121,51 @@ class RLM:
         self.runtime.register_tool(self.done, core=True)
         self.runtime.register_tool(self.delegate, core=True)
         self.runtime.register_tool(self.wait, core=True)
-
         if self.session:
             self.runtime.inject("SESSION", self.session)
             self.runtime.register_tool(self.list_sessions, core=True)
             self.runtime.register_tool(self.read_history, core=True)
-
             self.prompt_builder = self.prompt_builder.section(
                 "session",
                 self.session.prompt_hint(),
                 title="Sessions",
             )
 
-    # ── lifecycle ────────────────────────────────────────────────────
+    # ── public API ────────────────────────────────────────────────────
 
-    def make_state(self, **fields) -> RLMState:
+    def make_state(self, **kw) -> RLMState:
         """Build initial state. Override to inject custom fields."""
-        return self.state_cls(**fields)
+        return self.state_cls(**kw)
 
-    def initialize_state(self, task: str) -> RLMState:
-        """Create initial state for a task, reset engine for a fresh run."""
+    def start(self, task: str) -> RLMState:
+        """Create initial state for a task and reset engine."""
         self.children.clear()
-        self.waiting_on.clear()
         self.is_done = False
         self.result = None
-        config_dict = {
+        cfg = {
             f.name: getattr(self.config, f.name)
             for f in fields(self.config)
             if f.name != "session"
         }
-        config_dict.update(
-            depth=self.depth, model=getattr(self.llm_client, "model", None)
-        )
+        cfg.update(depth=self.depth, model=getattr(self.llm_client, "model", None))
         state = self.make_state(
             agent_id=self.agent_id,
             task=task,
             status=Status.READY,
-            config=config_dict,
+            config=cfg,
+            messages=[self.first_action_message(task)],
         )
-        self.last_state = state
         return state
 
-    def start(self, task: str) -> RLMState:
-        """Alias for initialize_state (backwards compat)."""
-        return self.initialize_state(task)
+    def restore(self, saved_state: RLMState) -> RLMState:
+        """Resume from a saved state with a fresh engine."""
+        state = self.start(saved_state.task)
+        msg = self.build_resume_msg(saved_state)
+        return state.update(messages=state.messages + [msg])
 
     def run(self, task: str) -> str:
         """Run to completion. Returns the result string."""
-        state = self.initialize_state(task)
+        state = self.start(task)
         while not state.finished:
             state = self.step(state)
         return state.result or ""
@@ -191,29 +173,28 @@ class RLM:
     # ── step ─────────────────────────────────────────────────────────
 
     def step(self, state: RLMState) -> RLMState:
-        """Advance one step. The state machine: READY→EXECUTING→(SUPERVISING→)FINISHED."""
-        match state.status:
-            case Status.READY:
-                return self.step_llm(state)
-            case Status.EXECUTING:
-                return self.step_exec(state)
-            case Status.SUPERVISING:
-                return self.step_supervise(state)
-            case _:
-                return state
+        """One full cycle: LLM → exec → drive children bottom-up → resume."""
+        if state.status == Status.READY:
+            state = self.step_llm(state)
+        if state.status == Status.EXECUTING:
+            state = self.step_exec(state)
+        if state.status == Status.SUPERVISING:
+            state = self.step_children(state)
+            if self.can_resume(state):
+                state = self.resume_exec(state)
+        return state
+
+    # ── state machine: READY ──────────────────────────────────────────
 
     def step_llm(self, state: RLMState) -> RLMState:
         """Call the LLM → EXECUTING."""
-        # Bail if we've hit the iteration cap
-        max_iters = state.config.get("max_iterations", self.config.max_iterations)
-        if state.iteration >= max_iters:
+        max_iter = state.config.get("max_iterations", self.config.max_iterations)
+        if state.iteration >= max_iter:
             return state.update(status=Status.FINISHED, result=state.last_reply or "")
 
-        # Build prompt, call LLM, store reply
-        system = self.build_system_prompt(state)
-        messages = self.build_messages(state, system_prompt=system)
+        messages = self.build_messages(state)
         text = self.call_llm(messages)
-        assistant_message = {"role": "assistant", "content": text}
+        persisted = state.messages + [{"role": "assistant", "content": text}]
 
         return state.update(
             status=Status.EXECUTING,
@@ -224,13 +205,16 @@ class RLM:
                 text=text,
                 code=self.extract_code(text),
             ),
-            messages=messages + [assistant_message],
+            messages=persisted,
             last_reply=text,
         )
 
+    # ── state machine: EXECUTING ──────────────────────────────────────
+
     def step_exec(self, state: RLMState) -> RLMState:
-        """Execute the code block → READY / SUPERVISING / FINISHED."""
+        """Run code from the LLM reply."""
         code = self.extract_code(state.last_reply or "")
+
         if not code:
             return state.update(
                 status=Status.READY,
@@ -239,265 +223,178 @@ class RLM:
                     iteration=state.iteration,
                     text=state.last_reply or "",
                 ),
-                messages=state.messages + [self.no_code_block_message()],
+                messages=state.messages + [{"role": "user", "content": NO_CODE_BLOCK}],
             )
 
-        yield_errors = check_missing_yields(code)
-        if yield_errors:
-            err_msg = "ERROR: " + "; ".join(yield_errors)
+        err = check_yield_errors(code)
+        if err:
             return state.update(
                 status=Status.READY,
                 event=CodeExec(
                     agent_id=state.agent_id,
                     iteration=state.iteration,
                     code=code,
-                    output=err_msg,
-                    suspended=False,
+                    output=err,
                 ),
-                messages=state.messages
-                + [self.execution_output_message(code, err_msg)],
+                messages=state.messages + [self.execution_output_message(code, err)],
             )
 
-        suspended, result = self.runtime.start_code(code)
-
-        children = list(state.children)
-        existing = {cs.agent_id for cs in children}
-
-        redelegated = [
-            cid
-            for cid in self.children
-            if cid in existing and not self.children[cid].is_done
-        ]
-        for cid in redelegated:
-            children = [
-                self.children[cid].last_state if cs.agent_id == cid else cs
-                for cs in children
-            ]
-            existing = {cs.agent_id for cs in children}
-
-        new_child_ids = [cid for cid in self.children if cid not in existing]
-
-        if new_child_ids and not suspended:
-            for cid in new_child_ids:
-                del self.children[cid]
-            names = ", ".join(new_child_ids)
-            msg = (
-                f"delegate() was called for [{names}] but wait() was never "
-                f"called. You must use `yield wait(*handles)` to collect results."
-            )
-            err_output = self.execute_code(f"raise OrphanedDelegatesError({msg!r})")
-            output = result if isinstance(result, str) else ""
-            output += "\n\n" + err_output if output.strip() else err_output
-            new_child_ids = []
-            suspended = False
-        else:
-            output = "" if suspended else result
-
-        if suspended:
-            self.waiting_on = (
-                result.agent_ids if isinstance(result, WaitRequest) else []
-            )
-            for cid in new_child_ids:
-                children.append(self.children[cid].last_state)
-
-        if self.is_done:
-            new_status = Status.FINISHED
-        elif suspended:
-            new_status = Status.SUPERVISING
-        else:
-            new_status = Status.READY
-
-        exec_message = self.execution_output_message(code, output)
-        new_messages = state.messages + [exec_message]
-
+        suspended, raw = self.runtime.start_code(code)
+        state, output = self.after_exec(state, suspended, raw)
         new_state = state.update(
-            status=new_status,
             event=CodeExec(
                 agent_id=state.agent_id,
                 iteration=state.iteration,
                 code=code,
                 output=output,
-                suspended=suspended,
+                suspended=state.status == Status.SUPERVISING,
             ),
-            messages=new_messages,
-            result=self.result if self.is_done else None,
-            children=children,
-            waiting_on=self.waiting_on if suspended else [],
+            messages=state.messages + [self.execution_output_message(code, output)],
         )
-        self._write_session(new_state)
+        self.write_session(new_state)
         return new_state
 
-    def step_supervise(self, state: RLMState) -> RLMState:
-        """Flatten tree, step one round of leaves, cascade parent resumes.
+    # ── state machine: SUPERVISING ───────────────────────────────────
 
-        Each call does a single round: step all steppable leaves in the
-        pool, then apply results (which may resume parents).  The outer
-        ``step()`` loop calls this repeatedly until no longer SUPERVISING.
-        This keeps each step granular so live UIs can show progress.
+    def step_node(self, state: RLMState) -> RLMState:
+        """Advance one node: LLM + exec. No child recursion."""
+        if state.status == Status.READY:
+            state = self.step_llm(state)
+        if state.status == Status.EXECUTING:
+            state = self.step_exec(state)
+        return state
+
+    def step_children(self, state: RLMState) -> RLMState:
+        """Step all descendants once, then cascade resumes upward.
+
+        Flatten the tree into {id: state} and {id: engine} maps.
+        Build a queue of everything that can run right now, execute
+        in parallel, then check if any parents became resumable.
+        Each node runs at most once per step (tracked by ``done``).
+        Newly spawned children are NOT in the queue — they wait
+        for the next outer step() call.
         """
-        nodes = self.flatten_all(state)
-        nodes.sort(key=lambda x: -x[0])
-        steppable = [
-            (cs, engine) for _, cs, engine in nodes if cs.status != Status.SUPERVISING
-        ]
-        if not steppable:
-            pending = [cs.agent_id for cs in state.children if not cs.finished]
-            raise RuntimeError(
-                f"Supervise stall: no steppable leaves but {len(pending)} "
-                f"pending children: {pending[:5]}"
-            )
+        nodes: dict[str, RLMState] = {}
+        engines: dict[str, RLM] = {}
+        self.flatten(state, nodes, engines)
 
-        stepped = self.pool.execute(steppable)
-        child_events = [new_cs.event for new_cs in stepped.values() if new_cs.event]
+        queue = set(nodes.keys())  # only nodes that exist right now
+        done: set[str] = set()  # processed this step — skip next round
 
-        state, resume_output = self.apply_results(state, stepped)
+        while True:
+            # Build a batch of everything runnable in the queue
+            batch: list[tuple[str, Any]] = []
+            for aid in queue - done:
+                s = nodes[aid]
+                if s.finished:
+                    continue
+                e = engines[aid]
 
+                # READY / EXECUTING → run LLM + exec (no child recursion)
+                if s.status in (Status.READY, Status.EXECUTING):
+                    batch.append((aid, lambda e=e, s=s: e.step_node(s)))
+
+                # SUPERVISING → resume generator if all deps finished
+                elif s.status == Status.SUPERVISING:
+                    if all(nodes[d].finished for d in s.waiting_on):
+                        patched = s.update(
+                            children=[nodes.get(c.agent_id, c) for c in s.children]
+                        )
+                        batch.append((aid, lambda e=e, s=patched: e.resume_exec(s)))
+
+            if not batch:
+                break
+
+            # Execute batch in parallel, merge results
+            for aid, new_s in self.pool.execute(batch).items():
+                done.add(aid)
+                nodes[aid] = new_s
+                engines[aid].flatten(new_s, nodes, engines)
+
+        return self.rebuild(state, nodes)
+
+    def resume_exec(self, state: RLMState) -> RLMState:
+        """Resume the suspended generator after children finish."""
+        by_id = {c.agent_id: c for c in state.children}
+        results = [by_id[aid].result or "" for aid in state.waiting_on]
+        suspended, raw = self.runtime.resume_code(results)
+        state, output = self.after_exec(state, suspended, raw)
         return state.update(
-            event=ChildStep(
+            event=ResumeExec(
                 agent_id=state.agent_id,
                 iteration=state.iteration,
-                child_events=child_events,
-                all_done=state.status != Status.SUPERVISING,
-                exec_output=resume_output,
-                agent_finished=self.is_done,
-            ),
+                output=output,
+            )
         )
 
-    def flatten_all(self, state: RLMState, depth: int = 0) -> list:
-        """Collect all non-finished nodes in the subtree as (depth, state, engine)."""
-        nodes = []
-        for cs in state.children:
-            if cs.finished:
-                continue
-            engine = self.children[cs.agent_id]
-            nodes.append((depth, cs, engine))
-            if cs.status == Status.SUPERVISING:
-                nodes.extend(engine.flatten_all(cs, depth + 1))
-        return nodes
+    def flatten(
+        self, state: RLMState, nodes: dict[str, RLMState], engines: dict[str, RLM]
+    ) -> None:
+        """Recursively populate flat maps of all descendants."""
+        for child in state.children:
+            cid = child.agent_id
+            nodes[cid] = child
+            engines[cid] = self.children[cid]
+            self.children[cid].flatten(child, nodes, engines)
 
-    def apply_results(
-        self, state: RLMState, stepped: dict[str, RLMState]
-    ) -> tuple[RLMState, str | None]:
-        """Rebuild the state tree bottom-up, resuming parents whose children are done.
-
-        Returns (new_state, resume_output). resume_output is the stdout
-        captured when the parent's generator was resumed, or None.
-        """
+    def rebuild(self, state: RLMState, nodes: dict[str, RLMState]) -> RLMState:
+        """Recursively reconstruct the immutable tree from the flat map."""
         new_children = []
-        for cs in state.children:
-            if cs.finished:
-                new_children.append(cs)
-                continue
-            engine = self.children[cs.agent_id]
-            if cs.agent_id in stepped:
-                new_children.append(stepped[cs.agent_id])
-            elif cs.status == Status.SUPERVISING:
-                updated, _ = engine.apply_results(cs, stepped)
-                new_children.append(updated)
-            else:
-                new_children.append(cs)
+        for child in state.children:
+            cid = child.agent_id
+            updated = nodes.get(cid, child)
+            if cid in self.children:
+                updated = self.children[cid].rebuild(updated, nodes)
+            new_children.append(updated)
+        return state.update(children=new_children)
 
-        state = state.update(children=new_children)
+    def can_resume(self, state: RLMState) -> bool:
+        """True if all waited-on children are finished."""
+        if not state.waiting_on:
+            return False
+        by_id = {c.agent_id: c for c in state.children}
+        return all(by_id.get(aid, state).finished for aid in state.waiting_on)
 
-        if self.waiting_on:
-            all_done = all(
-                cs.agent_id not in self.waiting_on or cs.finished for cs in new_children
-            )
-            if all_done:
-                return self.resume_after_children(state)
-        return state, None
+    def after_exec(
+        self, state: RLMState, suspended: bool, raw: Any
+    ) -> tuple[RLMState, str]:
+        """Process execution result. Returns (new_state, output)."""
+        old_ids = {c.agent_id for c in state.children}
+        spawned = [cid for cid in self.children if cid not in old_ids]
 
-    def resume_after_children(self, state: RLMState) -> tuple[RLMState, str | None]:
-        """Resume this agent's generator after waited-on children finished.
-
-        Returns (new_state, exec_output).
-        """
-        existing = {cs.agent_id for cs in state.children}
-
-        results = [self.children[aid].result or "" for aid in self.waiting_on]
-        suspended, resume_result = self.runtime.resume_code(results)
-
-        children = list(state.children)
-
-        redelegated = [
-            cid
-            for cid in self.children
-            if cid in existing and not self.children[cid].is_done
-        ]
-        for cid in redelegated:
-            children = [
-                self.children[cid].last_state if cs.agent_id == cid else cs
-                for cs in children
-            ]
-            existing = {cs.agent_id for cs in children}
-
-        new_child_ids = [cid for cid in self.children if cid not in existing]
-
-        if new_child_ids and not suspended and not self.is_done:
-            for cid in new_child_ids:
+        if spawned and not suspended and not self.is_done:
+            for cid in spawned:
                 del self.children[cid]
-            names = ", ".join(new_child_ids)
-            msg = (
-                f"delegate() was called for [{names}] but wait() was never "
-                f"called. You must use `yield wait(*handles)` to collect results."
-            )
-            err_output = self.execute_code(f"raise OrphanedDelegatesError({msg!r})")
-            output = resume_result if isinstance(resume_result, str) else ""
-            resume_result = (
-                output + "\n\n" + err_output if output.strip() else err_output
-            )
-            new_child_ids = []
+            msg = ORPHANED_DELEGATES.format(names=", ".join(spawned))
+            output = self.execute_code(f"raise OrphanedDelegatesError({msg!r})")
+            base = raw if isinstance(raw, str) else ""
+            if base.strip():
+                output = base + "\n\n" + output
+            return state.update(status=Status.READY), output
 
+        if suspended:
+            waiting_on = raw.agent_ids if isinstance(raw, WaitRequest) else []
+            children = state.children + [
+                self.children[cid].last_state for cid in spawned
+            ]
+            return (
+                state.update(
+                    status=Status.SUPERVISING,
+                    children=children,
+                    waiting_on=waiting_on,
+                ),
+                "",
+            )
+
+        output = raw if isinstance(raw, str) else ""
         if self.is_done:
-            new_status = Status.FINISHED
-        elif suspended:
-            self.waiting_on = (
-                resume_result.agent_ids
-                if isinstance(resume_result, WaitRequest)
-                else []
-            )
-            for cid in new_child_ids:
-                children.append(self.children[cid].last_state)
-            new_status = Status.SUPERVISING
-        else:
-            new_status = Status.READY
+            return state.update(status=Status.FINISHED, result=self.result), output
+        return state.update(status=Status.READY), output
 
-        output = "" if suspended else resume_result
-
-        new_messages = list(state.messages)
-        if not suspended and not self.is_done and output:
-            new_messages.append({"role": "user", "content": f"REPL output:\n{output}"})
-
-        new_state = state.update(
-            status=new_status,
-            messages=new_messages,
-            result=self.result if self.is_done else None,
-            children=children,
-            waiting_on=self.waiting_on if suspended else [],
-        )
-        return new_state, output if not suspended else None
-
-    def _write_session(self, state: RLMState) -> None:
-        """Write-through: mirror state.messages to the session store.
-
-        state.messages is the source of truth during execution.  This
-        call keeps the durable session in sync after each step.
-        Strips the system prompt — it's rebuilt dynamically and would
-        bloat session files / pollute read_history results.
-        """
-        if self.session and state.messages:
-            msgs = [m for m in state.messages if m.get("role") != "system"]
-            self.session.write(state.agent_id, msgs)
-
-    # ── prompt & messages ────────────────────────────────────────────
+    # ── prompt building ───────────────────────────────────────────────
 
     def build_system_prompt(self, state: RLMState) -> str:
-        """Build the system prompt. Override to customize.
-
-        The builder holds static sections (role, repl, recursion, etc.).
-        Dynamic sections — ``tools`` and ``status`` — are passed as
-        keyword overrides to ``build()``, keeping the builder immutable.
-        """
+        """Build the full system prompt. Override to customize."""
         if self.config.system_prompt:
             return self.config.system_prompt
         return self.prompt_builder.build(
@@ -506,101 +403,82 @@ class RLM:
         )
 
     def build_tools_section(self, state: RLMState) -> str:
-        """Build the tools content for the system prompt. Override to customize."""
-        tool_lines = "\n".join(
-            f"- `{td.name}{td.signature}`: {td.description}"
-            for td in self.runtime.get_tool_defs()
-        )
+        """Build the tools listing for the system prompt. Override to customize."""
+        lines = [
+            f"- `{t.name}{t.signature}`: {t.description}"
+            for t in self.runtime.get_tool_defs()
+        ]
         if len(self.llm_clients) > 1:
-            model_parts = []
+            lines.append("\nAvailable models for `delegate(model=...)`:")
             for k in sorted(self.llm_clients):
                 desc = self.model_descriptions.get(k)
-                model_parts.append(f"- `{k}`: {desc}" if desc else f"- `{k}`")
-            tool_lines += (
-                "\n\nAvailable models for `delegate(model=...)`:\n"
-                + "\n".join(model_parts)
-            )
-        preimported = self.runtime.available_modules()
-        if preimported:
-            tool_lines += (
-                f"\n\nPre-imported modules (already available, no import needed): "
-                f"`{'`, `'.join(preimported)}`"
-            )
-        return tool_lines
+                lines.append(f"- `{k}`: {desc}" if desc else f"- `{k}`")
+        mods = self.runtime.available_modules()
+        if mods:
+            lines.append(f"\nPre-imported: `{'`, `'.join(mods)}`")
+        return "\n".join(lines)
 
     def build_status_section(self, state: RLMState) -> str:
-        """Build the status note for the system prompt. Override to customize."""
+        """Build the depth/status note for the system prompt. Override to customize."""
         depth = state.config.get("depth", 0)
         max_depth = state.config.get("max_depth", self.config.max_depth)
-        depth_note = f"You are at recursion depth **{depth}** of max **{max_depth}**."
-        if depth >= max_depth - 1:
-            depth_note += (
-                " You are near the depth limit — work directly, do not delegate."
-            )
+        note = f"You are at recursion depth **{depth}** of max **{max_depth}**."
+        if depth == 0 and max_depth > 0:
+            note += STATUS_DEPTH_ROOT
+        elif depth >= max_depth - 1:
+            note += STATUS_DEPTH_NEAR_MAX
         elif depth > 0:
-            depth_note += " Be more conservative with delegation the deeper you are."
-        return depth_note
+            note += STATUS_DEPTH_MID
+        return note
 
-    def build_messages(self, state: RLMState, *, system_prompt: str) -> list[dict]:
-        """Assemble the message list for an LLM call. Override to customize."""
-        system = {"role": "system", "content": system_prompt}
-        if not state.messages:
-            return [system, self.next_action_message(state.task, iteration=0)]
+    # ── message construction ──────────────────────────────────────────
 
+    def build_messages(
+        self, state: RLMState, *, system_prompt: str | None = None
+    ) -> list[dict]:
+        """Assemble the message list for an LLM call. Override to customize.
+
+        The action prompt is transient — re-injected each turn, never stored.
+        """
+        system = {
+            "role": "system",
+            "content": system_prompt or self.build_system_prompt(state),
+        }
         msgs = list(state.messages)
         cap = self.config.max_messages
         if cap and len(msgs) > cap:
-            msgs = self.truncate_messages(state, msgs, cap)
+            hint = TRUNCATION_SESSION_HINT if self.session else ""
+            summary = {
+                "role": "user",
+                "content": TRUNCATION_SUMMARY.format(
+                    task=state.task,
+                    total=len(msgs),
+                    cap=cap,
+                    session_hint=hint,
+                ),
+            }
+            msgs = [summary] + msgs[-cap:]
+
+        if state.iteration > 0:
+            msgs.append(self.next_action_message(state.task))
         return [system] + msgs
 
-    def truncate_messages(
-        self, state: RLMState, msgs: list[dict], cap: int
-    ) -> list[dict]:
-        """Build a condensed message list when history exceeds max_messages."""
-        recent = msgs[-cap:]
+    def first_action_message(self, task: str) -> dict[str, str]:
+        """First user message (stored in state.messages). Override to customize."""
+        return {"role": "user", "content": FIRST_ACTION.format(task=task)}
 
-        parts = [f"## Task\n{state.task}"]
-        history_note = f"{len(msgs)} messages so far, showing the last {cap}."
-        if self.session:
-            history_note += " Earlier messages were trimmed — call `read_history()` to recover them."
-        parts.append(f"## History\n{history_note}")
-
-        summary = {"role": "user", "content": "\n\n".join(parts)}
-        return [summary] + recent
-
-    def next_action_message(self, task: str, *, iteration: int) -> dict[str, str]:
-        """Format the user message that prompts the LLM to act."""
-        if iteration == 0:
-            content = (
-                f"Task: {task}\n\n"
-                "Your response MUST contain exactly one ```repl``` code block. "
-                "Put any reasoning as comments inside the block. "
-                "Do NOT reply with only text — every response needs a ```repl``` block."
-            )
-        else:
-            content = (
-                f"Continue working on the task: {task}\n\n"
-                "Your response MUST contain exactly one ```repl``` code block "
-                "with the next concrete action. "
-                "If you are done, call `done(result)` inside the block."
-            )
-        return {"role": "user", "content": content}
+    def next_action_message(self, task: str) -> dict[str, str]:
+        """Transient continuation prompt appended every turn (not stored)."""
+        return {"role": "user", "content": CONTINUE_ACTION.format(task=task)}
 
     def execution_output_message(self, code: str, output: str) -> dict[str, str]:
-        """Format the executed code and its output as a user message."""
+        """Format code + output as a user message. Override to customize."""
         return {
             "role": "user",
-            "content": f"Code executed:\n```python\n{code}\n```\n\nREPL output:\n{output}",
+            "content": EXECUTION_OUTPUT.format(code=code, output=output),
         }
 
-    def no_code_block_message(self) -> dict[str, str]:
-        """Nudge the LLM when it forgets to include a ```repl``` block."""
-        return {
-            "role": "user",
-            "content": "ERROR: Your previous reply did not contain a ```repl``` code block. "
-            "You MUST reply with exactly one ```repl``` block every time. "
-            "Write your next action now inside a ```repl``` block.",
-        }
+    # ── LLM / code helpers ────────────────────────────────────────────
 
     def call_llm(self, messages: list[dict]) -> str:
         """Call the LLM. Override for custom streaming/logging."""
@@ -620,10 +498,12 @@ class RLM:
             return None
         return blocks[0] if self.config.single_block else "\n\n".join(blocks)
 
-    # ── tools (injected into the REPL namespace) ─────────────────────
+    # ── REPL tools (injected into agent namespace) ────────────────────
 
     @tool(
-        "Mark the current agent as finished.\nArgs:\n- message (str): Required. An informative result message — the actual data, answer, or summary. Never pass empty string unless you truly found nothing.\nReturns:\n- str: The result."
+        "Mark the current agent as finished.\nArgs:\n"
+        "- message (str): The result — actual data, answer, or summary.\n"
+        "Returns: str"
     )
     def done(self, message: str) -> str:
         if self.is_done:
@@ -634,11 +514,11 @@ class RLM:
 
     @tool(
         "Delegate a subtask to a named child agent.\nArgs:\n"
-        "- name (str): Short identifier for the child (e.g. 'search_batch_0').\n"
+        "- name (str): Short identifier (e.g. 'search_batch_0').\n"
         "- task (str): The subtask description.\n"
         "- max_iterations (int | None): Iteration cap.\n"
         "- model (str): Which model to use. Defaults to 'default'.\n"
-        "Returns:\n- ChildHandle: Use `yield wait(handle)` to collect the result."
+        "Returns: ChildHandle — use `yield wait(handle)` to collect result."
     )
     def delegate(
         self,
@@ -655,82 +535,48 @@ class RLM:
             return f"[error: unknown model {model!r}. available: {keys}]"
 
         agent_id = f"{self.agent_id}.{name}"
-
-        if agent_id in self.children and self.children[agent_id].is_done:
-            child = self.children[agent_id]
-            child.last_state = child.start(task)
-            return ChildHandle(agent_id)
-
         if agent_id in self.children:
-            agent_id = self._resolve_child_id(name)
+            agent_id = self.unique_child_id(name)
 
-        client = self.llm_clients[model]
         child = self.create_child(
-            agent_id, max_iterations=max_iterations, llm_client=client
+            agent_id,
+            max_iterations=max_iterations,
+            llm_client=self.llm_clients[model],
         )
         self.children[agent_id] = child
         child.last_state = child.start(task)
         return ChildHandle(agent_id)
 
-    def _packed_llm_clients(self) -> dict[str, dict]:
-        """Re-pack llm_clients with descriptions for propagation to children."""
-        result: dict[str, dict] = {}
-        for k, client in self.llm_clients.items():
-            entry: dict = {"model": client}
-            if k in self.model_descriptions:
-                entry["description"] = self.model_descriptions[k]
-            result[k] = entry
-        return result
-
-    def _resolve_child_id(self, name: str) -> str:
-        """Derive a unique agent_id, auto-suffixing on collision."""
-        base = f"{self.agent_id}.{name}"
-        if base not in self.children:
-            return base
-        n = 2
-        while f"{base}_{n}" in self.children:
-            n += 1
-        return f"{base}_{n}"
-
     @tool(
         "Wait for delegated children. Must be called with `yield`.\n"
         "Args:\n- *handles: Handles from delegate().\n"
-        "Returns:\n- list[str]: Results in order (via yield)."
+        "Returns: list[str] — results in order (via yield)."
     )
     def wait(self, *handles: ChildHandle) -> WaitRequest:
         return WaitRequest(agent_ids=[h.agent_id for h in handles])
 
-    # ── session tools ─────────────────────────────────────────────
+    # ── session tools ─────────────────────────────────────────────────
 
-    @tool(
-        "List all agents in the session tree with their IDs and tasks.\n"
-        "Use this first to see who has run, what they worked on, and whether anyone already did relevant work.\n"
-        "Returns:\n- str: One line per agent — 'agent_id: first task message'."
-    )
+    @tool("List all agents with IDs and tasks.\nReturns: str")
     def list_sessions(self) -> str:
-        if not self.session:
-            return ""
-        agents = self.session.list_agents()
+        agents = self.session.list_agents() if self.session else []
         if not agents:
             return "No sessions found."
         lines = []
         for aid in agents:
             msgs = self.session.read(aid)
-            task = ""
-            for m in msgs:
-                if m.get("role") == "user":
-                    task = m.get("content", "")[:120]
-                    break
+            task = next(
+                (m["content"][:120] for m in msgs if m.get("role") == "user"),
+                "",
+            )
             lines.append(f"{aid}: {task}")
         return "\n".join(lines)
 
     @tool(
-        "Read the conversation transcript for any agent in the tree.\n"
-        "Defaults to your own history — use this to recall earlier work when your context was truncated.\n"
-        "Pass a sibling or child agent_id to see what they did.\nArgs:\n"
-        "- agent_id (str | None): Agent to read. Defaults to self (AGENT_ID).\n"
+        "Read conversation transcript for any agent.\nArgs:\n"
+        "- agent_id (str | None): Agent to read. Defaults to self.\n"
         "- last_n (int): Number of recent messages. Default 20.\n"
-        "Returns:\n- str: Formatted [role] content transcript."
+        "Returns: str"
     )
     def read_history(self, agent_id: str | None = None, last_n: int = 20) -> str:
         if not self.session:
@@ -739,17 +585,12 @@ class RLM:
         msgs = self.session.read(aid)
         if not msgs:
             return f"No session found for {aid}."
-        recent = msgs[-last_n:]
-        lines = []
-        for m in recent:
-            role = m.get("role", "?")
-            content = m.get("content", "")
-            if len(content) > 500:
-                content = content[:500] + "..."
-            lines.append(f"[{role}] {content}")
-        return "\n\n".join(lines)
+        return "\n\n".join(
+            f"[{m.get('role', '?')}] {m.get('content', '')[:500]}"
+            for m in msgs[-last_n:]
+        )
 
-    # ── children ─────────────────────────────────────────────────────
+    # ── child factory ─────────────────────────────────────────────────
 
     def create_child(
         self,
@@ -768,6 +609,18 @@ class RLM:
             self.config, max_iterations=child_iters, session=self.session
         )
         rt = self.runtime_factory() if self.runtime_factory else self.runtime.clone()
+
+        packed = {
+            k: {
+                "model": c,
+                **(
+                    {"description": self.model_descriptions[k]}
+                    if k in self.model_descriptions
+                    else {}
+                ),
+            }
+            for k, c in self.llm_clients.items()
+        }
         return self.__class__(
             llm_client=llm_client or self.llm_client,
             runtime=rt,
@@ -775,7 +628,37 @@ class RLM:
             agent_id=agent_id,
             depth=self.depth + 1,
             runtime_factory=self.runtime_factory,
-            llm_clients=self._packed_llm_clients(),
+            llm_clients=packed,
             pool=self.pool,
             prompt_builder=self.prompt_builder,
         )
+
+    def unique_child_id(self, name: str) -> str:
+        base = f"{self.agent_id}.{name}"
+        n = 2
+        while f"{base}_{n}" in self.children:
+            n += 1
+        return f"{base}_{n}"
+
+    def build_resume_msg(self, saved_state: RLMState) -> dict:
+        tree = saved_state.tree(color=False)
+        recent = ""
+        if self.session:
+            msgs = self.session.read(saved_state.agent_id or "root")
+            recent = "\n".join(
+                f"[{m.get('role', '?')}] {m.get('content', '')[:300]}"
+                for m in msgs[-5:]
+            )
+        return {
+            "role": "user",
+            "content": RESUME_MESSAGE.format(
+                task=saved_state.task,
+                tree=tree,
+                recent=recent or "(no session history available)",
+            ),
+        }
+
+    def write_session(self, state: RLMState) -> None:
+        if self.session and state.messages:
+            msgs = [m for m in state.messages if m.get("role") != "system"]
+            self.session.write(state.agent_id, msgs)

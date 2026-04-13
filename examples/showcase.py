@@ -14,7 +14,7 @@ Usage:
 
 from __future__ import annotations
 
-import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -40,9 +40,11 @@ def banner(msg: str):
 
 
 def make_agent(workspace: Path, session_dir: str = "context") -> RLM:
+    runtime = LocalRuntime()
+    os.chdir(workspace)
     return RLM(
         llm_client=AnthropicClient("claude-opus-4-6"),
-        runtime=LocalRuntime(workspace=workspace),
+        runtime=runtime,
         config=RLMConfig(max_depth=3, max_iterations=15, session=session_dir),
         llm_clients={
             "fast": {

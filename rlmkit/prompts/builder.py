@@ -1,7 +1,8 @@
-"""Prompt builder: ordered list of named sections with fluent API.
+"""Prompt builder: ordered list of named sections, immutable fluent API.
 
-Sections are rendered top-to-bottom. Empty sections are skipped.
-Dynamic content is passed as keyword overrides to ``build()``.
+Every mutation method (``.section()``, ``.remove()``) returns a **new**
+``PromptBuilder`` — the original is never modified.  This makes it safe
+to keep a module-level ``DEFAULT_BUILDER`` and derive from it.
 
 Usage::
 
@@ -12,6 +13,9 @@ Usage::
     )
 
     prompt = builder.build(tools="- read_file(path): Read a file.")
+
+    # Derive without mutating the original:
+    custom = builder.section("role", "You are a security auditor.", title="Role")
 """
 
 from __future__ import annotations
@@ -48,16 +52,21 @@ class Section:
 
 
 class PromptBuilder:
-    """Ordered list of sections with a fluent API.
+    """Ordered list of sections with an immutable fluent API.
 
-    Sections are stored in insertion order. ``build()`` renders them
-    top-to-bottom, skipping any that produce empty output. Pass keyword
-    arguments to ``build()`` to override section bodies for that single
-    render without mutating the builder.
+    ``.section()`` and ``.remove()`` return a **new** builder — the
+    original is never mutated.  ``build()`` renders sections
+    top-to-bottom, skipping empties.  Pass keyword arguments to
+    ``build()`` to override section bodies for that single render.
     """
 
     def __init__(self) -> None:
         self._sections: list[Section] = []
+
+    def _copy(self) -> PromptBuilder:
+        new = PromptBuilder()
+        new._sections = list(self._sections)
+        return new
 
     def section(
         self,
@@ -69,37 +78,34 @@ class PromptBuilder:
         before: str | None = None,
         after: str | None = None,
     ) -> PromptBuilder:
-        """Add or replace a named section.
-
-        If a section with *name* already exists, it is replaced in-place
-        (preserving its position).  Otherwise it is appended, or inserted
-        relative to *before* / *after* if given.
-        """
+        """Add or replace a named section. Returns a new builder."""
+        out = self._copy()
         new = Section(name, body, title=title, level=level)
 
-        for i, s in enumerate(self._sections):
+        for i, s in enumerate(out._sections):
             if s.name == name:
-                self._sections[i] = new
-                return self
+                out._sections[i] = new
+                return out
 
         if before:
-            for i, s in enumerate(self._sections):
+            for i, s in enumerate(out._sections):
                 if s.name == before:
-                    self._sections.insert(i, new)
-                    return self
+                    out._sections.insert(i, new)
+                    return out
         if after:
-            for i, s in enumerate(self._sections):
+            for i, s in enumerate(out._sections):
                 if s.name == after:
-                    self._sections.insert(i + 1, new)
-                    return self
+                    out._sections.insert(i + 1, new)
+                    return out
 
-        self._sections.append(new)
-        return self
+        out._sections.append(new)
+        return out
 
     def remove(self, name: str) -> PromptBuilder:
-        """Remove a section by name. No-op if not found."""
-        self._sections = [s for s in self._sections if s.name != name]
-        return self
+        """Remove a section by name. Returns a new builder."""
+        out = self._copy()
+        out._sections = [s for s in out._sections if s.name != name]
+        return out
 
     @property
     def names(self) -> list[str]:
@@ -115,8 +121,7 @@ class PromptBuilder:
     def build(self, **overrides: str) -> str:
         """Render all sections in order, skip empties.
 
-        Keyword arguments override section bodies for this call only —
-        the builder itself is not mutated.
+        Keyword arguments override section bodies for this call only.
         """
         parts = []
         for s in self._sections:

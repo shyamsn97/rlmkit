@@ -17,7 +17,6 @@ Usage::
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from ..state import WaitRequest
@@ -31,8 +30,7 @@ class ModalRuntime(Runtime):
     Tool functions (``done``, ``delegate``, ``wait``, etc.) are
     transparently proxied — when the sandboxed code calls a tool,
     the call is forwarded to the engine process and the result sent
-    back.  File tools operate on the engine's local filesystem by
-    default; override them to use the sandbox filesystem if needed.
+    back.
 
     Parameters
     ----------
@@ -40,8 +38,6 @@ class ModalRuntime(Runtime):
         Modal app name (created if missing).
     image : modal.Image | None
         Container image.  Defaults to ``debian_slim + rlmkit``.
-    workspace : str | Path
-        Local workspace path (for file tool resolution).
     timeout : int
         Sandbox lifetime in seconds (default 5 min).
     **sandbox_kwargs
@@ -54,11 +50,10 @@ class ModalRuntime(Runtime):
         app_name: str = "rlmkit",
         *,
         image=None,
-        workspace: Path | str = ".",
         timeout: int = 300,
         **sandbox_kwargs,
     ) -> None:
-        super().__init__(workspace=workspace)
+        super().__init__()
         self.app_name = app_name
         self.image = image
         self.timeout = timeout
@@ -66,7 +61,6 @@ class ModalRuntime(Runtime):
         self.sandbox = None
         self.process = None
         self.proxied: dict[str, Any] = {}
-        self.register_builtins()
 
     # ── lazy sandbox startup ──────────────────────────────────────────
 
@@ -146,7 +140,6 @@ class ModalRuntime(Runtime):
         new = ModalRuntime(
             self.app_name,
             image=self.image,
-            workspace=self.workspace,
             timeout=self.timeout,
             **self.sandbox_kwargs,
         )
