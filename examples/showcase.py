@@ -14,7 +14,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -24,6 +23,7 @@ from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.session import FileSession
 from rlmkit.state import RLMState
+from rlmkit.tools import FILE_TOOLS
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -40,8 +40,8 @@ def banner(msg: str):
 
 
 def make_agent(workspace: Path, session_dir: str = "context") -> RLM:
-    runtime = LocalRuntime()
-    os.chdir(workspace)
+    runtime = LocalRuntime(workspace=workspace)
+    runtime.register_tools(FILE_TOOLS)
     return RLM(
         llm_client=AnthropicClient("claude-opus-4-6"),
         runtime=runtime,

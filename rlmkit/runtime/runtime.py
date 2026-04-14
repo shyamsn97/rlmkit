@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from ..utils import get_tool_metadata
@@ -50,7 +51,8 @@ class Runtime(ABC):
     has a default implementation or raises ``NotImplementedError``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: str | Path = ".") -> None:
+        self.workspace = Path(workspace).resolve()
         self.tools: dict[str, tuple[Callable, str, bool]] = {}
 
     # ── required ─────────────────────────────────────────────────────
@@ -83,13 +85,13 @@ class Runtime(ABC):
     # ── clone ─────────────────────────────────────────────────────────
 
     def clone(self) -> Runtime:
-        """Fresh runtime sharing the same tool registrations.
+        """Fresh runtime sharing the same tool registrations and workspace.
 
         Namespace is empty — injected values do NOT carry over.
         Tools are re-registered so the new instance can discover them.
         Subclasses should override if they have extra state to copy.
         """
-        new = type(self)()
+        new = type(self)(workspace=self.workspace)
         for name, (fn, doc, core) in self.tools.items():
             new.tools[name] = (fn, doc, core)
             new.inject(name, fn)
@@ -109,6 +111,10 @@ class Runtime(ABC):
         doc = resolve_tool_description(fn, description)
         self.tools[name] = (fn, doc, core)
         self.inject(name, fn)
+
+    def register_tools(self, tools: list[Callable]) -> None:
+        for tool in tools:
+            self.register_tool(tool)
 
     def tool(self, description: str, *, name: str | None = None, core: bool = False):
         """Decorator that registers a function as a tool on this runtime.

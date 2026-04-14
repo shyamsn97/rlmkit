@@ -53,7 +53,7 @@ class ModalRuntime(Runtime):
         timeout: int = 300,
         **sandbox_kwargs,
     ) -> None:
-        super().__init__()
+        super().__init__(workspace=".")
         self.app_name = app_name
         self.image = image
         self.timeout = timeout

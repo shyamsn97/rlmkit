@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 from .runtime import Runtime
@@ -11,12 +13,13 @@ from .sandbox import Sandbox
 class LocalRuntime(Runtime):
     """Execute Python code in a persistent local namespace."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, workspace: str | Path = ".") -> None:
+        super().__init__(workspace=workspace)
         self.namespace: dict[str, Any] = {"__builtins__": __builtins__}
         self.sandbox = Sandbox(self.namespace)
         for mod in self.available_modules():
             self.namespace[mod] = __import__(mod)
+        os.chdir(self.workspace)
 
     def execute(self, code: str, timeout: float | None = None) -> str:
         return self.sandbox.execute(code)

@@ -9,7 +9,6 @@ Uses the step-based API for full observability.
 
 from __future__ import annotations
 
-import os
 import random
 import string
 import sys
@@ -20,12 +19,15 @@ from rlmkit.llm import AnthropicClient
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.state import RLMState
+from rlmkit.tools import FILE_TOOLS
 
 
 class LoggingRLM(RLM):
-    def extract_code(self, text: str, state: RLMState) -> str:
-        header = f'print("[{state.agent_id} iter {state.iteration}] executing...")'
+    def extract_code(self, text: str, state: RLMState | None = None) -> str | None:
         code = self.parse_code(text)
+        if code is None or state is None:
+            return code
+        header = f'print("[{state.agent_id} iter {state.iteration}] executing...")'
         return header + "\n" + code
 
 
@@ -51,44 +53,11 @@ def generate_haystack(directory: Path, num_files: int = 500, lines_per_file: int
     return answer
 
 
-# ── Runtime with custom tools ───────────────────────────────────────
+# ── Runtime setup ────────────────────────────────────────────────────
 
 def setup_runtime(workspace: Path) -> LocalRuntime:
-    rt = LocalRuntime()
-    os.chdir(workspace)
-
-    @rt.tool("List files matching a glob pattern.")
-    def list_files(pattern: str = "*.txt") -> list[str]:
-        return sorted(str(p.relative_to(workspace)) for p in workspace.glob(pattern))
-
-    @rt.tool("Count files matching a glob pattern.")
-    def count_files(pattern: str = "*.txt") -> int:
-        return len(list(workspace.glob(pattern)))
-
-    @rt.tool("Grep for a regex across files. Pass a list of filenames to scope the search.")
-    def grep(pattern: str, files: list[str] | None = None, max_results: int = 20) -> str:
-        import re
-        regex = re.compile(pattern)
-        if files is None:
-            targets = sorted(str(p.relative_to(workspace)) for p in workspace.rglob("*.txt"))
-        else:
-            targets = files
-        matches = []
-        for f in targets:
-            try:
-                for i, line in enumerate((workspace / f).read_text().splitlines(), 1):
-                    if regex.search(line):
-                        matches.append(f"{f}:{i}: {line}")
-                        if len(matches) >= max_results:
-                            return "\n".join(matches)
-            except (OSError, UnicodeDecodeError):
-                continue
-        return "\n".join(matches)
-
-    @rt.tool("Read a file's contents.")
-    def read_file(path: str) -> str:
-        return (workspace / path).read_text()
-
+    rt = LocalRuntime(workspace=workspace)
+    rt.register_tools(FILE_TOOLS)
     return rt
 
 

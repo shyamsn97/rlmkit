@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import random
 import sys
 import tempfile
@@ -31,7 +30,7 @@ from rlmkit.prompts import make_default_builder
 from rlmkit.prompts.default import ROLE_TEXT
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
-from rlmkit.utils import tool
+from rlmkit.tools import FILE_TOOLS
 
 
 # ── Generate a long document ────────────────────────────────────────
@@ -140,22 +139,8 @@ def main():
         actual_lines = len(doc.splitlines())
         print(f"Generated {actual_lines:,} lines of meeting notes ({len(doc):,} chars)")
 
-        runtime = LocalRuntime()
-        os.chdir(workspace)
-
-        @tool("Read lines start:end (0-indexed, exclusive) from a file. Returns the text.")
-        def read_lines(path: str, start: int, end: int) -> str:
-            p = workspace / path
-            lines = p.read_text().splitlines()
-            return "\n".join(lines[start:end])
-
-        @tool("Count the number of lines in a file.")
-        def line_count(path: str) -> int:
-            p = workspace / path
-            return len(p.read_text().splitlines())
-
-        runtime.register_tool(read_lines)
-        runtime.register_tool(line_count)
+        runtime = LocalRuntime(workspace=workspace)
+        runtime.register_tools(FILE_TOOLS)
 
         SUMMARIZATION_SECTION = """\
 When summarizing, follow these rules:

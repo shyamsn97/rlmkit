@@ -6,6 +6,38 @@ A framework for building [Recursive Language Model](https://github.com/alexzhang
   <img src="docs/rlm_animation.gif" alt="rlmkit animation" />
 </p>
 
+
+## Quick Start
+
+Here's all you need for a minimal recursive coding agent
+
+```python
+from rlmkit.llm import OpenAIClient
+from rlmkit.rlm import RLM, RLMConfig
+from rlmkit.runtime.local import LocalRuntime
+from rlmkit.tools import FILE_TOOLS
+from rlmkit.utils.viewer import save_trace, open_viewer
+
+runtime = LocalRuntime(workspace="./myproject")
+runtime.register_tools(FILE_TOOLS)
+
+agent = RLM(
+    llm_client=OpenAIClient("gpt-5"),
+    runtime=runtime,
+    config=RLMConfig(max_depth=3, max_iterations=15, session="context"),
+)
+
+query = "Find and fix all type errors in src/"
+states = [agent.start(query)]
+while not state.finished:
+    state = agent.step(state)
+    state.append(state)
+    print(state.tree()) # print the current tree
+
+# save_trace(states, "traces/") save the trace
+open_viewer(states, query=query) # open interactive viewer
+```
+
 ## Installation
 
 ### from pip
@@ -38,26 +70,6 @@ root [supervising] iter 5
 │   │   └── root.scanner_api.chunk_1.deep_scan [finished] iter 2 → "Payment flow is safe"
 │   └── root.scanner_api.chunk_2 [finished] iter 2 → "Clean"
 └── root.scanner_db [finished] iter 2 → "No issues found"
-```
-
-## Quick Start
-
-```python
-from rlmkit.llm import OpenAIClient
-from rlmkit.rlm import RLM, RLMConfig
-from rlmkit.runtime.local import LocalRuntime
-
-agent = RLM(
-    llm_client=OpenAIClient("gpt-5"),
-    runtime=LocalRuntime(),
-    config=RLMConfig(max_depth=3, max_iterations=15, session="context"),
-)
-
-state = agent.start("Find and fix all type errors in src/")
-while not state.finished:
-    state = agent.step(state)
-    print(state.tree())   # see the full agent tree at every step
-print(state.result)
 ```
 
 Or: `result = agent.run("Find and fix all type errors in src/")`
