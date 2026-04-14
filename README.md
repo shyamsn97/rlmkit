@@ -81,12 +81,16 @@ Or: `result = agent.run("Find and fix all type errors in src/")`
 Each `step(state) → state'` is one atomic transition. Steps are granular — each call advances exactly one phase, so intermediate states (SUPERVISING, children progressing) are always visible:
 
 ```
-READY --step_llm()+step_exec()--> SUPERVISING ──step_children()──> SUPERVISING
-  ^                    |                                                |
-  |                 done()                                      all children done
-  |                    |                                                |
-  |                    v                                        resume_exec()
-  |                FINISHED <───────────────────────────────────────────┘
+        step_llm()              step_exec()
+READY ─────────────> EXECUTING ─────────────> SUPERVISING
+  ^                      |                        |
+  |                   done()                step_children()
+  |                      |                   (one batch)
+  |                      v                        |
+  |                  FINISHED <── resume_exec() ──┤
+  |                      ^                        |
+  |                      |                  children not done
+  +── yields again ──────┘                   (keep stepping)
 ```
 
 1. **READY** — agent is queued for its next LLM call
