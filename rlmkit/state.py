@@ -100,10 +100,11 @@ class RLMState(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     agent_id: str = ""
-    task: str = ""
+    query: str = ""
     status: Status = Status.READY
     iteration: int = 0
     config: dict = {}
+    system_prompt: str | None = None
 
     event: StepEvent | None = None
     messages: list[dict] = []
@@ -134,7 +135,7 @@ class RLMState(BaseModel):
 
         Useful for resuming after a crash or migrating between backends.
         Only ``messages`` are recovered — metadata like ``status``, ``iteration``,
-        and ``task`` must be supplied via *fields* or will take defaults.
+        and ``query`` must be supplied via *fields* or will take defaults.
 
         When *recursive* is True, child states are built for every agent_id in
         the session that is a descendant of *agent_id*, reconstructing the full

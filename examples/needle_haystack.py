@@ -19,6 +19,14 @@ from pathlib import Path
 from rlmkit.llm import AnthropicClient
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
+from rlmkit.state import RLMState
+
+
+class LoggingRLM(RLM):
+    def extract_code(self, text: str, state: RLMState) -> str:
+        header = f'print("[{state.agent_id} iter {state.iteration}] executing...")'
+        code = self.parse_code(text)
+        return header + "\n" + code
 
 
 # ── Generate the haystack ───────────────────────────────────────────
@@ -95,7 +103,7 @@ def main():
         print(f"Generated 500 files in {workspace}")
 
         runtime = setup_runtime(workspace)
-        agent = RLM(
+        agent = LoggingRLM(
             llm_client=llm,
             runtime=runtime,
             config=RLMConfig(max_depth=3, max_iterations=15, session="context"),
@@ -123,6 +131,14 @@ def main():
         print(f"\n{'='*40}")
         print(f"Actual answer:  {answer}")
         print(f"Correct:        {answer in (state.result or '')}")
+
+        from rlmkit.utils.viewer import save_trace, open_viewer
+        trace_dir = Path("traces/needle_haystack")
+        save_trace(states, trace_dir, query=state.query, metadata={"answer": answer})
+        print(f"Trace saved to {trace_dir}/")
+
+        if "--viewer" in sys.argv:
+            open_viewer(states, query=state.query)
 
 
 if __name__ == "__main__":

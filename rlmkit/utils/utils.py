@@ -53,6 +53,17 @@ def find_code_blocks(text: str) -> list[str]:
     return [m.group(1).strip() for m in _REPL_BLOCK_RE.finditer(text)]
 
 
+def replace_code_block(text: str, new_code: str) -> str:
+    """Keep text up to and including the first ```repl``` block, drop the rest.
+
+    The block's content is replaced with *new_code*.
+    """
+    m = _REPL_BLOCK_RE.search(text)
+    if not m:
+        return text
+    return text[: m.start()] + f"```repl\n{new_code}\n```"
+
+
 def check_yield_errors(code: str) -> str | None:
     """Return an error string if any ``wait()`` calls lack ``yield``, else None."""
     try:

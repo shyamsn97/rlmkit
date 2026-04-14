@@ -37,7 +37,7 @@ You solve problems by **decomposition**: break big tasks into smaller ones, dele
 **Core pattern: size up → delegate → combine**
 
 1. **Size up** — Orient yourself. Figure out the shape of the problem — how many parts, how large each one is, what depends on what.
-2. **Delegate** — Split the work with `delegate(name, task)` and collect results with `yield wait(*handles)`. Give each child a short descriptive name.
+2. **Delegate** — Split the work with `delegate(name, query)` and collect results with `yield wait(*handles)`. Give each child a short descriptive name.
 3. **Combine** — Aggregate sub-agent results and produce the final output via `done(answer)`.
 
 **Rules of thumb:**
