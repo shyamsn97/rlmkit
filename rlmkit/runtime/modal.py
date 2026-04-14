@@ -1,4 +1,4 @@
-"""Modal sandbox runtime — runs agent code in a remote Modal container.
+"""Modal runtime — runs agent code in a remote Modal container.
 
 Requires ``modal`` to be installed (``pip install modal``).
 
@@ -19,16 +19,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..state import WaitRequest
-from .runtime import Runtime
-from .sandbox import deserialize, serialize
+from rlmkit.runtime.repl import deserialize, serialize
+from rlmkit.runtime.runtime import Runtime
+from rlmkit.state import WaitRequest
 
 
 class ModalRuntime(Runtime):
-    """Execute agent code inside a Modal sandbox container.
+    """Execute agent code inside a Modal container.
 
     Tool functions (``done``, ``delegate``, ``wait``, etc.) are
-    transparently proxied — when the sandboxed code calls a tool,
+    transparently proxied — when the container code calls a tool,
     the call is forwarded to the engine process and the result sent
     back.
 
@@ -39,8 +39,8 @@ class ModalRuntime(Runtime):
     image : modal.Image | None
         Container image.  Defaults to ``debian_slim + rlmkit``.
     timeout : int
-        Sandbox lifetime in seconds (default 5 min).
-    **sandbox_kwargs
+        Container lifetime in seconds (default 5 min).
+    **container_kwargs
         Extra kwargs forwarded to ``modal.Sandbox.create()``
         (e.g. ``gpu``, ``secrets``, ``volumes``).
     """
@@ -51,18 +51,18 @@ class ModalRuntime(Runtime):
         *,
         image=None,
         timeout: int = 300,
-        **sandbox_kwargs,
+        **container_kwargs,
     ) -> None:
         super().__init__(workspace=".")
         self.app_name = app_name
         self.image = image
         self.timeout = timeout
-        self.sandbox_kwargs = sandbox_kwargs
-        self.sandbox = None
+        self.container_kwargs = container_kwargs
+        self.container = None
         self.process = None
         self.proxied: dict[str, Any] = {}
 
-    # ── lazy sandbox startup ──────────────────────────────────────────
+    # ── lazy container startup ────────────────────────────────────────
 
     def ensure_started(self):
         if self.process is not None:
@@ -71,16 +71,16 @@ class ModalRuntime(Runtime):
 
         app = modal.App.lookup(self.app_name, create_if_missing=True)
         image = self.image or modal.Image.debian_slim().pip_install("rlmkit")
-        self.sandbox = modal.Sandbox.create(
+        self.container = modal.Sandbox.create(
             app=app,
             image=image,
             timeout=self.timeout,
-            **self.sandbox_kwargs,
+            **self.container_kwargs,
         )
-        self.process = self.sandbox.exec(
+        self.process = self.container.exec(
             "python",
             "-m",
-            "rlmkit.runtime.sandbox",
+            "rlmkit.runtime.repl",
         )
 
     # ── low-level protocol ────────────────────────────────────────────
@@ -143,7 +143,7 @@ class ModalRuntime(Runtime):
             self.app_name,
             image=self.image,
             timeout=self.timeout,
-            **self.sandbox_kwargs,
+            **self.container_kwargs,
         )
         for name, (fn, doc, core) in self.tools.items():
             new.tools[name] = (fn, doc, core)
@@ -154,10 +154,10 @@ class ModalRuntime(Runtime):
         return self.clone()
 
     def terminate(self):
-        """Shut down the sandbox container."""
-        if self.sandbox:
-            self.sandbox.terminate()
-            self.sandbox = None
+        """Shut down the Modal container."""
+        if self.container:
+            self.container.terminate()
+            self.container = None
             self.process = None
 
     def available_modules(self) -> list[str]:

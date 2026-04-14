@@ -10,10 +10,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from typing import Any
 
-from .llm import LLMClient
-from .pool import CallablePool, ThreadPool
-from .prompts.default import DEFAULT_BUILDER
-from .prompts.messages import (
+from rlmkit.llm import LLMClient
+from rlmkit.pool import CallablePool, ThreadPool
+from rlmkit.prompts.default import DEFAULT_BUILDER
+from rlmkit.prompts.messages import (
     CONTINUE_ACTION,
     DEFAULT_QUERY,
     EXECUTION_OUTPUT,
@@ -27,9 +27,9 @@ from .prompts.messages import (
     TRUNCATION_SESSION_HINT,
     TRUNCATION_SUMMARY,
 )
-from .runtime import Runtime
-from .session import FileSession, Session
-from .state import (
+from rlmkit.runtime import Runtime
+from rlmkit.session import FileSession, Session
+from rlmkit.state import (
     ChildHandle,
     CodeExec,
     LLMReply,
@@ -39,12 +39,12 @@ from .state import (
     Status,
     WaitRequest,
 )
-from .utils import (
+from rlmkit.tools import tool
+from rlmkit.utils import (
     OrphanedDelegatesError,
     check_yield_errors,
     find_code_blocks,
     replace_code_block,
-    tool,
 )
 
 
@@ -534,7 +534,7 @@ class RLM:
         return "".join(self.llm_client.stream(messages))
 
     def execute_code(self, code: str) -> str:
-        """Run code via the runtime. Override for sandboxing/limits."""
+        """Run code via the runtime. Override for custom execution limits."""
         output = self.runtime.execute(code)
         if len(output) > self.config.max_output_length:
             return output[: self.config.max_output_length] + "\n...<truncated>"

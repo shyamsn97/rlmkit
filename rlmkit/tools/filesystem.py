@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ..utils import tool
+from rlmkit.tools.tools import tool
 
 
 @tool("Read a file and return its contents.")
@@ -103,6 +103,14 @@ def grep(pattern: str, path: str = ".", *, max_results: int = 50) -> str:
 
 
 FILE_TOOLS = [
-    read_file, write_file, append_file, edit_file,
-    ls, read_lines, line_count, list_files, count_files, grep,
+    read_file,
+    write_file,
+    append_file,
+    edit_file,
+    ls,
+    read_lines,
+    line_count,
+    list_files,
+    count_files,
+    grep,
 ]

@@ -8,7 +8,7 @@ fills them via ``builder.build(tools=..., status=...)``.
 
 from __future__ import annotations
 
-from .builder import PromptBuilder
+from rlmkit.prompts.builder import PromptBuilder
 
 ROLE_TEXT = """
 - You are a **recursive LLM agent** with a Python REPL and the ability to delegate work to sub-agents.
@@ -129,6 +129,7 @@ done(risks)
 
 
 GUARDRAILS_TEXT = """
+- **Delegate by default.** If the task produces or touches multiple files, you should delegate — one sub-agent per file or logical unit. Doing everything in a single code block wastes your context window. The only exception is if you are already a leaf sub-agent or at max depth.
 - **Child result format:** Tell children to return ONLY the raw result (data, values, content) or empty string if nothing found. **Never ask children to return conversational messages** like "Found X" or "X not found" — these are hard to parse reliably.
 - **Aggregating results:** After `yield wait(...)`, filter by `if r.strip()` (non-empty = found something). **NEVER use substring matching** like `if 'pattern' in result` — children may quote the search pattern in "not found" messages, creating false positives.
 - **`done(message)` is required and must be informative.** The `message` argument is how your result is communicated. Always pass a meaningful answer — the data you found, the value you computed, or a clear summary.

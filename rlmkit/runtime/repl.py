@@ -1,12 +1,12 @@
-"""Sandbox — code execution with generator-based suspension.
+"""REPL — code execution with generator-based suspension.
 
 Handles stdout capture, generator wrapping, the yield/resume protocol,
 and the JSON-over-stdio bridge used by remote runtimes.
 
 Run as a container entrypoint::
 
-    python -m rlmkit.runtime.sandbox
-    python -m rlmkit.runtime.sandbox --workdir /repo
+    python -m rlmkit.runtime.repl
+    python -m rlmkit.runtime.repl --workdir /repo
 
 Reads JSON commands from stdin, writes JSON responses to stdout.
 
@@ -50,7 +50,7 @@ import threading
 from contextlib import contextmanager
 from typing import Any, TextIO
 
-from ..state import ChildHandle, WaitRequest
+from rlmkit.state import ChildHandle, WaitRequest
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -98,11 +98,11 @@ def deserialize(val: Any) -> Any:
     return val
 
 
-class Sandbox:
+class REPL:
     """Execute code in a Python namespace with generator suspension.
 
     Wraps code in a generator function so ``yield`` suspends execution.
-    Captures stdout via a thread-local proxy so parallel sandboxes
+    Captures stdout via a thread-local proxy so parallel REPLs
     running in a thread pool don't clobber each other's output.
 
     For local use, call :meth:`start`, :meth:`resume`, :meth:`execute`
@@ -111,14 +111,14 @@ class Sandbox:
 
     Usage::
 
-        sandbox = Sandbox()
-        suspended, result = sandbox.start("print('hello')")
+        repl = REPL()
+        suspended, result = repl.start("print('hello')")
         # suspended=False, result='hello'
 
-        suspended, result = sandbox.start("x = yield wait(h)")
+        suspended, result = repl.start("x = yield wait(h)")
         # suspended=True, result=<WaitRequest>
 
-        suspended, result = sandbox.resume(["child result"])
+        suspended, result = repl.resume(["child result"])
         # suspended=False, result='...'
     """
 
@@ -281,7 +281,7 @@ class Sandbox:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="rlmkit sandbox")
+    parser = argparse.ArgumentParser(description="rlmkit repl")
     parser.add_argument("--workdir", default=None, help="chdir before starting")
     args = parser.parse_args()
 
@@ -290,8 +290,8 @@ def main():
 
         os.chdir(args.workdir)
 
-    sandbox = Sandbox()
-    sandbox.serve()
+    repl = REPL()
+    repl.serve()
 
 
 if __name__ == "__main__":

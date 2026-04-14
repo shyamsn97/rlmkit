@@ -112,14 +112,14 @@ Re-delegating to a finished child resumes it with a new task — same REPL varia
 
 ## What You Can Do
 
-Because state is immutable and serializable, you get things for free that are hard in other frameworks:
+Because state is immutable and serializable, you get things for free that are hard in other frameworks (all demonstrated in [`showcase.py`](examples/showcase.py)):
 
-- **Checkpoint & resume** — save `state` at any step, restore later
-- **Fork** — branch the computation to try two approaches in parallel
-- **Intervene** — inspect children between steps, kill bad branches, inject hints
-- **Serialize** — `state.model_dump_json()` captures the entire tree; load on a different machine
-- **Gym-style loop** — wrap `step()` for RL training with `(state, reward, done)` tuples
-- **Time travel** — keep a history of states, rewind to any point
+- **Checkpoint & resume** — `state.model_dump_json()` at any step, `model_validate_json()` to restore ([§2](examples/showcase.py#L100-L114))
+- **Fork** — branch from a checkpoint to try a different approach ([§3](examples/showcase.py#L116-L152))
+- **Session persistence** — `write_tree` / `from_session` round-trip for message histories ([§4](examples/showcase.py#L154-L166))
+- **Time travel** — keep a list of states, rewind to any point ([§5](examples/showcase.py#L168-L183))
+- **Intervene** — inspect children between steps, kill bad branches, inject hints ([§6](examples/showcase.py#L186-L216))
+- **Gym-style loop** — wrap `step()` for RL training with reward signals ([§7](examples/showcase.py#L218-L242))
 
 ## `RLMState`
 
@@ -326,8 +326,8 @@ rlmkit/
 │   └── viz.py       # Live terminal tree (Rich)
 ├── runtime/
 │   ├── runtime.py   # Runtime ABC, ToolDef (minimal — no file I/O)
-│   ├── local.py     # LocalRuntime (in-process via Sandbox)
-│   ├── sandbox.py   # Sandbox (code execution, stdout capture, ANSI stripping)
+│   ├── local.py     # LocalRuntime (in-process via REPL)
+│   ├── repl.py      # REPL (code execution, stdout capture, ANSI stripping)
 │   └── modal.py     # ModalRuntime (remote via Modal containers)
 └── prompts/
     ├── builder.py   # PromptBuilder, Section

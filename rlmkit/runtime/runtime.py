@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from ..utils import get_tool_metadata
-from ..utils import tool as tool_decorator
+from rlmkit.tools import get_tool_metadata
+from rlmkit.tools import tool as tool_decorator
 
 
 @dataclass
@@ -113,8 +113,10 @@ class Runtime(ABC):
         self.inject(name, fn)
 
     def register_tools(self, tools: list[Callable]) -> None:
+        """Register a list of tools."""
         for tool in tools:
             self.register_tool(tool)
+        return tools
 
     def tool(self, description: str, *, name: str | None = None, core: bool = False):
         """Decorator that registers a function as a tool on this runtime.
