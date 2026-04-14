@@ -4,6 +4,7 @@ from .utils import (
     check_yield_errors,
     find_code_blocks,
     get_tool_metadata,
+    replace_code_block,
     tool,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "check_yield_errors",
     "find_code_blocks",
     "get_tool_metadata",
+    "replace_code_block",
     "tool",
 ]

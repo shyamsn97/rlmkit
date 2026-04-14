@@ -153,18 +153,18 @@ def main():
         print(f"State saved to {ckpt}")
         return
 
-    print("Agent ready. Type a task, or 'quit' to exit.\n")
+    print("Agent ready. Type a query, or 'quit' to exit.\n")
 
     while True:
         try:
-            task = input("> ").strip()
+            query = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
-        if not task or task.lower() in ("quit", "exit", "q"):
+        if not query or query.lower() in ("quit", "exit", "q"):
             break
 
-        state = agent.start(task)
+        state = agent.start(query)
         if args.no_viz:
             while not state.finished:
                 state = agent.step(state)

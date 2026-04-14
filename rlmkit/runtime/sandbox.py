@@ -44,12 +44,20 @@ import argparse
 import ast
 import io
 import json
+import re
 import sys
 import threading
 from contextlib import contextmanager
 from typing import Any, TextIO
 
 from ..state import ChildHandle, WaitRequest
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s)
+
 
 # ── thread-safe stdout capture ────────────────────────────────────────
 
@@ -144,7 +152,7 @@ class Sandbox:
         self.buf = io.StringIO()
         with self.captured():
             exec(code, self.namespace)
-        return self.buf.getvalue().strip()
+        return strip_ansi(self.buf.getvalue().strip())
 
     def _wrap_generator(self, code: str, tree: ast.Module):
         """Wrap code in a generator function with auto-global declarations.
@@ -188,7 +196,7 @@ class Sandbox:
         if not has_yield:
             with self.captured():
                 exec(code, self.namespace)
-            return False, self.buf.getvalue().strip()
+            return False, strip_ansi(self.buf.getvalue().strip())
 
         fn = self._wrap_generator(code, tree)
         self.gen = fn()
@@ -196,17 +204,23 @@ class Sandbox:
 
     def resume(self, send_value=None) -> tuple[bool, object]:
         """Resume a suspended generator. Same return convention as :meth:`start`."""
+        self.buf = io.StringIO()
         return self.advance(send_value)
 
     def advance(self, send_value=None) -> tuple[bool, object]:
-        """Drive the generator one step — yield suspends, StopIteration completes."""
+        """Drive the generator one step — yield suspends, StopIteration completes.
+
+        Returns ``(True, (request, pre_output))`` when suspended, or
+        ``(False, stdout_string)`` when completed.
+        """
         with self.captured():
             try:
                 request = self.gen.send(send_value)
-                return True, request
+                pre_output = strip_ansi(self.buf.getvalue().strip())
+                return True, (request, pre_output)
             except StopIteration:
                 pass
-        return False, self.buf.getvalue().strip()
+        return False, strip_ansi(self.buf.getvalue().strip())
 
     # ── JSON-over-stdio protocol (remote containers) ──────────────────
 
@@ -234,7 +248,11 @@ class Sandbox:
 
     def format_result(self, suspended: bool, result: object) -> dict:
         if suspended:
-            return {"suspended": True, "agent_ids": result.agent_ids}
+            request, pre_output = result
+            resp = {"suspended": True, "agent_ids": request.agent_ids}
+            if pre_output:
+                resp["pre_output"] = pre_output
+            return resp
         return {"suspended": False, "output": result}
 
     def handle(self, msg: dict) -> dict:

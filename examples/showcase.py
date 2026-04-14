@@ -120,7 +120,7 @@ def main():
         if checkpoint:
             fork_state = RLMState.model_validate_json(checkpoint)
             fork_state = fork_state.update(
-                task=(
+                query=(
                     "Create a simple Python calculator module (calc.py) with add, subtract, "
                     "multiply, divide functions, plus a test file (test_calc.py). "
                     "Also add a power() function. Delegate the test file to a sub-agent."
@@ -135,7 +135,7 @@ def main():
                 (fork_workspace / f.name).write_text(f.read_text())
 
             fork_agent = make_agent(fork_workspace, session_dir="fork_context")
-            fork_state = fork_agent.start(fork_state.task)
+            fork_state = fork_agent.start(fork_state.query)
 
             if viz:
                 fork_states = live(fork_agent, fork_state)

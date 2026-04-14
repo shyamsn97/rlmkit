@@ -109,7 +109,9 @@ class ModalRuntime(Runtime):
 
     def parse_exec_response(self, resp: dict) -> tuple[bool, object]:
         if resp.get("suspended"):
-            return True, WaitRequest(agent_ids=resp["agent_ids"])
+            request = WaitRequest(agent_ids=resp["agent_ids"])
+            pre_output = resp.get("pre_output", "")
+            return True, (request, pre_output)
         return False, resp.get("output", "")
 
     # ── Runtime interface ─────────────────────────────────────────────

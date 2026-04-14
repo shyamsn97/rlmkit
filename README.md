@@ -62,25 +62,25 @@ print(state.result)
 
 Or: `result = agent.run("Find and fix all type errors in src/")`
 
+`start()` accepts an optional query — if omitted, a generic default prompt is used.
+
 ## How It Works
 
-Each `step(state) → state'` is one atomic transition:
+Each `step(state) → state'` is one atomic transition. Steps are granular — each call advances exactly one phase, so intermediate states (SUPERVISING, children progressing) are always visible:
 
 ```
-READY --step_llm()--> EXECUTING --step_exec()--> SUPERVISING
-  ^                       |                          |
-  |                    done()                 step_supervise()
-  |                       |                   steps all children
-  |                       v                   deepest-first
-  |                   FINISHED                       |
-  |                                                  |
-  +------------- all children finished --------------+
+READY --step_llm()+step_exec()--> SUPERVISING ──step_children()──> SUPERVISING
+  ^                    |                                                |
+  |                 done()                                      all children done
+  |                    |                                                |
+  |                    v                                        resume_exec()
+  |                FINISHED <───────────────────────────────────────────┘
 ```
 
 1. **READY** — agent is queued for its next LLM call
-2. **EXECUTING** — LLM replied with a code block; the engine runs it
-3. **SUPERVISING** — code called `delegate()` + `yield wait()`; children are running
-4. Back to **READY** — all children finished, parent resumes with their results
+2. **EXECUTING** — LLM replied with a code block; the engine runs it (same step as LLM call)
+3. **SUPERVISING** — code called `delegate()` + `yield wait()`; children are running. Each `step()` advances children by one batch — you see the tree evolve
+4. **Resume** — all children finished; parent generator resumes with their results
 5. **FINISHED** — code called `done(result)`; agent is complete
 
 **Delegation:**
@@ -110,16 +110,17 @@ Because state is immutable and serializable, you get things for free that are ha
 Frozen, recursive Pydantic model — the entire computation in one object:
 
 ```python
-state.agent_id    # "root", "root.search_0", "root.search_0.chunk_2"
-state.task        # the task string
-state.status      # READY | EXECUTING | SUPERVISING | FINISHED
-state.iteration   # current step count
-state.event       # last StepEvent — LLMReply, CodeExec, ResumeExec, or NoCodeBlock
-state.messages    # full LLM message history
-state.result      # final result (when finished)
-state.children    # list[RLMState] — recursive
-state.finished    # shorthand for status == FINISHED
-state.tree()      # render the full tree as a string (color=True by default)
+state.agent_id      # "root", "root.search_0", "root.search_0.chunk_2"
+state.query         # the query string
+state.status        # READY | EXECUTING | SUPERVISING | FINISHED
+state.iteration     # current step count
+state.event         # last StepEvent — LLMReply, CodeExec, ResumeExec, or NoCodeBlock
+state.messages      # full LLM message history (assistant messages reflect extracted code)
+state.system_prompt # resolved system prompt for this step (tracks dynamic prompts)
+state.result        # final result (when finished)
+state.children      # list[RLMState] — recursive
+state.finished      # shorthand for status == FINISHED
+state.tree()        # render the full tree as a string (color=True by default)
 ```
 
 ## Core API
@@ -140,12 +141,12 @@ agent = RLM(
     llm_clients={...},         # named model registry for delegate(model="fast")
 )
 
-state = agent.start("task")
-state = agent.step(state)      # one transition
-result = agent.run("task")     # run to completion
+state = agent.start("query")       # query defaults to a generic prompt if omitted
+state = agent.step(state)          # one transition
+result = agent.run("query")        # run to completion
 ```
 
-Override any method: `step`, `step_llm`, `step_exec`, `step_supervise`, `build_system_prompt`, `build_messages`, `create_child`.
+Override any method: `step`, `step_llm`, `step_exec`, `build_system_prompt`, `build_messages`, `extract_code`, `create_child`.
 
 ### `LLMClient`
 
@@ -215,10 +216,36 @@ agent = RLM(
     },
     ...
 )
-# Agent sees available models in its prompt and can: delegate("search", task, model="fast")
+# Agent sees available models in its prompt and can: delegate("search", query, model="fast")
 ```
 
+## Visualization
+
+rlmkit includes an interactive state viewer built on Gradio. Click through steps with a slider, click nodes in the tree, and inspect messages, events, and diffs.
+
+<p align="center">
+  <img src="docs/ui.png" alt="State Viewer" width="900" />
+</p>
+
+```python
+from rlmkit.utils.viewer import open_viewer, save_trace, load_trace, view_trace
+
+# Open the viewer on a list of states
+open_viewer(states, query="Find the magic number")
+
+# Save a trace to disk (JSON file or directory)
+save_trace(states, "traces/run1", query="Find the magic number", metadata={"answer": "42"})
+
+# Load and view a saved trace
+states, query, metadata = load_trace("traces/run1")
+view_trace("traces/run1")
+```
+
+The viewer shows color-coded messages: assistant (green), execution (purple), and resume (amber). Code blocks in assistant messages always reflect the code that actually ran — if `extract_code` transforms the code, the stored message is updated to match.
+
 ## Extending
+
+**Custom prompts and state:**
 
 ```python
 class SecurityAuditor(RLM):
@@ -243,6 +270,20 @@ class CodeReviewer(RLM):
         return new_state
 ```
 
+**Code extraction and instrumentation:** Override `extract_code` to transform code before execution. The assistant message is automatically updated to reflect the transformed code, so the message trace never diverges from what actually ran.
+
+```python
+class LoggingRLM(RLM):
+    def extract_code(self, text, state=None):
+        code = self.parse_code(text)
+        if code is None or state is None:
+            return code
+        header = f'print("[{state.agent_id} iter {state.iteration}] executing...")'
+        return header + "\n" + code
+```
+
+`parse_code` extracts the raw code block; `extract_code` is the hook for transforms. Child agents inherit the override via `self.__class__`.
+
 ## Examples
 
 All examples show a live tree visualization by default. Pass `--no-viz` for plain output.
@@ -263,15 +304,19 @@ rlmkit/
 ├── pool.py          # Pool ABC, ThreadPool, SequentialPool
 ├── session.py       # Session ABC, FileSession
 ├── llm.py           # LLMClient ABC, OpenAIClient, AnthropicClient
-├── utils/           # @tool decorator, code block parsing
+├── utils/
+│   ├── utils.py     # @tool decorator, code block parsing, replace_code_block
+│   ├── viewer.py    # Gradio state viewer, save_trace, load_trace, view_trace
+│   └── viz.py       # Live terminal tree (Rich)
 ├── runtime/
 │   ├── runtime.py   # Runtime ABC, ToolDef (minimal — no file I/O)
 │   ├── local.py     # LocalRuntime (in-process via Sandbox)
-│   ├── sandbox.py   # Sandbox (code execution + JSON-over-stdio)
+│   ├── sandbox.py   # Sandbox (code execution, stdout capture, ANSI stripping)
 │   └── modal.py     # ModalRuntime (remote via Modal containers)
 └── prompts/
     ├── builder.py   # PromptBuilder, Section
-    └── default.py   # Default prompt sections
+    ├── default.py   # Default prompt sections
+    └── messages.py  # Message templates, DEFAULT_QUERY
 ```
 
 ## References
