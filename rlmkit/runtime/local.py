@@ -15,6 +15,7 @@ class LocalRuntime(Runtime):
 
     def __init__(self, workspace: str | Path = ".") -> None:
         super().__init__(workspace=workspace)
+        Path(self.workspace).mkdir(parents=True, exist_ok=True)
         self.namespace: dict[str, Any] = {"__builtins__": __builtins__}
         self.repl = REPL(self.namespace)
         for mod in self.available_modules():

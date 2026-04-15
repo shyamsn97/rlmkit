@@ -26,6 +26,15 @@ NO_CODE_BLOCK = (
 
 EXECUTION_OUTPUT = "Code executed:\n```python\n{code}\n```\n\nREPL output:\n{output}"
 
+STUCK_WARNING = (
+    "\n\nWARNING: Your code produced no output and did not call done(). "
+    "This is the {n}th consecutive empty execution. Your current approach is "
+    "NOT working. Do NOT repeat the same code. Either:\n"
+    "  1. Fix the root cause (e.g. the variable/data you need doesn't exist)\n"
+    "  2. Try a completely different approach\n"
+    "  3. Call done() with an error message explaining what went wrong"
+)
+
 ORPHANED_DELEGATES = (
     "You delegated [{names}] but never called `yield wait(...)`. "
     "You must use `yield wait(*handles)` to collect results."

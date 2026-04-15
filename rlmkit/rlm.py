@@ -24,6 +24,7 @@ from rlmkit.prompts.messages import (
     STATUS_DEPTH_MID,
     STATUS_DEPTH_NEAR_MAX,
     STATUS_DEPTH_ROOT,
+    STUCK_WARNING,
     TRUNCATION_SESSION_HINT,
     TRUNCATION_SUMMARY,
 )
@@ -280,6 +281,11 @@ class RLM:
             msgs = state.messages + [
                 self.execution_output_message(code, suspend_output)
             ]
+        elif not output.strip() and state.status == Status.READY:
+            n = self._count_consecutive_empty(state.messages) + 1
+            if n >= 2:
+                output = "(no output)" + STUCK_WARNING.format(n=n)
+            msgs = state.messages + [self.execution_output_message(code, output)]
         else:
             msgs = state.messages + [self.execution_output_message(code, output)]
         new_state = state.update(
@@ -526,6 +532,28 @@ class RLM:
             "role": "user",
             "content": EXECUTION_OUTPUT.format(code=code, output=output),
         }
+
+    @staticmethod
+    def _count_consecutive_empty(messages: list[dict]) -> int:
+        """Count consecutive trailing execution messages with '(no output)'.
+
+        Walks backwards through messages, skipping assistant replies,
+        counting user execution messages that produced no output.  Stops
+        at the first execution message that DID produce output.
+        """
+        count = 0
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            if "REPL output:" not in content:
+                continue
+            after = content.split("REPL output:", 1)[1].strip()
+            if after == "(no output)":
+                count += 1
+            else:
+                break
+        return count
 
     # ── LLM / code helpers ────────────────────────────────────────────
 

@@ -10,12 +10,33 @@ class OrphanedDelegatesError(RuntimeError):
     """Raised when delegate() is called without a matching yield wait()."""
 
 
-_REPL_BLOCK_RE = re.compile(r"```repl\s*\n(.*?)\n```\s*(?:\n|$)", re.DOTALL)
+_REPL_OPEN_RE = re.compile(r"```repl[ \t]*\n")
+_REPL_CLOSE_RE = re.compile(r"\n```[ \t]*(?:\n|$)")
 
 
 def find_code_blocks(text: str) -> list[str]:
-    """Find REPL code blocks wrapped in triple backticks."""
-    return [m.group(1).strip() for m in _REPL_BLOCK_RE.finditer(text)]
+    """Find REPL code blocks, handling nested triple-backtick content.
+
+    Uses greedy matching per block so that markdown fences inside
+    Python strings (e.g. ```bash ... ```) don't prematurely close
+    the repl block.
+    """
+    blocks: list[str] = []
+    pos = 0
+    while True:
+        opening = _REPL_OPEN_RE.search(text, pos)
+        if not opening:
+            break
+        code_start = opening.end()
+        # Greedy: find the *last* closing fence after the opening
+        last_close = None
+        for m in _REPL_CLOSE_RE.finditer(text, code_start):
+            last_close = m
+        if last_close is None:
+            break
+        blocks.append(text[code_start : last_close.start()].strip())
+        pos = last_close.end()
+    return blocks
 
 
 def replace_code_block(text: str, new_code: str) -> str:
@@ -23,10 +44,16 @@ def replace_code_block(text: str, new_code: str) -> str:
 
     The block's content is replaced with *new_code*.
     """
-    m = _REPL_BLOCK_RE.search(text)
-    if not m:
+    opening = _REPL_OPEN_RE.search(text)
+    if not opening:
         return text
-    return text[: m.start()] + f"```repl\n{new_code}\n```"
+    code_start = opening.end()
+    last_close = None
+    for m in _REPL_CLOSE_RE.finditer(text, code_start):
+        last_close = m
+    if last_close is None:
+        return text
+    return text[: opening.start()] + f"```repl\n{new_code}\n```"
 
 
 def check_yield_errors(code: str) -> str | None:
