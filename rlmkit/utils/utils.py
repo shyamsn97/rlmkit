@@ -11,7 +11,7 @@ class OrphanedDelegatesError(RuntimeError):
 
 
 _REPL_OPEN_RE = re.compile(r"```repl[ \t]*\n")
-_REPL_CLOSE_RE = re.compile(r"\n```[ \t]*(?:\n|$)")
+_REPL_CLOSE_RE = re.compile(r"\n?```[ \t]*(?:\n|$)")
 
 
 def find_code_blocks(text: str) -> list[str]:
