@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from typing import Any
 
-from rlmkit.llm import LLMClient
+from rlmkit.llm import LLMClient, LLMUsage
 from rlmkit.pool import CallablePool, ThreadPool
 from rlmkit.prompts.default import DEFAULT_BUILDER
 from rlmkit.prompts.messages import (
@@ -53,19 +53,23 @@ from rlmkit.utils import (
 class RLMConfig:
     max_depth: int = 5
     max_iterations: int = 30
-    max_output_length: int = 12_000
+    max_output_length: int = 12000
     max_messages: int | None = None
     max_concurrency: int = 8
     child_max_iterations: int | None = None
     single_block: bool = True
     session: Session | str | None = None
     system_prompt: str | None = None
+    max_budget: int | None = None
 
 
-class RLM:
+class RLM(LLMClient):
     """Recursive Language Model engine.
 
-    Owns mutable resources (LLM client, runtime, thread pool).
+    Implements ``LLMClient`` — use anywhere you'd use a regular LLM.
+    ``chat(messages)`` extracts the last user message as the query
+    and runs the full recursive step loop underneath.
+
     All observable state lives in ``RLMState`` — frozen, immutable, recursive.
     The engine advances state via ``step(state) → state``.
     """
@@ -186,7 +190,19 @@ class RLM:
         state = self.start(query)
         while not state.finished:
             state = self.step(state)
+        inp, out = state.tree_usage()
+        self.last_usage = LLMUsage(input_tokens=inp, output_tokens=out)
         return state.result or ""
+
+    def chat(self, messages: list[dict[str, str]], *args, **kwargs) -> str:
+        """LLMClient-compatible interface — drop-in replacement for any LLM.
+
+        Extracts the last user message as the query and runs the full
+        recursive agent loop. Usage is available via ``self.last_usage``
+        after the call.
+        """
+        query = messages[-1]["content"] if messages else None
+        return self.run(query)
 
     # ── step ─────────────────────────────────────────────────────────
 
@@ -212,6 +228,14 @@ class RLM:
         if state.iteration >= max_iter:
             return state.update(status=Status.FINISHED, result=state.last_reply or "")
 
+        if self.config.max_budget:
+            tree_in, tree_out = state.tree_usage()
+            if tree_in + tree_out >= self.config.max_budget:
+                return state.update(
+                    status=Status.FINISHED,
+                    result=f"[budget exceeded: {tree_in + tree_out} tokens used]",
+                )
+
         messages = self.build_messages(state)
         sys_content = (
             messages[0]["content"]
@@ -219,6 +243,10 @@ class RLM:
             else None
         )
         raw_text = self.call_llm(messages)
+        usage = self.llm_client.last_usage
+        inp = state.total_input_tokens + (usage.input_tokens if usage else 0)
+        out = state.total_output_tokens + (usage.output_tokens if usage else 0)
+
         next_iter = state.iteration + 1
         next_state = state.update(iteration=next_iter)
         code = self.extract_code(raw_text, state=next_state)
@@ -229,11 +257,15 @@ class RLM:
             status=Status.EXECUTING,
             iteration=next_iter,
             system_prompt=sys_content,
+            total_input_tokens=inp,
+            total_output_tokens=out,
             event=LLMReply(
                 agent_id=state.agent_id,
                 iteration=next_iter,
                 text=text,
                 code=code,
+                input_tokens=usage.input_tokens if usage else 0,
+                output_tokens=usage.output_tokens if usage else 0,
             ),
             messages=persisted,
             last_reply=text,

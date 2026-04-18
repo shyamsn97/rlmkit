@@ -2,9 +2,21 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Iterator
+from dataclasses import dataclass
+
+
+@dataclass
+class LLMUsage:
+    """Token counts from a single LLM call."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class LLMClient(metaclass=abc.ABCMeta):
+
+    last_usage: LLMUsage | None = None
+
     @abc.abstractmethod
     def chat(self, messages: list[dict[str, str]], *args, **kwargs) -> str:
         """Send messages and return the full response."""
@@ -31,6 +43,11 @@ class OpenAIClient(LLMClient):
             model=self.model,
             messages=messages,
         )
+        if resp.usage:
+            self.last_usage = LLMUsage(
+                input_tokens=resp.usage.prompt_tokens or 0,
+                output_tokens=resp.usage.completion_tokens or 0,
+            )
         return resp.choices[0].message.content or ""
 
     def stream(self, messages: list[dict[str, str]], *args, **kwargs) -> Iterator[str]:
@@ -38,10 +55,16 @@ class OpenAIClient(LLMClient):
             model=self.model,
             messages=messages,
             stream=True,
+            stream_options={"include_usage": True},
         )
         for chunk in resp:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
+            if getattr(chunk, "usage", None):
+                self.last_usage = LLMUsage(
+                    input_tokens=chunk.usage.prompt_tokens or 0,
+                    output_tokens=chunk.usage.completion_tokens or 0,
+                )
 
 
 class AnthropicClient(LLMClient):
@@ -50,7 +73,7 @@ class AnthropicClient(LLMClient):
     def __init__(
         self,
         model: str = "claude-sonnet-4-20250514",
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         **client_kwargs,
     ) -> None:
         import anthropic
@@ -77,6 +100,10 @@ class AnthropicClient(LLMClient):
             system=system,
             messages=chat_msgs,
         )
+        self.last_usage = LLMUsage(
+            input_tokens=resp.usage.input_tokens,
+            output_tokens=resp.usage.output_tokens,
+        )
         return resp.content[0].text
 
     def stream(self, messages: list[dict[str, str]], *args, **kwargs) -> Iterator[str]:
@@ -88,3 +115,8 @@ class AnthropicClient(LLMClient):
             messages=chat_msgs,
         ) as s:
             yield from s.text_stream
+            msg = s.get_final_message()
+            self.last_usage = LLMUsage(
+                input_tokens=msg.usage.input_tokens,
+                output_tokens=msg.usage.output_tokens,
+            )

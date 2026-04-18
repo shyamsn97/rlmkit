@@ -31,6 +31,8 @@ class StepEvent(BaseModel):
 class LLMReply(StepEvent):
     text: str
     code: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class CodeExec(StepEvent):
@@ -114,9 +116,26 @@ class RLMState(BaseModel):
     children: list[RLMState] = []
     waiting_on: list[str] = []
 
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+
     @property
     def finished(self) -> bool:
         return self.status == Status.FINISHED
+
+    @property
+    def total_tokens(self) -> int:
+        return self.total_input_tokens + self.total_output_tokens
+
+    def tree_usage(self) -> tuple[int, int]:
+        """Total (input, output) tokens across this agent and all descendants."""
+        inp = self.total_input_tokens
+        out = self.total_output_tokens
+        for child in self.children:
+            ci, co = child.tree_usage()
+            inp += ci
+            out += co
+        return inp, out
 
     def update(self, **changes) -> RLMState:
         """Return a new state with the given fields changed."""

@@ -28,14 +28,15 @@ agent = RLM(
 )
 
 query = "Find and fix all type errors in src/"
-states = [agent.start(query)]
+state = agent.start(query)
+states = [state]
 while not state.finished:
     state = agent.step(state)
-    state.append(state)
-    print(state.tree()) # print the current tree
+    states.append(state)
+    print(state.tree())
 
-# save_trace(states, "traces/") save the trace
-open_viewer(states, query=query) # open interactive viewer
+save_trace(states, "traces/run1", query=query)
+open_viewer(states, query=query)
 ```
 
 ## Installation
@@ -56,7 +57,9 @@ pip install -e .
 
 ## The Idea
 
-An LLM with a code REPL can recursively spawn sub-agents to handle pieces of a problem in parallel. rlmkit makes this tree a **state machine** — every agent advances one step at a time, and the entire computation is one object you can inspect, checkpoint, fork, or serialize at any step boundary. Call `state.tree()` to see it:
+`RLM` implements `LLMClient` — it's a drop-in replacement for any LLM. Call `chat(messages)` or `run(query)` and it runs a full recursive agent loop underneath. Swap out your LLM for an RLM and get delegation, parallel sub-agents, and a code REPL for free.
+
+rlmkit makes this tree a **state machine** — every agent advances one step at a time, and the entire computation is one object you can inspect, checkpoint, fork, or serialize at any step boundary. Call `state.tree()` to see it:
 
 ```
 root [supervising] iter 5
@@ -72,7 +75,12 @@ root [supervising] iter 5
 └── root.scanner_db [finished] iter 2 → "No issues found"
 ```
 
-Or: `result = agent.run("Find and fix all type errors in src/")`
+Use it like any LLM:
+
+```python
+result = agent.run("Find and fix all type errors in src/")
+result = agent.chat([{"role": "user", "content": "Find and fix all type errors in src/"}])
+```
 
 `start()` accepts an optional query — if omitted, a generic default prompt is used.
 
@@ -126,17 +134,21 @@ Because state is immutable and serializable, you get things for free that are ha
 Frozen, recursive Pydantic model — the entire computation in one object:
 
 ```python
-state.agent_id      # "root", "root.search_0", "root.search_0.chunk_2"
-state.query         # the query string
-state.status        # READY | EXECUTING | SUPERVISING | FINISHED
-state.iteration     # current step count
-state.event         # last StepEvent — LLMReply, CodeExec, ResumeExec, or NoCodeBlock
-state.messages      # full LLM message history (assistant messages reflect extracted code)
-state.system_prompt # resolved system prompt for this step (tracks dynamic prompts)
-state.result        # final result (when finished)
-state.children      # list[RLMState] — recursive
-state.finished      # shorthand for status == FINISHED
-state.tree()        # render the full tree as a string (color=True by default)
+state.agent_id            # "root", "root.search_0", "root.search_0.chunk_2"
+state.query               # the query string
+state.status              # READY | EXECUTING | SUPERVISING | FINISHED
+state.iteration           # current step count
+state.event               # last StepEvent — LLMReply, CodeExec, ResumeExec, or NoCodeBlock
+state.messages            # full LLM message history (assistant messages reflect extracted code)
+state.system_prompt       # resolved system prompt for this step (tracks dynamic prompts)
+state.result              # final result (when finished)
+state.children            # list[RLMState] — recursive
+state.finished            # shorthand for status == FINISHED
+state.total_input_tokens  # cumulative input tokens for this agent
+state.total_output_tokens # cumulative output tokens for this agent
+state.total_tokens        # input + output (property)
+state.tree_usage()        # (input, output) totals across entire subtree
+state.tree()              # render the full tree as a string (color=True by default)
 ```
 
 ## Core API
@@ -152,6 +164,7 @@ agent = RLM(
         max_iterations=30,     # steps per agent
         max_concurrency=8,     # global parallel cap
         session="context",     # session persistence (str path, Session object, or None)
+        max_budget=500_000,    # optional total token cap (across tree)
     ),
     pool=ThreadPool(8),        # execution pool (ThreadPool, SequentialPool, or custom)
     llm_clients={...},         # named model registry for delegate(model="fast")
@@ -165,6 +178,8 @@ result = agent.run("query")        # run to completion
 Override any method: `step`, `step_llm`, `step_exec`, `build_system_prompt`, `build_messages`, `extract_code`, `create_child`.
 
 ### `LLMClient`
+
+`RLM` itself implements `LLMClient`, so you can use an RLM anywhere you'd use a regular LLM — including as the `llm_client` for another RLM.
 
 ```python
 from rlmkit.llm import OpenAIClient, AnthropicClient, LLMClient
@@ -334,6 +349,28 @@ rlmkit/
     ├── default.py   # Default prompt sections
     └── messages.py  # Message templates, DEFAULT_QUERY
 ```
+
+## Token Tracking & Budgets
+
+Every LLM call records token usage. Counts accumulate on `RLMState` and propagate through the tree:
+
+```python
+state = agent.step(state)
+print(state.total_tokens)          # this agent's cumulative tokens
+print(state.tree_usage())          # (input, output) across entire subtree
+```
+
+Set `max_budget` to auto-stop agents that exceed a token cap:
+
+```python
+config = RLMConfig(max_budget=500_000)
+```
+
+## Security
+
+`LocalRuntime` executes arbitrary Python in your process — same permissions as your Python interpreter. It is designed for trusted agents on your own machine.
+
+Built-in caps: `max_depth`, `max_iterations`, `max_budget`. For untrusted agents, use `ModalRuntime` (isolated containers) or implement a custom `Runtime` with your own sandboxing. Override `step_exec` or `execute_code` to add approval gates or code filtering.
 
 ## References
 
