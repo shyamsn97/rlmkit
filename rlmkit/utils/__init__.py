@@ -1,4 +1,4 @@
-from rlmkit.utils.utils import (
+from rlmkit.utils.code import (
     OrphanedDelegatesError,
     check_yield_errors,
     find_code_blocks,

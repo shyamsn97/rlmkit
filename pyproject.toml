@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rlmkit"
-version = "0.0.1"
+version = "0.1.0"
 description = "A state-machine framework for recursive LLM agents in ~1,200 lines of Python."
 readme = "README.md"
 license = "MIT"
@@ -31,7 +31,8 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.20"]
-all = ["openai>=1.0", "anthropic>=0.20"]
+viewer = ["gradio>=4.0"]
+all = ["openai>=1.0", "anthropic>=0.20", "gradio>=4.0"]
 dev = ["pytest>=7.0", "ruff>=0.4"]
 
 [project.urls]

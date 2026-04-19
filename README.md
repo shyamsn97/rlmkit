@@ -179,10 +179,8 @@ Override any method: `step`, `step_llm`, `step_exec`, `build_system_prompt`, `bu
 
 ### `LLMClient`
 
-`RLM` itself implements `LLMClient`, so you can use an RLM anywhere you'd use a regular LLM — including as the `llm_client` for another RLM.
-
 ```python
-from rlmkit.llm import OpenAIClient, AnthropicClient, LLMClient
+from rlmkit import OpenAIClient, AnthropicClient, LLMClient
 
 llm = OpenAIClient("gpt-5")                    # lazy import — no hard dependency
 llm = AnthropicClient("claude-sonnet-4-20250514")
@@ -190,6 +188,8 @@ llm = AnthropicClient("claude-sonnet-4-20250514")
 class MyLLM(LLMClient):                        # or roll your own
     def chat(self, messages): ...
 ```
+
+Every client exposes `last_usage: LLMUsage | None` after each call (`input_tokens`, `output_tokens`).
 
 ### `Runtime`
 
@@ -249,6 +249,36 @@ agent = RLM(
 )
 # Agent sees available models in its prompt and can: delegate("search", query, model="fast")
 ```
+
+## RLM as a drop-in LLM
+
+`RLM` inherits from `LLMClient`, so you can use an agent anywhere you'd use a plain LLM. Any function that takes an `LLMClient` works unchanged — it just gets a recursive agent loop under the hood.
+
+```python
+from rlmkit import RLM, OpenAIClient, LLMClient
+from rlmkit.runtime.local import LocalRuntime
+
+def ask(llm: LLMClient, question: str) -> str:
+    return llm.chat([{"role": "user", "content": question}])
+
+plain = OpenAIClient("gpt-4o-mini")
+agent = RLM(llm_client=OpenAIClient("gpt-4o-mini"), runtime=LocalRuntime())
+
+ask(plain, "2+2?")    # one LLM call
+ask(agent, "2+2?")    # full agent loop, still returns a string
+```
+
+`chat(messages)` uses the last user message as the query. Use `run(query)` for the direct form. After the call, `agent.last_usage` holds the aggregated token count for the entire subtree.
+
+**Nested agents:** pass an `RLM` as another `RLM`'s `llm_client`. Every "LLM call" the outer agent makes is itself a full recursive sub-agent run.
+
+```python
+inner = RLM(llm_client=OpenAIClient("gpt-4o-mini"), runtime=LocalRuntime())
+outer = RLM(llm_client=inner, runtime=LocalRuntime())
+outer.run("compute the 7th Fibonacci number")
+```
+
+See [`examples/drop_in_llm.py`](examples/drop_in_llm.py) for a runnable walkthrough.
 
 ## Visualization
 
@@ -322,6 +352,7 @@ All examples show a live tree visualization by default. Pass `--no-viz` for plai
 | Example | What it shows |
 |---------|--------------|
 | [`showcase.py`](examples/showcase.py) | Checkpointing, forking, session persistence, time travel — the full API tour |
+| [`drop_in_llm.py`](examples/drop_in_llm.py) | RLM as an `LLMClient` — swap for any LLM; nest agents inside agents |
 | [`agent.py`](examples/coding-agent/agent.py) | Interactive coding agent REPL — give it tasks, it writes and edits files |
 | [`needle_haystack.py`](examples/needle_haystack.py) | Needle-in-a-haystack across 500 files with custom tools and `runtime_factory` |
 | [`summarizer.py`](examples/summarizer.py) | Recursive map-reduce: chunk a 10k-line doc, summarize in parallel, combine results |
@@ -336,9 +367,12 @@ rlmkit/
 ├── session.py       # Session ABC, FileSession
 ├── llm.py           # LLMClient ABC, OpenAIClient, AnthropicClient
 ├── utils/
-│   ├── utils.py     # @tool decorator, code block parsing, replace_code_block
+│   ├── code.py      # code block parsing, replace_code_block, yield-error checks
 │   ├── viewer.py    # Gradio state viewer, save_trace, load_trace, view_trace
 │   └── viz.py       # Live terminal tree (Rich)
+├── tools/
+│   ├── __init__.py  # @tool decorator, ToolMetadata
+│   └── filesystem.py # FILE_TOOLS — bundled filesystem tools
 ├── runtime/
 │   ├── runtime.py   # Runtime ABC, ToolDef (minimal — no file I/O)
 │   ├── local.py     # LocalRuntime (in-process via REPL)

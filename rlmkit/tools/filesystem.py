@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from rlmkit.tools.tools import tool
+from rlmkit.tools import tool
 
 
 @tool("Read a file and return its contents.")

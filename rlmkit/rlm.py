@@ -1,7 +1,6 @@
 """Core RLM engine — step-based execution with delegation via generators.
 
 State machine: READY → EXECUTING → (SUPERVISING →) FINISHED
-See docs/internal/engine_flow.md for a full walkthrough.
 """
 
 from __future__ import annotations
@@ -148,12 +147,6 @@ class RLM(LLMClient):
     def make_state(self, **kw) -> RLMState:
         """Build initial state. Override to inject custom fields."""
         return self.state_cls(**kw)
-
-    def reset(self, **kwargs) -> None:
-        return self.start(**kwargs)
-
-    def initialize(self, **kwargs) -> None:
-        return self.start(**kwargs)
 
     def start(self, query: str | None = None) -> RLMState:
         """Create initial state for a query and reset engine.

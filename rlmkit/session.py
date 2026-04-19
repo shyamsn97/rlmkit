@@ -91,7 +91,9 @@ class FileSession(Session):
     """Session backed by JSON files in a local directory."""
 
     def __init__(self, base_dir: str | Path) -> None:
-        self.base_dir = Path(base_dir)
+        # Resolve to absolute at construction so the session location doesn't
+        # move when a runtime chdirs into a workspace later.
+        self.base_dir = Path(base_dir).resolve()
 
     def _agent_path(self, agent_id: str) -> Path:
         parts = agent_id.split(".")

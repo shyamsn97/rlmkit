@@ -1,6 +1,6 @@
 """Test find_code_blocks and replace_code_block edge cases."""
 
-from rlmkit.utils.utils import find_code_blocks, replace_code_block
+from rlmkit.utils.code import find_code_blocks, replace_code_block
 
 
 def test_standard_fence():
