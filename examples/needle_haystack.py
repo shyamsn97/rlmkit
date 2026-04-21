@@ -24,7 +24,7 @@ from rlmkit.tools import FILE_TOOLS
 
 class LoggingRLM(RLM):
     def extract_code(self, text: str, state: RLMState | None = None) -> str | None:
-        code = self.parse_code(text)
+        code = super().extract_code(text, state)
         if code is None or state is None:
             return code
         header = f'print("[{state.agent_id} iter {state.iteration}] executing...")'

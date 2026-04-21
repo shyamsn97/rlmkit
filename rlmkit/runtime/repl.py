@@ -3,39 +3,17 @@
 Handles stdout capture, generator wrapping, the yield/resume protocol,
 and the JSON-over-stdio bridge used by remote runtimes.
 
-Run as a container entrypoint::
-
-    python -m rlmkit.runtime.repl
-    python -m rlmkit.runtime.repl --workdir /repo
-
+Container entrypoint: ``python -m rlmkit.runtime.repl [--workdir DIR]``.
 Reads JSON commands from stdin, writes JSON responses to stdout.
 
-Commands
---------
-``inject``
-    Evaluate a value string in the namespace and bind it::
+Commands:
+  - ``{"cmd": "inject",       "name": N, "value": expr}``  bind ``N = eval(expr)``
+  - ``{"cmd": "inject_proxy", "name": N}``                 bind ``N`` as proxy fn
+  - ``{"cmd": "run",          "code": src}``               exec; may suspend
+  - ``{"cmd": "resume",       "value": v}``                resume suspended gen
 
-        {"cmd": "inject", "name": "X", "value": "42"}
-
-``inject_proxy``
-    Create a proxy function that forwards calls back to the engine
-    over the protocol channel.  The engine handles the call and
-    sends the result back::
-
-        {"cmd": "inject_proxy", "name": "done"}
-
-``run``
-    Execute a code block (may suspend via ``yield``)::
-
-        {"cmd": "run", "code": "..."}
-
-    Response: ``{"suspended": true, "agent_ids": [...]}``
-    or ``{"suspended": false, "output": "..."}``.
-
-``resume``
-    Resume a suspended generator::
-
-        {"cmd": "resume", "value": <any>}
+Responses for run/resume: ``{"suspended": true, "agent_ids": [...]}`` or
+``{"suspended": false, "output": "..."}``.
 """
 
 from __future__ import annotations
@@ -102,24 +80,11 @@ class REPL:
     """Execute code in a Python namespace with generator suspension.
 
     Wraps code in a generator function so ``yield`` suspends execution.
-    Captures stdout via a thread-local proxy so parallel REPLs
-    running in a thread pool don't clobber each other's output.
+    Captures stdout via a thread-local proxy so parallel REPLs running in
+    a thread pool don't clobber each other's output.
 
-    For local use, call :meth:`start`, :meth:`resume`, :meth:`execute`
-    directly.  For remote containers, call :meth:`serve` to enter the
-    JSON-over-stdio loop.
-
-    Usage::
-
-        repl = REPL()
-        suspended, result = repl.start("print('hello')")
-        # suspended=False, result='hello'
-
-        suspended, result = repl.start("x = yield wait(h)")
-        # suspended=True, result=<WaitRequest>
-
-        suspended, result = repl.resume(["child result"])
-        # suspended=False, result='...'
+    Local use: :meth:`start` / :meth:`resume` / :meth:`execute`.
+    Remote containers: :meth:`serve` enters the JSON-over-stdio loop.
     """
 
     def __init__(
@@ -155,11 +120,8 @@ class REPL:
         return strip_ansi(self.buf.getvalue().strip())
 
     def _wrap_generator(self, code: str, tree: ast.Module):
-        """Wrap code in a generator function with auto-global declarations.
-
-        Every assigned name gets a ``global`` declaration so variables
-        persist in ``self.namespace`` across generator yields.
-        """
+        """Wrap ``code`` in a generator fn; ``global`` every assigned name so
+        variables persist in ``self.namespace`` across yields."""
         assigned = {
             node.id
             for node in ast.walk(tree)
@@ -177,11 +139,7 @@ class REPL:
         return self.namespace.pop("__rlm_gen__")
 
     def start(self, code: str) -> tuple[bool, object]:
-        """Start executing a code block. Returns ``(suspended, result)``.
-
-        If the code yields, returns ``(True, <yielded value>)``.
-        Otherwise returns ``(False, stdout_string)``.
-        """
+        """Execute ``code``. Returns ``(True, yielded)`` or ``(False, stdout)``."""
         self.buf = io.StringIO()
         try:
             tree = ast.parse(code)
@@ -208,11 +166,7 @@ class REPL:
         return self.advance(send_value)
 
     def advance(self, send_value=None) -> tuple[bool, object]:
-        """Drive the generator one step — yield suspends, StopIteration completes.
-
-        Returns ``(True, (request, pre_output))`` when suspended, or
-        ``(False, stdout_string)`` when completed.
-        """
+        """Drive the generator one step. Yield → suspend, StopIteration → done."""
         with self.captured():
             try:
                 request = self.gen.send(send_value)
@@ -264,11 +218,11 @@ class REPL:
             return self.format_result(*self.resume(send_value=msg.get("value")))
         if cmd == "inject":
             self.namespace[msg["name"]] = eval(msg["value"], self.namespace)
-            return {"ok": True}
-        if cmd == "inject_proxy":
+        elif cmd == "inject_proxy":
             self.namespace[msg["name"]] = self.make_proxy(msg["name"])
-            return {"ok": True}
-        return {"error": f"unknown command: {cmd}"}
+        else:
+            return {"error": f"unknown command: {cmd}"}
+        return {"ok": True}
 
     def serve(self) -> None:
         """Read JSON commands from stdin until EOF."""
@@ -281,17 +235,14 @@ class REPL:
 
 
 def main():
+    import os
+
     parser = argparse.ArgumentParser(description="rlmkit repl")
-    parser.add_argument("--workdir", default=None, help="chdir before starting")
+    parser.add_argument("--workdir", help="chdir before starting")
     args = parser.parse_args()
-
     if args.workdir:
-        import os
-
         os.chdir(args.workdir)
-
-    repl = REPL()
-    repl.serve()
+    REPL().serve()
 
 
 if __name__ == "__main__":

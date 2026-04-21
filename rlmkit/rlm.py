@@ -268,7 +268,7 @@ class RLM(LLMClient):
 
     def step_exec(self, state: RLMState) -> RLMState:
         """Run code from the LLM reply."""
-        code = self.parse_code(state.last_reply or "")
+        code = self.extract_code(state.last_reply or "", state=state)
 
         if not code:
             return state.update(
@@ -298,21 +298,14 @@ class RLM(LLMClient):
         state, output = self.after_exec(state, suspended, raw)
         is_suspended = state.status == Status.SUPERVISING
         if is_suspended:
-            suspend_output = (
-                output + "\n(suspended — waiting on children)"
-                if output
-                else "(suspended — waiting on children)"
-            )
-            msgs = state.messages + [
-                self.execution_output_message(code, suspend_output)
-            ]
-        elif not output.strip() and state.status == Status.READY:
-            n = self._count_consecutive_empty(state.messages) + 1
-            if n >= 2:
-                output = "(no output)" + STUCK_WARNING.format(n=n)
-            msgs = state.messages + [self.execution_output_message(code, output)]
+            tail = "(suspended — waiting on children)"
+            msg_output = f"{output}\n{tail}" if output else tail
         else:
-            msgs = state.messages + [self.execution_output_message(code, output)]
+            if not output.strip() and state.status == Status.READY:
+                n = self._count_consecutive_empty(state.messages) + 1
+                if n >= 2:
+                    output = "(no output)" + STUCK_WARNING.format(n=n)
+            msg_output = output
         new_state = state.update(
             event=CodeExec(
                 agent_id=state.agent_id,
@@ -321,7 +314,7 @@ class RLM(LLMClient):
                 output=output,
                 suspended=is_suspended,
             ),
-            messages=msgs,
+            messages=state.messages + [self.execution_output_message(code, msg_output)],
         )
         self.write_session(new_state)
         return new_state
@@ -593,19 +586,15 @@ class RLM(LLMClient):
             return output[: self.config.max_output_length] + "\n...<truncated>"
         return output
 
-    def parse_code(self, text: str) -> str | None:
-        """Pull the first ```repl``` block from LLM output."""
+    def extract_code(self, text: str, state: RLMState | None = None) -> str | None:
+        """Pull the first ```repl``` block from LLM output.
+
+        Override to support custom code block formats or extraction logic.
+        """
         blocks = find_code_blocks(text)
         if not blocks:
             return None
         return blocks[0] if self.config.single_block else "\n\n".join(blocks)
-
-    def extract_code(self, text: str, state: RLMState | None = None) -> str | None:
-        """Extract the first ```repl``` block from LLM output.
-
-        Override to support custom code block formats or extraction logic.
-        """
-        return self.parse_code(text)
 
     # ── REPL tools (injected into agent namespace) ────────────────────
 

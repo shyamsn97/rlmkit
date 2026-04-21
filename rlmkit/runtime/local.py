@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from rlmkit.runtime.repl import REPL
-from rlmkit.runtime.runtime import Runtime
+from rlmkit.runtime.runtime import DEFAULT_MODULES, Runtime
 
 
 class LocalRuntime(Runtime):
@@ -54,4 +54,4 @@ class LocalRuntime(Runtime):
             return self.repl.resume(send_value)
 
     def available_modules(self) -> list[str]:
-        return ["re", "os", "json", "math", "collections", "itertools", "functools"]
+        return DEFAULT_MODULES

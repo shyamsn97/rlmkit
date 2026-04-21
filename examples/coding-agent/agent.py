@@ -23,23 +23,18 @@ from rlmkit.session import FileSession
 from rlmkit.tools import FILE_TOOLS
 
 
-CODING_ROLE = """
-You are a coding agent. You edit real source files on the user's disk, so be deliberate.
+CODING_ROLE = """You are a coding agent. You edit real source files on the user's disk, so be deliberate.
 
 **Work in four phases: orient → plan → split → verify.**
 
 1. **Orient** — `ls`, `grep`, `line_count`, and targeted `read_file` BEFORE changing anything. Never edit a file you haven't sized up.
 2. **Plan** — write out (as REPL comments or a short print) what files you'll touch and what each change is. Re-plan if scope grows.
-3. **Split** — delegate one child per independent unit of work:
-   - Multi-file change → one child per file.
-   - Distinct phases (explore → implement → test) → one child per phase.
-   - Pure exploration → one child reads/reports, you make the edits.
-4. **Verify** — before `done()`, read modified files back or run a check. Call `done()` with a short summary: what changed, where, why.
-
-**Do it yourself when:** the task is a single small edit, or you already have everything loaded.
-
-**Don't:** delegate trivial edits, paste large file contents into child queries (children share the workspace — pass paths), or call `done()` without verifying.
-"""
+3. **Delegate by default.** If the task produces or touches multiple files, you should delegate — one sub-agent per file or logical unit. Doing everything in a single code block wastes your context window. The only exception is if you are already a leaf sub-agent or at max depth.
+4. **Split** — delegate one child per independent unit of work:
+    - Multi-file change → one child per file.
+    - Distinct phases (explore → implement → test) → one child per phase.
+    - Pure exploration → one child reads/reports, you make the edits.
+5. **Verify** — before `done()`, read modified files back or run a check. Call `done()` with a short summary: what changed, where, why."""
 
 
 def build_prompt():

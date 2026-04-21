@@ -20,7 +20,7 @@ import json
 from typing import Any
 
 from rlmkit.runtime.repl import deserialize, serialize
-from rlmkit.runtime.runtime import Runtime
+from rlmkit.runtime.runtime import DEFAULT_MODULES, Runtime
 from rlmkit.state import WaitRequest
 
 
@@ -145,8 +145,7 @@ class ModalRuntime(Runtime):
             timeout=self.timeout,
             **self.container_kwargs,
         )
-        for name, (fn, doc, core) in self.tools.items():
-            new.tools[name] = (fn, doc, core)
+        new.tools = dict(self.tools)
         return new
 
     def factory(self) -> ModalRuntime:
@@ -161,4 +160,4 @@ class ModalRuntime(Runtime):
             self.process = None
 
     def available_modules(self) -> list[str]:
-        return ["re", "os", "json", "math", "collections", "itertools", "functools"]
+        return DEFAULT_MODULES

@@ -340,14 +340,14 @@ class CodeReviewer(RLM):
 ```python
 class LoggingRLM(RLM):
     def extract_code(self, text, state=None):
-        code = self.parse_code(text)
+        code = super().extract_code(text, state)
         if code is None or state is None:
             return code
         header = f'print("[{state.agent_id} iter {state.iteration}] executing...")'
         return header + "\n" + code
 ```
 
-`parse_code` extracts the raw code block; `extract_code` is the hook for transforms. Child agents inherit the override via `self.__class__`.
+Call `super().extract_code(...)` to get the default behavior, then transform. Child agents inherit the override via `self.__class__`.
 
 ## Examples
 

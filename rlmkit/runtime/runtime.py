@@ -11,37 +11,47 @@ from typing import Any, Callable
 from rlmkit.tools import get_tool_metadata
 from rlmkit.tools import tool as tool_decorator
 
+DEFAULT_MODULES: list[str] = [
+    "re",
+    "os",
+    "json",
+    "math",
+    "collections",
+    "itertools",
+    "functools",
+]
+
 
 @dataclass
 class ToolDef:
     name: str
     signature: str
     description: str
+    fn: Callable | None = None
     core: bool = False
 
-
-def resolve_tool_name(fn: Callable) -> str:
-    meta = get_tool_metadata(fn)
-    if meta is not None:
-        return meta.name
-    name = fn.__name__
-    return name[5:] if name.startswith("tool_") else name
-
-
-def resolve_tool_description(fn: Callable, override: str | None = None) -> str:
-    if override is not None:
-        return override
-    meta = get_tool_metadata(fn)
-    if meta is not None:
-        return meta.description
-    return (fn.__doc__ or "").strip().split("\n")[0]
-
-
-def resolve_tool_signature(fn: Callable) -> str:
-    try:
-        return str(inspect.signature(fn))
-    except (TypeError, ValueError):
-        return "(...)"
+    @classmethod
+    def from_fn(
+        cls, fn: Callable, description: str | None = None, *, core: bool = False
+    ) -> ToolDef:
+        """Build a ``ToolDef`` from a function, preferring ``@tool`` metadata."""
+        meta = get_tool_metadata(fn)
+        name = meta.name if meta else fn.__name__.removeprefix("tool_")
+        if description is None:
+            description = (
+                meta.description if meta else (fn.__doc__ or "").strip().split("\n")[0]
+            )
+        try:
+            signature = str(inspect.signature(fn))
+        except (TypeError, ValueError):
+            signature = "(...)"
+        return cls(
+            name=name,
+            signature=signature,
+            description=description,
+            fn=fn,
+            core=core,
+        )
 
 
 class Runtime(ABC):
@@ -53,7 +63,7 @@ class Runtime(ABC):
 
     def __init__(self, workspace: str | Path = ".") -> None:
         self.workspace = Path(workspace).resolve()
-        self.tools: dict[str, tuple[Callable, str, bool]] = {}
+        self.tools: dict[str, ToolDef] = {}
 
     # ── required ─────────────────────────────────────────────────────
 
@@ -92,9 +102,9 @@ class Runtime(ABC):
         Subclasses should override if they have extra state to copy.
         """
         new = type(self)(workspace=self.workspace)
-        for name, (fn, doc, core) in self.tools.items():
-            new.tools[name] = (fn, doc, core)
-            new.inject(name, fn)
+        for name, td in self.tools.items():
+            new.tools[name] = td
+            new.inject(name, td.fn)
         return new
 
     # ── tool registration ────────────────────────────────────────────
@@ -107,16 +117,14 @@ class Runtime(ABC):
         core: bool = False,
     ) -> None:
         """Register a function as a tool — injects it and makes it discoverable."""
-        name = resolve_tool_name(fn)
-        doc = resolve_tool_description(fn, description)
-        self.tools[name] = (fn, doc, core)
-        self.inject(name, fn)
+        td = ToolDef.from_fn(fn, description, core=core)
+        self.tools[td.name] = td
+        self.inject(td.name, fn)
 
     def register_tools(self, tools: list[Callable]) -> None:
         """Register a list of tools."""
         for tool in tools:
             self.register_tool(tool)
-        return tools
 
     def tool(self, description: str, *, name: str | None = None, core: bool = False):
         """Decorator that registers a function as a tool on this runtime.
@@ -136,12 +144,7 @@ class Runtime(ABC):
         return decorator
 
     def get_tool_defs(self) -> list[ToolDef]:
-        return [
-            ToolDef(
-                name=n, signature=resolve_tool_signature(fn), description=doc, core=c
-            )
-            for n, (fn, doc, c) in self.tools.items()
-        ]
+        return list(self.tools.values())
 
     def available_modules(self) -> list[str]:
         """Modules already imported into the execution namespace."""
