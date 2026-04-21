@@ -15,11 +15,38 @@ import argparse
 from pathlib import Path
 
 from rlmkit.llm import OpenAIClient
+from rlmkit.prompts import make_default_builder
 from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.state import RLMState
 from rlmkit.session import FileSession
 from rlmkit.tools import FILE_TOOLS
+
+
+CODING_ROLE = """
+You are a coding agent. You edit real source files on the user's disk, so be deliberate.
+
+**Work in four phases: orient → plan → split → verify.**
+
+1. **Orient** — `ls`, `grep`, `line_count`, and targeted `read_file` BEFORE changing anything. Never edit a file you haven't sized up.
+2. **Plan** — write out (as REPL comments or a short print) what files you'll touch and what each change is. Re-plan if scope grows.
+3. **Split** — delegate one child per independent unit of work:
+   - Multi-file change → one child per file.
+   - Distinct phases (explore → implement → test) → one child per phase.
+   - Pure exploration → one child reads/reports, you make the edits.
+4. **Verify** — before `done()`, read modified files back or run a check. Call `done()` with a short summary: what changed, where, why.
+
+**Do it yourself when:** the task is a single small edit, or you already have everything loaded.
+
+**Don't:** delegate trivial edits, paste large file contents into child queries (children share the workspace — pass paths), or call `done()` without verifying.
+"""
+
+
+def build_prompt():
+    return (
+        make_default_builder()
+        .section("role", CODING_ROLE, title="Role")
+    )
 
 
 def main():
@@ -52,6 +79,7 @@ def main():
         llm_clients={
             "fast": {"model": fast, "description": "Cheap model for smaller subtasks"},
         },
+        prompt_builder=build_prompt(),
     )
 
     if args.resume:

@@ -309,13 +309,17 @@ The viewer shows color-coded messages: assistant (green), execution (purple), an
 **Custom prompts and state:**
 
 ```python
+from rlmkit.prompts.default import GUARDRAILS_TEXT, EXAMPLES_TEXT
+
 class SecurityAuditor(RLM):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.prompt_builder = (
             make_default_builder()
             .section("role", "You are a security auditor.", title="Role")
-            .remove("examples")
+            # Opt into the bundled guardrails + examples add-ons:
+            .section("guardrails", GUARDRAILS_TEXT, title="Guardrails", after="recursion")
+            .section("examples", EXAMPLES_TEXT, title="Examples", after="tools")
         )
 
 class ReviewState(RLMState):
