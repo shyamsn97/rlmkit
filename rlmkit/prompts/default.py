@@ -38,7 +38,6 @@ RECURSION_TEXT = """
 - `delegate(name, query) -> handle` spawns a child agent with a fresh context and the same tools.
 - `results = yield wait(*handles)` collects child results. **Always `yield`** before `wait()`.
 - Re-delegating to a finished child resumes it with a new task (same variables, fresh context).
-- Delegate when work is too big for one context window; do small things directly.
 """
 
 
@@ -75,7 +74,7 @@ done(risks)
 
 
 GUARDRAILS_TEXT = """
-- **Size up before delegating** — don't over-decompose small tasks.
+**Delegate by default.** If the task produces or touches multiple files, you should delegate intelligently. But don't over-decompose small tasks.
 - **Validate sub-agent output** — never guess; re-query or do it yourself.
 - **Every code path MUST call `done()` or produce output.** No silent `pass`; no `try/except: pass`.
 - **Child result format:** tell children to return ONLY raw results (or empty string). No conversational messages.
@@ -86,8 +85,9 @@ DEFAULT_BUILDER = (
     PromptBuilder()
     .section("role", ROLE_TEXT, title="Role")
     .section("repl", REPL_TEXT, title="REPL")
-    .section("session", title="Sessions")
     .section("recursion", RECURSION_TEXT, title="Recursion")
+    .section("guardrails", GUARDRAILS_TEXT, title="Guardrails")
+    .section("session", title="Sessions")
     .section("tools", title="Tools")
     .section("status", title="Status")
 )

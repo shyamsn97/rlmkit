@@ -196,5 +196,8 @@ class Runtime(ABC):
 def parse_response(resp: dict) -> tuple[bool, object]:
     """Convert a REPL response dict into ``(suspended, payload)``."""
     if resp.get("suspended"):
-        return True, (WaitRequest(agent_ids=resp["agent_ids"]), resp.get("pre_output", ""))
+        return True, (
+            WaitRequest(agent_ids=resp["agent_ids"]),
+            resp.get("pre_output", ""),
+        )
     return False, resp.get("output", "")
