@@ -60,19 +60,26 @@ class _StdoutProxy:
 
 
 def serialize(val: Any) -> Any:
-    """Convert rlmkit objects to JSON-safe dicts."""
+    """Convert rlmkit objects to JSON-safe structures. Recurses into lists/dicts."""
     if isinstance(val, (ChildHandle, WaitRequest)):
         return val.to_dict()
+    if isinstance(val, (list, tuple)):
+        return [serialize(v) for v in val]
+    if isinstance(val, dict):
+        return {k: serialize(v) for k, v in val.items()}
     return val
 
 
 def deserialize(val: Any) -> Any:
-    """Reconstruct rlmkit objects from JSON dicts."""
+    """Reconstruct rlmkit objects from JSON structures. Recurses into lists/dicts."""
+    if isinstance(val, list):
+        return [deserialize(v) for v in val]
     if isinstance(val, dict):
         if "child_handle" in val:
             return ChildHandle.from_dict(val)
         if "wait_request" in val:
             return WaitRequest.from_dict(val)
+        return {k: deserialize(v) for k, v in val.items()}
     return val
 
 

@@ -1,4 +1,10 @@
-"""Base runtime — execute code, inject values, register tools."""
+"""Runtime — ship a JSON message to a REPL, get the response back.
+
+The REPL itself (code execution, generator suspension, tool-call
+proxying) lives in :mod:`rlmkit.runtime.repl`.  A :class:`Runtime`
+subclass just decides *how* to talk to it: in-process, over a
+subprocess pipe, over a container's stdio, over SSH, whatever.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from rlmkit.runtime.repl import deserialize, serialize
+from rlmkit.state import WaitRequest
 from rlmkit.tools import get_tool_metadata
 from rlmkit.tools import tool as tool_decorator
 
@@ -55,57 +63,96 @@ class ToolDef:
 
 
 class Runtime(ABC):
-    """Execution environment for the agent.
+    """Where agent code runs.
 
-    Only ``execute`` and ``inject`` are abstract.  Everything else
-    has a default implementation or raises ``NotImplementedError``.
+    Subclass and implement two methods: :meth:`send` ships a dict to
+    a REPL and :meth:`recv` reads the next dict back.  Everything else
+    — the proxy loop, code execution, delegation, tool registration,
+    cloning — is handled by this base class.
+
+    See :class:`SubprocessRuntime` for the canonical remote example and
+    :class:`LocalRuntime` for the in-process one.
     """
 
     def __init__(self, workspace: str | Path = ".") -> None:
         self.workspace = Path(workspace).resolve()
         self.tools: dict[str, ToolDef] = {}
+        self.proxied: dict[str, Callable] = {}
 
-    # ── required ─────────────────────────────────────────────────────
+    # ── subclasses implement these two ────────────────────────────────
 
     @abstractmethod
+    def send(self, msg: dict) -> None:
+        """Ship one JSON-serializable dict to the REPL."""
+
+    @abstractmethod
+    def recv(self) -> dict:
+        """Block until the next dict arrives from the REPL, return it."""
+
+    # ── REPL protocol (shared by every runtime) ───────────────────────
+
+    def call(self, msg: dict) -> dict:
+        """Send ``msg`` and drive the proxy loop until the REPL replies."""
+        self.send(msg)
+        while True:
+            resp = self.recv()
+            if "proxy" not in resp:
+                return resp
+            fn = self.proxied[resp["proxy"]]
+            args = [deserialize(a) for a in resp.get("args", [])]
+            kwargs = {k: deserialize(v) for k, v in resp.get("kwargs", {}).items()}
+            self.send({"value": serialize(fn(*args, **kwargs))})
+
     def execute(self, code: str, timeout: float | None = None) -> str:
-        """Run code and return output as a string."""
-
-    @abstractmethod
-    def inject(self, name: str, value: Any) -> None:
-        """Inject a named value into the runtime namespace."""
-
-    # ── generator-based execution (override for remote runtimes) ────
+        """Run ``code`` and return captured stdout."""
+        return self.call({"cmd": "run", "code": code}).get("output", "")
 
     def start_code(self, code: str) -> tuple[bool, object]:
-        """Execute a code block that may suspend at yield points.
+        """Run code that may ``yield``.
 
-        Returns ``(True, WaitRequest)`` if the code yielded, or
-        ``(False, stdout_str)`` when it ran to completion.
+        Returns ``(True, (WaitRequest, pre_output))`` on suspend or
+        ``(False, stdout)`` on completion.
         """
-        raise NotImplementedError
+        return parse_response(self.call({"cmd": "run", "code": code}))
 
     def resume_code(self, send_value=None) -> tuple[bool, object]:
-        """Resume a suspended code block with child results.
+        """Resume a suspended generator. Same return shape as :meth:`start_code`."""
+        return parse_response(self.call({"cmd": "resume", "value": send_value}))
 
-        Same return convention as :meth:`start_code`.
+    def inject(self, name: str, value: Any) -> None:
+        """Bind ``name`` to ``value`` in the REPL's namespace.
+
+        Default uses the proxy protocol: callables become stubs inside
+        the REPL that round-trip back here; other values are shipped as
+        ``repr(value)`` and ``eval``'d on the far side.
+
+        Override only if you can bind directly without the round-trip
+        (e.g. :class:`LocalRuntime`, which runs in-process).
         """
-        raise NotImplementedError
-
-    # ── clone ─────────────────────────────────────────────────────────
+        if callable(value):
+            self.proxied[name] = value
+            self.call({"cmd": "inject_proxy", "name": name})
+        else:
+            self.call({"cmd": "inject", "name": name, "value": repr(value)})
 
     def clone(self) -> Runtime:
-        """Fresh runtime sharing the same tool registrations and workspace.
+        """Fresh runtime with the same tool registrations and workspace.
 
-        Namespace is empty — injected values do NOT carry over.
-        Tools are re-registered so the new instance can discover them.
-        Subclasses should override if they have extra state to copy.
+        The REPL namespace (injected values, variables from executed
+        code) does NOT carry over — the clone starts empty.
+
+        Override only if your ``__init__`` takes arguments other than
+        ``workspace``; the default calls ``type(self)(workspace=...)``.
         """
         new = type(self)(workspace=self.workspace)
         for name, td in self.tools.items():
             new.tools[name] = td
             new.inject(name, td.fn)
         return new
+
+    def available_modules(self) -> list[str]:
+        """Names of modules the REPL pre-imports, for inclusion in prompts."""
+        return []
 
     # ── tool registration ────────────────────────────────────────────
 
@@ -122,7 +169,6 @@ class Runtime(ABC):
         self.inject(td.name, fn)
 
     def register_tools(self, tools: list[Callable]) -> None:
-        """Register a list of tools."""
         for tool in tools:
             self.register_tool(tool)
 
@@ -146,6 +192,9 @@ class Runtime(ABC):
     def get_tool_defs(self) -> list[ToolDef]:
         return list(self.tools.values())
 
-    def available_modules(self) -> list[str]:
-        """Modules already imported into the execution namespace."""
-        return []
+
+def parse_response(resp: dict) -> tuple[bool, object]:
+    """Convert a REPL response dict into ``(suspended, payload)``."""
+    if resp.get("suspended"):
+        return True, (WaitRequest(agent_ids=resp["agent_ids"]), resp.get("pre_output", ""))
+    return False, resp.get("output", "")

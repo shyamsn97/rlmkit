@@ -30,6 +30,8 @@ REPL_TEXT = """
 - Variables persist across turns.
 - `AGENT_ID`, `DEPTH`, `MAX_DEPTH` are set. You cannot delegate when `DEPTH == MAX_DEPTH`.
 - Call `done(answer)` when finished.
+- **Execute, don't narrate.** Every turn must run code that makes real progress. Don't say "I'll do X" — do X.
+- **Output is truncated** (~12k chars). Don't `print()` huge values — slice, summarize, or delegate analysis to a sub-agent.
 """
 
 RECURSION_TEXT = """
@@ -77,7 +79,6 @@ GUARDRAILS_TEXT = """
 - **Validate sub-agent output** — never guess; re-query or do it yourself.
 - **Every code path MUST call `done()` or produce output.** No silent `pass`; no `try/except: pass`.
 - **Child result format:** tell children to return ONLY raw results (or empty string). No conversational messages.
-- **Aggregating results:** filter by `if r.strip()`, never substring-match on `"pattern" in result`.
 """
 
 
