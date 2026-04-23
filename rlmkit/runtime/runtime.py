@@ -8,8 +8,11 @@ subprocess pipe, over a container's stdio, over SSH, whatever.
 
 from __future__ import annotations
 
+import ast
 import inspect
+import os
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -76,6 +79,7 @@ class Runtime(ABC):
 
     def __init__(self, workspace: str | Path = ".") -> None:
         self.workspace = Path(workspace).resolve()
+        self.workspace.mkdir(parents=True, exist_ok=True)
         self.tools: dict[str, ToolDef] = {}
         self.proxied: dict[str, Callable] = {}
 
@@ -92,7 +96,15 @@ class Runtime(ABC):
     # ── REPL protocol (shared by every runtime) ───────────────────────
 
     def call(self, msg: dict) -> dict:
-        """Send ``msg`` and drive the proxy loop until the REPL replies."""
+        """Send ``msg`` and drive the proxy loop until the REPL replies.
+
+        Proxied tools are invoked with the host CWD chdir'd into
+        ``self.workspace`` so relative paths resolve the same way they
+        would inside a local runtime.  Exceptions are shipped back as
+        ``{"error": "..."}`` so agent code sees a normal Python
+        exception instead of the host crashing and leaving the REPL
+        wedged on stdin.
+        """
         self.send(msg)
         while True:
             resp = self.recv()
@@ -101,7 +113,23 @@ class Runtime(ABC):
             fn = self.proxied[resp["proxy"]]
             args = [deserialize(a) for a in resp.get("args", [])]
             kwargs = {k: deserialize(v) for k, v in resp.get("kwargs", {}).items()}
-            self.send({"value": serialize(fn(*args, **kwargs))})
+            try:
+                with self._in_workspace():
+                    result = fn(*args, **kwargs)
+            except Exception as exc:
+                self.send({"error": f"{type(exc).__name__}: {exc}"})
+            else:
+                self.send({"value": serialize(result)})
+
+    @contextmanager
+    def _in_workspace(self):
+        """Temporarily chdir into ``self.workspace`` for a proxy call."""
+        prev = os.getcwd()
+        try:
+            os.chdir(self.workspace)
+            yield
+        finally:
+            os.chdir(prev)
 
     def execute(self, code: str, timeout: float | None = None) -> str:
         """Run ``code`` and return captured stdout."""
@@ -122,9 +150,17 @@ class Runtime(ABC):
     def inject(self, name: str, value: Any) -> None:
         """Bind ``name`` to ``value`` in the REPL's namespace.
 
-        Default uses the proxy protocol: callables become stubs inside
-        the REPL that round-trip back here; other values are shipped as
-        ``repr(value)`` and ``eval``'d on the far side.
+        Three paths depending on the value:
+
+        - **Callable** — installed as a stub inside the REPL that
+          round-trips calls back to the host.
+        - **Literal** (anything whose ``repr`` is a valid Python
+          expression — numbers, strings, bools, ``None``, and nested
+          lists/tuples/dicts of the same) — shipped as
+          ``repr(value)`` and ``eval``'d on the far side.
+        - **Object** — each public method becomes its own callable
+          proxy, and a ``SimpleNamespace`` is installed in the REPL so
+          ``name.method(...)`` works transparently.
 
         Override only if you can bind directly without the round-trip
         (e.g. :class:`LocalRuntime`, which runs in-process).
@@ -132,8 +168,23 @@ class Runtime(ABC):
         if callable(value):
             self.proxied[name] = value
             self.call({"cmd": "inject_proxy", "name": name})
-        else:
+            return
+        try:
+            ast.parse(repr(value), mode="eval")
+            literal = True
+        except SyntaxError:
+            literal = False
+        if literal:
             self.call({"cmd": "inject", "name": name, "value": repr(value)})
+            return
+        methods = [
+            m
+            for m in dir(value)
+            if not m.startswith("_") and callable(getattr(value, m, None))
+        ]
+        for m in methods:
+            self.proxied[f"{name}.{m}"] = getattr(value, m)
+        self.call({"cmd": "inject_object_proxy", "name": name, "methods": methods})
 
     def clone(self) -> Runtime:
         """Fresh runtime with the same tool registrations and workspace.

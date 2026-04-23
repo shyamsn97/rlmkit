@@ -21,7 +21,7 @@ from __future__ import annotations
 from rlmkit.prompts.builder import PromptBuilder
 
 ROLE_TEXT = """
-You are an agent with a Python REPL. You can spawn sub-agents that get their own fresh context window.
+You are an agent with a Python REPL. You can delegate tasks to sub-agents that get their own fresh context window.
 """
 
 REPL_TEXT = """

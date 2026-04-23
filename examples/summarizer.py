@@ -8,27 +8,27 @@ partial summaries into a final one.
 Shows:
 - Custom prompt builder (swap role, add a summarization section)
 - Custom tools registered on the runtime
-- The step-based API with full logging
-- `yield wait()` for parallel delegation
+- ``yield wait()`` for parallel delegation
 
 Usage:
-    python summarizer.py
-    python summarizer.py --lines 5000   # smaller doc
-    python summarizer.py --no-viz       # disable live UI
+    python examples/summarizer.py
+    python examples/summarizer.py --lines 5000
+    python examples/summarizer.py --no-viz
+    python examples/summarizer.py --docker-image rlmkit:local
 """
 
 from __future__ import annotations
 
 import argparse
 import random
-import sys
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import AnthropicClient
+from rlmkit.llm import AnthropicClient, OpenAIClient
 from rlmkit.prompts import make_default_builder
 from rlmkit.prompts.default import ROLE_TEXT
 from rlmkit.rlm import RLM, RLMConfig
+from rlmkit.runtime.docker import DockerRuntime
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.tools import FILE_TOOLS
 
@@ -79,70 +79,54 @@ DETAILS = [
 
 
 def generate_document(num_lines: int = 10_000) -> str:
-    """Generate synthetic meeting notes with many topics and action items."""
-    lines = []
+    lines: list[str] = []
     meeting_num = 1
     i = 0
     while i < num_lines:
         topic = random.choice(TOPICS)
         lines.append(f"=== Meeting #{meeting_num}: {topic} ===")
         lines.append(f"Date: 2025-{random.randint(1,12):02d}-{random.randint(1,28):02d}")
-        lines.append(f"Attendees: {', '.join(random.sample(PEOPLE, random.randint(3, 7)))}")
+        lines.append(
+            f"Attendees: {', '.join(random.sample(PEOPLE, random.randint(3, 7)))}"
+        )
         lines.append("")
         i += 4
 
-        num_items = random.randint(8, 25)
-        for _ in range(num_items):
+        for _ in range(random.randint(8, 25)):
             if i >= num_lines:
                 break
-            person = random.choice(PEOPLE)
-            action = random.choice(ACTIONS)
-            detail = random.choice(DETAILS)
-            lines.append(f"- {person} {action} {topic.lower()}. {detail}")
+            lines.append(
+                f"- {random.choice(PEOPLE)} {random.choice(ACTIONS)} "
+                f"{topic.lower()}. {random.choice(DETAILS)}"
+            )
             i += 1
             if random.random() < 0.3:
-                lines.append(f"  Follow-up: {random.choice(PEOPLE)} to coordinate with {random.choice(PEOPLE)}.")
+                lines.append(
+                    f"  Follow-up: {random.choice(PEOPLE)} to coordinate with "
+                    f"{random.choice(PEOPLE)}."
+                )
                 i += 1
 
         lines.append("")
         lines.append(f"Action items from meeting #{meeting_num}:")
-        n_actions = random.randint(2, 6)
-        for j in range(n_actions):
+        for j in range(random.randint(2, 6)):
             if i >= num_lines:
                 break
-            lines.append(f"  {j+1}. [{random.choice(PEOPLE)}] {random.choice(ACTIONS)} {topic.lower()}")
+            lines.append(
+                f"  {j + 1}. [{random.choice(PEOPLE)}] "
+                f"{random.choice(ACTIONS)} {topic.lower()}"
+            )
             i += 1
-        lines.append("")
-        lines.append("---")
-        lines.append("")
+        lines.extend(["", "---", ""])
         i += 3
         meeting_num += 1
 
     return "\n".join(lines[:num_lines])
 
 
-# ── Main ────────────────────────────────────────────────────────────
+# ── Prompt ──────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="Recursive document summarizer")
-    parser.add_argument("--lines", type=int, default=10_000, help="Number of lines to generate")
-    args = parser.parse_args()
-
-    llm = AnthropicClient("claude-opus-4-6")
-
-    doc = generate_document(num_lines=args.lines)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        workspace = Path(tmpdir)
-        doc_path = workspace / "meeting_notes.txt"
-        doc_path.write_text(doc)
-        actual_lines = len(doc.splitlines())
-        print(f"Generated {actual_lines:,} lines of meeting notes ({len(doc):,} chars)")
-
-        runtime = LocalRuntime(workspace=workspace)
-        runtime.register_tools(FILE_TOOLS)
-
-        SUMMARIZATION_SECTION = """\
+SUMMARIZATION_SECTION = """\
 When summarizing, follow these rules:
 - **Preserve key decisions and action items.** Names, dates, and commitments matter.
 - **Drop filler and repetition.** Meeting notes are verbose — compress aggressively.
@@ -150,43 +134,108 @@ When summarizing, follow these rules:
 - When combining sub-summaries, merge related topics and remove duplicates.
 - The final summary should be readable by someone who missed all the meetings."""
 
-        builder = (
-            make_default_builder()
-            .section(
-                "role",
-                "You are a recursive document summarizer. You break large documents "
-                "into chunks, summarize each chunk via sub-agents, and combine the "
-                f"results into a coherent final summary.\n\n{ROLE_TEXT}",
-                title="Role",
-            )
-            .section("summarization", SUMMARIZATION_SECTION, title="Summarization Rules", after="recursion")
+
+def build_prompt_builder():
+    return (
+        make_default_builder()
+        .section(
+            "role",
+            "You are a recursive document summarizer. You break large documents "
+            "into chunks, summarize each chunk via sub-agents, and combine the "
+            f"results into a coherent final summary.\n\n{ROLE_TEXT}",
+            title="Role",
         )
+        .section(
+            "summarization",
+            SUMMARIZATION_SECTION,
+            title="Summarization Rules",
+            after="recursion",
+        )
+    )
+
+
+# ── Main ────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Recursive document summarizer")
+    parser.add_argument("--lines", type=int, default=10_000)
+    parser.add_argument("--model", default="claude-opus-4-6")
+    parser.add_argument("--fast-model", default=None)
+    parser.add_argument("--docker-image", default=None,
+                        help="If set, run agent code inside this Docker image (e.g. rlmkit:local).")
+    parser.add_argument("--max-depth", type=int, default=3)
+    parser.add_argument("--max-iterations", type=int, default=15)
+    parser.add_argument("--no-viz", action="store_true")
+    args = parser.parse_args()
+
+    if args.docker_image:
+        print(f">>> DOCKER RUNTIME  image={args.docker_image}")
+    else:
+        print(">>> LOCAL RUNTIME")
+
+    doc = generate_document(num_lines=args.lines)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir).resolve()
+        (workspace / "meeting_notes.txt").write_text(doc)
+        actual_lines = len(doc.splitlines())
+        print(f"Generated {actual_lines:,} lines of meeting notes ({len(doc):,} chars)")
+
+        if args.docker_image:
+            runtime = DockerRuntime(
+                args.docker_image,
+                workspace=workspace,
+                mounts={str(workspace): "/workspace"},
+                workdir="/workspace",
+            )
+        else:
+            runtime = LocalRuntime(workspace=workspace)
+        runtime.register_tools(FILE_TOOLS)
+
+        llm = (
+            AnthropicClient(args.model)
+            if args.model.startswith("claude")
+            else OpenAIClient(args.model)
+        )
+        llm_clients = None
+        if args.fast_model:
+            fast = (
+                AnthropicClient(args.fast_model)
+                if args.fast_model.startswith("claude")
+                else OpenAIClient(args.fast_model)
+            )
+            llm_clients = {
+                "fast": {"model": fast, "description": "Cheaper model for small sub-tasks."},
+            }
 
         agent = RLM(
             llm_client=llm,
             runtime=runtime,
-            config=RLMConfig(max_depth=3, max_iterations=15, session="context"),
-            prompt_builder=builder,
+            config=RLMConfig(
+                max_depth=args.max_depth,
+                max_iterations=args.max_iterations,
+                session="context",
+            ),
+            llm_clients=llm_clients,
+            prompt_builder=build_prompt_builder(),
         )
 
         state = agent.start(
-            f"Summarize meeting_notes.txt ({actual_lines:,} lines). It contains detailed meeting "
-            f"notes from many meetings. Extract key decisions, action items, and themes. "
-            f"The file is too long to read at once — chunk it and delegate."
+            f"Summarize meeting_notes.txt ({actual_lines:,} lines). It contains "
+            f"detailed meeting notes from many meetings. Extract key decisions, "
+            f"action items, and themes. The file is too long to read at once — "
+            f"chunk it and delegate."
         )
 
-        if "--no-viz" not in sys.argv:
-            from rlmkit.utils.viz import live
-            states = live(agent, state)
-            state = states[-1]
-        else:
-            step = 0
+        if args.no_viz:
             while not state.finished:
                 state = agent.step(state)
-                step += 1
                 print(state.tree())
+        else:
+            from rlmkit.utils.viz import live
+            state = live(agent, state)[-1]
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"SUMMARY ({len((state.result or '').splitlines())} lines):\n")
         print(state.result or "(no result)")
 

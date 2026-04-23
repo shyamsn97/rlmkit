@@ -7,10 +7,11 @@ Container entrypoint: ``python -m rlmkit.runtime.repl [--workdir DIR]``.
 Reads JSON commands from stdin, writes JSON responses to stdout.
 
 Commands:
-  - ``{"cmd": "inject",       "name": N, "value": expr}``  bind ``N = eval(expr)``
-  - ``{"cmd": "inject_proxy", "name": N}``                 bind ``N`` as proxy fn
-  - ``{"cmd": "run",          "code": src}``               exec; may suspend
-  - ``{"cmd": "resume",       "value": v}``                resume suspended gen
+  - ``{"cmd": "inject",              "name": N, "value": expr}``       bind ``N = eval(expr)``
+  - ``{"cmd": "inject_proxy",        "name": N}``                      bind ``N`` as proxy fn
+  - ``{"cmd": "inject_object_proxy", "name": N, "methods": [...]}``    bind ``N`` with each method as a proxy fn
+  - ``{"cmd": "run",                 "code": src}``                    exec; may suspend
+  - ``{"cmd": "resume",              "value": v}``                     resume suspended gen
 
 Responses for run/resume: ``{"suspended": true, "agent_ids": [...]}`` or
 ``{"suspended": false, "output": "..."}``.
@@ -25,6 +26,7 @@ import json
 import re
 import sys
 import threading
+import types
 from contextlib import contextmanager
 from typing import Any, TextIO
 
@@ -128,17 +130,39 @@ class REPL:
 
     def _wrap_generator(self, code: str, tree: ast.Module):
         """Wrap ``code`` in a generator fn; ``global`` every assigned name so
-        variables persist in ``self.namespace`` across yields."""
+        variables persist in ``self.namespace`` across yields.
+
+        ``from X import *`` is illegal inside functions, so any such
+        statements are hoisted out and exec'd at module level first;
+        the imported names then live on ``self.namespace`` and are
+        visible to the generator via globals.
+        """
+        star_imports: list[ast.stmt] = []
+        body_stmts: list[ast.stmt] = []
+        for stmt in tree.body:
+            if isinstance(stmt, ast.ImportFrom) and any(
+                a.name == "*" for a in stmt.names
+            ):
+                star_imports.append(stmt)
+            else:
+                body_stmts.append(stmt)
+
+        if star_imports:
+            imports_mod = ast.Module(body=star_imports, type_ignores=[])
+            ast.fix_missing_locations(imports_mod)
+            exec(compile(imports_mod, "<rlm-imports>", "exec"), self.namespace)
+
         assigned = {
             node.id
-            for node in ast.walk(tree)
+            for stmt in body_stmts
+            for node in ast.walk(stmt)
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
         }
         func = ast.parse("def __rlm_gen__(): pass").body[0]
         body: list[ast.stmt] = []
         if assigned:
             body.append(ast.Global(names=sorted(assigned)))
-        body.extend(tree.body or [ast.Pass()])
+        body.extend(body_stmts or [ast.Pass()])
         func.body = body
         module = ast.Module(body=[func], type_ignores=[])
         ast.fix_missing_locations(module)
@@ -203,6 +227,8 @@ class REPL:
             protocol_out.flush()
             line = sys.stdin.readline()
             resp = json.loads(line)
+            if "error" in resp:
+                raise RuntimeError(resp["error"])
             return deserialize(resp["value"])
 
         return proxy
@@ -227,6 +253,12 @@ class REPL:
             self.namespace[msg["name"]] = eval(msg["value"], self.namespace)
         elif cmd == "inject_proxy":
             self.namespace[msg["name"]] = self.make_proxy(msg["name"])
+        elif cmd == "inject_object_proxy":
+            name = msg["name"]
+            obj = types.SimpleNamespace()
+            for method in msg["methods"]:
+                setattr(obj, method, self.make_proxy(f"{name}.{method}"))
+            self.namespace[name] = obj
         else:
             return {"error": f"unknown command: {cmd}"}
         return {"ok": True}

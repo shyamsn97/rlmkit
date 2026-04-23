@@ -23,10 +23,13 @@ Example::
 Prerequisites:
 
 1. ``docker`` is on ``PATH``.
-2. The image has Python + ``rlmkit`` installed, e.g.::
+2. The image has Python + ``rlmkit`` installed.  The repo ships a ready
+   ``Dockerfile`` at its root — build it once with::
 
-       FROM python:3.12-slim
-       RUN pip install rlmkit
+       docker build -t rlmkit:local .
+
+   and pass ``image="rlmkit:local"``.  Any image whose ``CMD`` (or your
+   ``entrypoint_argv``) runs ``python -m rlmkit.runtime.repl`` works.
 
 If you need to run the server under a different interpreter or path, set
 ``entrypoint_argv`` (defaults to ``["python", "-m", "rlmkit.runtime.repl"]``).

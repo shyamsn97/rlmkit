@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +24,6 @@ class LocalRuntime(Runtime):
 
     def __init__(self, workspace: str | Path = ".") -> None:
         super().__init__(workspace=workspace)
-        self.workspace.mkdir(parents=True, exist_ok=True)
         self.repl = REPL()
         for mod in DEFAULT_MODULES:
             self.repl.namespace[mod] = __import__(mod)
@@ -37,12 +35,8 @@ class LocalRuntime(Runtime):
     def recv(self) -> dict:
         assert self.pending is not None
         msg, self.pending = self.pending, None
-        prev = os.getcwd()
-        os.chdir(self.workspace)
-        try:
+        with self._in_workspace():
             return self.repl.handle(msg)
-        finally:
-            os.chdir(prev)
 
     def inject(self, name: str, value: Any) -> None:
         # In-process: bind directly, skip the proxy protocol entirely.

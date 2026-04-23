@@ -7,7 +7,9 @@ generator-based suspension with proxied tool calls during yield/resume.
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -40,6 +42,44 @@ def test_execute_multiple_statements_share_namespace(runtime):
 def test_inject_value(runtime):
     runtime.inject("TOKEN", "abc123")
     assert runtime.execute("print(TOKEN)") == "abc123"
+
+
+def test_proxied_tool_error_does_not_kill_runtime(runtime):
+    """If a proxied tool raises, agent code sees a Python exception and
+    the REPL stays alive for the next execute() call."""
+
+    def boom(x):
+        raise ValueError(f"bad input: {x!r}")
+
+    runtime.inject("boom", boom)
+
+    out = runtime.execute("boom('hi')")
+    assert "ValueError" in out
+    assert "bad input" in out
+
+    # Runtime still works after the error.
+    assert runtime.execute("print(1 + 1)") == "2"
+
+
+def test_inject_object_proxies_methods(runtime):
+    """Non-callable, non-literal objects are exposed via a method proxy."""
+
+    class Store:
+        def __init__(self) -> None:
+            self.data: dict[str, str] = {}
+
+        def write(self, key: str, value: str) -> None:
+            self.data[key] = value
+
+        def read(self, key: str) -> str:
+            return self.data[key]
+
+    store = Store()
+    runtime.inject("STORE", store)
+
+    runtime.execute("STORE.write('k', 'v')")
+    assert store.data == {"k": "v"}
+    assert runtime.execute("print(STORE.read('k'))") == "v"
 
 
 def test_inject_proxy_callable_roundtrip(runtime):
@@ -89,6 +129,57 @@ def test_start_code_with_yield_and_resume(runtime):
     suspended, result = runtime.resume_code({"child-q1": "answer"})
     assert suspended is False
     assert result == "after: {'child-q1': 'answer'}"
+
+
+def test_star_import_inside_yielding_block(runtime):
+    """`from X import *` is illegal inside functions, but the generator
+    wrapper hoists it out so agent code with ``yield`` can still use it."""
+
+    def delegate(prompt: str) -> ChildHandle:
+        return ChildHandle(agent_id="c")
+
+    def wait(handles):
+        return WaitRequest(agent_ids=[h.agent_id for h in handles])
+
+    runtime.inject("delegate", delegate)
+    runtime.inject("wait", wait)
+
+    code = (
+        "from math import *\n"
+        "h = delegate('q')\n"
+        "yield wait([h])\n"
+        "print(int(pi * 100))\n"
+    )
+    suspended, _ = runtime.start_code(code)
+    assert suspended is True
+    suspended, out = runtime.resume_code({"c": "done"})
+    assert suspended is False
+    assert out == "314"
+
+
+def test_proxied_tool_sees_workspace_as_cwd(tmp_path, monkeypatch):
+    """Proxied tools run with the host CWD chdir'd into the workspace
+    so relative paths land inside it, not in the caller's CWD."""
+    workspace = tmp_path / "ws"
+    caller_cwd = tmp_path / "caller"
+    caller_cwd.mkdir()
+    monkeypatch.chdir(caller_cwd)
+
+    rt = SubprocessRuntime(_argv(), workspace=workspace)
+    try:
+        def write_rel(path: str, content: str) -> str:
+            Path(path).write_text(content)
+            return "ok"
+
+        rt.inject("write_rel", write_rel)
+        rt.execute("write_rel('hello.txt', 'hi')")
+
+        assert (workspace / "hello.txt").read_text() == "hi"
+        assert not (caller_cwd / "hello.txt").exists()
+        # Caller's CWD is restored after each proxy invocation.
+        assert Path(os.getcwd()) == caller_cwd
+    finally:
+        rt.terminate()
 
 
 def test_clone_is_independent_process(runtime):
