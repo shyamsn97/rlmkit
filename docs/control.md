@@ -19,10 +19,9 @@ user message becomes the query.
 ## Checkpoint / resume
 
 ```python
-Path("ckpt.json").write_text(state.model_dump_json())
+state.save("ckpt.json")
 
-saved = RLMState.model_validate_json(Path("ckpt.json").read_text())
-state = agent.restore(saved)
+state = agent.restore(RLMState.load("ckpt.json"))
 while not state.finished:
     state = agent.step(state)
 ```

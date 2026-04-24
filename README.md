@@ -32,9 +32,24 @@ pip install -e .
 from rlmkit import RLM, RLMConfig, OpenAIClient
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.tools import FILE_TOOLS
-from rlmkit.utils.viewer import save_trace, open_viewer
+from rlmkit.utils.trace import save_trace
+from rlmkit.utils.viewer import open_viewer
 
-runtime = LocalRuntime(workspace="./myproject")
+workspace = "./myproject"
+runtime = LocalRuntime(workspace=workspace)
+
+# Sandbox agent code inside Docker instead — drop-in replacement,
+# same interface.  Build the image once with `docker build -t rlmkit:local .`
+# from the repo root; see docs/runtimes.md and docs/security.md.
+#
+# from rlmkit.runtime.docker import DockerRuntime
+# runtime = DockerRuntime(
+#     "rlmkit:local",
+#     workspace=workspace,
+#     mounts={workspace: "/workspace"},
+#     workdir="/workspace",
+# )
+
 runtime.register_tools(FILE_TOOLS)
 
 agent = RLM(
@@ -49,8 +64,8 @@ while not states[-1].finished:
     states.append(agent.step(states[-1]))
     print(states[-1].tree())
 
-save_trace(states, "traces/run1", query=query)
-open_viewer(states, query=query)
+save_trace(states, "traces/run1")
+open_viewer(states)
 ```
 
 ## Examples
@@ -66,6 +81,19 @@ All examples share the same CLI flags — `--no-viz`, `--docker-image rlmkit:loc
 | [`needle_haystack.py`](examples/needle_haystack.py) | Needle-in-a-haystack across 500 files with custom tools and `runtime_factory`. |
 | [`summarizer.py`](examples/summarizer.py) | Recursive map-reduce over a 10k-line document. |
 | [`view_demo.py`](examples/view_demo.py) | Launch the Gradio viewer on a saved trace. |
+
+## CLI
+
+```
+rlmkit view   traces/run1/                          # Gradio viewer
+rlmkit render checkpoint.json -f mermaid            # stdout
+rlmkit render traces/run1/   -f gantt-html -o run1.html
+rlmkit version
+```
+
+`view` and `render` accept either a trace directory, a `trace.json`,
+or a single state checkpoint. Formats: `mermaid`, `dot`, `tree`,
+`gantt-html`.
 
 ## Overview
 
@@ -142,7 +170,6 @@ done(f"Found {len(results)} batches")
   / Docker / Modal, writing your own.
 - [Security](docs/security.md) — trust model, Docker isolation knobs,
   approval gates.
-- [Changelog](CHANGELOG.md).
 
 ## References
 

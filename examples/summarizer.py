@@ -226,18 +226,27 @@ def main():
             f"action items, and themes. The file is too long to read at once — "
             f"chunk it and delegate."
         )
+        trace = [state]
 
         if args.no_viz:
             while not state.finished:
                 state = agent.step(state)
+                trace.append(state)
                 print(state.tree())
         else:
             from rlmkit.utils.viz import live
-            state = live(agent, state)[-1]
+            for s in live(agent, state):
+                state = s
+                trace.append(state)
 
         print(f"\n{'=' * 60}")
         print(f"SUMMARY ({len((state.result or '').splitlines())} lines):\n")
         print(state.result or "(no result)")
+
+        from rlmkit.utils.trace import save_trace
+        trace_dir = Path("traces/summarizer")
+        save_trace(trace, trace_dir, metadata={"lines": actual_lines})
+        print(f"\nTrace saved to {trace_dir}/")
 
 
 if __name__ == "__main__":
