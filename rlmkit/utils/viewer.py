@@ -444,6 +444,11 @@ footer { display: none !important; }
     background: rgba(88,166,255,.08) !important;
     border-left-color: #58a6ff !important;
 }
+#sv-tree label { animation: sv-fade-in .18s ease-out; }
+@keyframes sv-fade-in {
+    from { opacity: 0; transform: translateX(-4px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
 #sv-tree label input[type="radio"] { display: none !important; }
 #sv-tree label .icon { display: none !important; }
 
@@ -510,14 +515,28 @@ def open_viewer(
     with gr.Blocks() as app:
         gr.Markdown(f"## RLM State Viewer\n{f'**Query:** {query}' if query else ''}")
 
-        step_slider = gr.Slider(
-            minimum=0,
-            maximum=max_step,
-            step=1,
-            value=0,
-            label=f"Step (0 – {max_step})",
-            elem_id="sv-step",
-        )
+        with gr.Row(elem_id="sv-controls"):
+            play_btn = gr.Button("▶ Play", scale=0, min_width=100)
+            speed = gr.Slider(
+                minimum=0.25,
+                maximum=4.0,
+                step=0.25,
+                value=1.0,
+                label="speed (steps/sec)",
+                scale=1,
+            )
+            step_slider = gr.Slider(
+                minimum=0,
+                maximum=max_step,
+                step=1,
+                value=0,
+                label=f"Step (0 – {max_step})",
+                elem_id="sv-step",
+                scale=3,
+            )
+
+        playing = gr.State(False)
+        timer = gr.Timer(1.0, active=False)
 
         with gr.Row(equal_height=False):
             with gr.Column(scale=1, min_width=260):
@@ -549,6 +568,42 @@ def open_viewer(
             fn=on_node,
             inputs=[step_slider, node_radio],
             outputs=[node_radio, info_html, event_html, messages_html],
+        )
+
+        def toggle_play(is_playing: bool, step_idx: float):
+            # Clicking Play at the end restarts from 0.
+            if not is_playing and int(step_idx) >= max_step:
+                return True, gr.Button(value="⏸ Pause"), 0
+            new = not is_playing
+            return new, gr.Button(value="⏸ Pause" if new else "▶ Play"), step_idx
+
+        play_btn.click(
+            fn=toggle_play,
+            inputs=[playing, step_slider],
+            outputs=[playing, play_btn, step_slider],
+        )
+
+        def sync_timer(is_playing: bool, steps_per_sec: float):
+            return gr.Timer(value=max(0.05, 1.0 / steps_per_sec), active=is_playing)
+
+        playing.change(fn=sync_timer, inputs=[playing, speed], outputs=[timer])
+        speed.change(fn=sync_timer, inputs=[playing, speed], outputs=[timer])
+
+        def tick(step_idx: float):
+            step_idx = int(step_idx)
+            if step_idx >= max_step:
+                return (
+                    max_step,
+                    False,
+                    gr.Button(value="▶ Play"),
+                    gr.Timer(active=False),
+                )
+            return step_idx + 1, True, gr.Button(value="⏸ Pause"), gr.Timer(active=True)
+
+        timer.tick(
+            fn=tick,
+            inputs=[step_slider],
+            outputs=[step_slider, playing, play_btn, timer],
         )
 
     kwargs = {"share": False, "show_error": True, "css": VIEWER_CSS}

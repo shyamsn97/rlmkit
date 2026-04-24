@@ -94,6 +94,8 @@ def test_tree_usage_sums_children_into_root():
     assert tree_in == root_in + child_in
     assert tree_out == root_out + child_out
     assert child_in > 0 and child_out > 0
+    assert final.tree_tokens == tree_in + tree_out
+    assert final.tree_tokens >= final.total_tokens
 
 
 def test_every_step_has_a_typed_event():

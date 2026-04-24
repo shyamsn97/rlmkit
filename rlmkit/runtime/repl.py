@@ -39,6 +39,35 @@ def strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
 
 
+class _AnnotationStripper(ast.NodeTransformer):
+    """Rewrite ``x: T = v`` to ``x = v`` on bare names, and drop ``x: T``.
+
+    Needed because the generator wrapper declares assigned names ``global``,
+    and Python forbids a name being annotated and ``global`` in the same
+    function scope. We stop at nested ``def`` / ``async def`` / ``class``
+    because those open their own scopes.
+    """
+
+    def visit_FunctionDef(self, node):  # noqa: N802
+        return node
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+    visit_ClassDef = visit_FunctionDef
+    visit_Lambda = visit_FunctionDef
+
+    def visit_AnnAssign(self, node):  # noqa: N802
+        if not isinstance(node.target, ast.Name):
+            return node
+        if node.value is None:
+            return None
+        new = ast.Assign(targets=[node.target], value=node.value)
+        return ast.copy_location(new, node)
+
+
+def _strip_name_annotations(stmt: ast.stmt) -> ast.stmt | None:
+    return _AnnotationStripper().visit(stmt)
+
+
 # ── thread-safe stdout capture ────────────────────────────────────────
 
 _capture = threading.local()
@@ -136,6 +165,10 @@ class REPL:
         statements are hoisted out and exec'd at module level first;
         the imported names then live on ``self.namespace`` and are
         visible to the generator via globals.
+
+        ``AnnAssign`` on a bare name (``x: int = 1``) is rewritten to a
+        plain ``Assign`` because Python forbids a name being both
+        ``global`` and annotated in the same scope.
         """
         star_imports: list[ast.stmt] = []
         body_stmts: list[ast.stmt] = []
@@ -145,7 +178,8 @@ class REPL:
             ):
                 star_imports.append(stmt)
             else:
-                body_stmts.append(stmt)
+                body_stmts.append(_strip_name_annotations(stmt))
+        body_stmts = [s for s in body_stmts if s is not None]
 
         if star_imports:
             imports_mod = ast.Module(body=star_imports, type_ignores=[])

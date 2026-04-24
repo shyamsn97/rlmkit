@@ -182,6 +182,39 @@ def test_proxied_tool_sees_workspace_as_cwd(tmp_path, monkeypatch):
         rt.terminate()
 
 
+def test_annotated_assignment_inside_yielding_block(runtime):
+    """``x: T = v`` must not clash with the generator wrapper's implicit
+    ``global x``. Python raises ``SyntaxError: annotated name 'x' can't be
+    global`` unless the wrapper strips the annotation first.
+    """
+
+    def delegate(prompt: str) -> ChildHandle:
+        return ChildHandle(agent_id="c")
+
+    def wait(handles):
+        return WaitRequest(agent_ids=[h.agent_id for h in handles])
+
+    runtime.inject("delegate", delegate)
+    runtime.inject("wait", wait)
+
+    code = (
+        "errors: list[str] = []\n"
+        "count: int\n"
+        "for i in range(2):\n"
+        "    tag: str = f'e{i}'\n"
+        "    errors.append(tag)\n"
+        "h = delegate('q')\n"
+        "yield wait([h])\n"
+        "count = len(errors)\n"
+        "print(count, errors)\n"
+    )
+    suspended, _ = runtime.start_code(code)
+    assert suspended is True
+    suspended, out = runtime.resume_code({"c": "done"})
+    assert suspended is False
+    assert out == "2 ['e0', 'e1']"
+
+
 def test_clone_is_independent_process(runtime):
     runtime.execute("x = 1")
     twin = runtime.clone()

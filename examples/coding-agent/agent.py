@@ -20,7 +20,7 @@ from rlmkit.rlm import RLM, RLMConfig
 from rlmkit.runtime.docker import DockerRuntime
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.session import FileSession
-from rlmkit.state import RLMState
+from rlmkit.state import RLMState, Status
 from rlmkit.tools import FILE_TOOLS
 
 
@@ -84,25 +84,11 @@ def main():
         },
     )
 
-    def run_and_save(state: RLMState) -> None:
-        if args.no_viz:
-            while not state.finished:
-                state = agent.step(state)
-        else:
-            from rlmkit.utils.viz import live
-            state = live(agent, state)[-1]
-
-        print(f"\n{state.result or '(no result)'}\n")
-        ckpt = workspace / "checkpoint.json"
-        ckpt.write_text(state.model_dump_json())
-        print(f"State saved to {ckpt}")
-
+    ckpt = workspace / "checkpoint.json"
+    state: RLMState | None = None
     if args.resume:
-        saved = RLMState.model_validate_json(Path(args.resume).read_text())
-        state = agent.restore(saved)
+        state = agent.restore(RLMState.model_validate_json(Path(args.resume).read_text()))
         print(f"Resumed from {args.resume}")
-        run_and_save(state)
-        return
 
     print("Agent ready. Type a query, or 'quit' to exit.\n")
     while True:
@@ -113,7 +99,29 @@ def main():
             break
         if not query or query.lower() in ("quit", "exit", "q"):
             break
-        run_and_save(agent.start(query))
+
+        if state is None:
+            state = agent.start(query)
+        else:
+            state = state.update(
+                query=query,
+                status=Status.READY,
+                result=None,
+                event=None,
+                waiting_on=[],
+                messages=state.messages + [agent.first_action_message(query)],
+            )
+
+        if args.no_viz:
+            while not state.finished:
+                state = agent.step(state)
+        else:
+            from rlmkit.utils.viz import live
+            state = live(agent, state)[-1]
+
+        print(f"\n{state.result or '(no result)'}\n")
+        ckpt.write_text(state.model_dump_json())
+        print(f"State saved to {ckpt}")
 
 
 if __name__ == "__main__":

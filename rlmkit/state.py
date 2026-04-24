@@ -159,6 +159,12 @@ class RLMState(BaseModel):
             out += co
         return inp, out
 
+    @property
+    def tree_tokens(self) -> int:
+        """Total tokens (input + output) across this agent and all descendants."""
+        inp, out = self.tree_usage()
+        return inp + out
+
     def update(self, **changes) -> RLMState:
         """Return a new state with the given fields changed."""
         return self.model_copy(update=changes)

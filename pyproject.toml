@@ -31,8 +31,8 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.20"]
-viewer = ["gradio>=4.0"]
-all = ["openai>=1.0", "anthropic>=0.20", "gradio>=4.0"]
+viewer = ["gradio>=4.29"]
+all = ["openai>=1.0", "anthropic>=0.20", "gradio>=4.29"]
 dev = ["pytest>=7.0", "ruff>=0.4"]
 
 [project.urls]
