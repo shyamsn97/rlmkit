@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
@@ -225,6 +227,64 @@ class RLMState(BaseModel):
         lines: list[str] = []
         _render_tree(self, lines, "", "", color)
         return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        """Dump to a plain dict, preserving ``StepEvent`` subclass info."""
+        return _dump_state(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> RLMState:
+        """Rebuild from the dict produced by :meth:`to_dict`."""
+        return _hydrate_state(data)
+
+    def save(self, path: str | Path) -> Path:
+        """Write this state tree to *path* as JSON.
+
+        Preserves ``StepEvent`` subclasses (``LLMReply``, ``CodeExec``, ...)
+        via a private ``_type`` discriminator that :meth:`load` reads back.
+        """
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.to_dict(), default=str, indent=2))
+        return p
+
+    @classmethod
+    def load(cls, path: str | Path) -> RLMState:
+        """Read a state tree written by :meth:`save`."""
+        return cls.from_dict(json.loads(Path(path).read_text()))
+
+
+# ── State (de)serialization ──────────────────────────────────────────
+
+_EVENT_TYPES: dict[str, type[StepEvent]] = {
+    "LLMReply": LLMReply,
+    "CodeExec": CodeExec,
+    "ResumeExec": ResumeExec,
+    "NoCodeBlock": NoCodeBlock,
+    "ChildStep": ChildStep,
+}
+
+
+def _dump_state(state: RLMState) -> dict:
+    """Serialize an ``RLMState`` tree, tagging each event with its class."""
+    d = state.model_dump(mode="json")
+    if state.event is not None:
+        d["event"] = state.event.model_dump(mode="json")
+        d["event"]["_type"] = type(state.event).__name__
+    d["children"] = [_dump_state(c) for c in state.children]
+    return d
+
+
+def _hydrate_state(data: dict) -> RLMState:
+    """Inverse of :func:`_dump_state` — rebuild typed events."""
+    d = dict(data)
+    ev = d.get("event")
+    if ev is not None:
+        ev = dict(ev)
+        cls = _EVENT_TYPES.get(ev.pop("_type", ""), StepEvent)
+        d["event"] = cls.model_validate(ev)
+    d["children"] = [_hydrate_state(c) for c in d.get("children") or []]
+    return RLMState.model_validate(d)
 
 
 # ── Tree rendering ───────────────────────────────────────────────────

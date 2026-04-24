@@ -25,7 +25,7 @@ from rlmkit import (
     StepEvent,
 )
 from rlmkit.runtime.local import LocalRuntime
-from rlmkit.utils.viewer import load_trace, save_trace
+from rlmkit.utils.trace import Trace, load_trace, save_trace
 
 
 class DelegatingLLM(LLMClient):
@@ -129,33 +129,40 @@ def test_trace_save_and_load_round_trip(tmp_path: Path):
     states = _run_to_completion(agent, "obs-trace")
 
     out_dir = tmp_path / "trace"
-    save_trace(states, out_dir, query="obs-trace", metadata={"kind": "test"})
+    save_trace(states, out_dir, metadata={"kind": "test"})
 
-    loaded_states, loaded_query, loaded_meta = load_trace(out_dir)
-    assert loaded_query == "obs-trace"
-    assert loaded_meta == {"kind": "test"}
-    assert len(loaded_states) == len(states)
+    loaded = load_trace(out_dir)
+    assert isinstance(loaded, Trace)
+    assert loaded.metadata == {"kind": "test"}
+    assert len(loaded.states) == len(states)
 
-    first = loaded_states[0]
-    last = loaded_states[-1]
-    assert first["agent_id"] == "root"
-    assert last["status"] == "finished"
-    assert any(c["agent_id"] == "root.child" for c in last["children"])
+    # States are hydrated back into RLMState objects with typed events.
+    first = loaded.states[0]
+    last = loaded.states[-1]
+    assert isinstance(first, RLMState)
+    assert first.agent_id == "root"
+    assert first.query == "obs-trace"    # query survives on each state
+    assert last.status.value == "finished"
+    assert any(c.agent_id == "root.child" for c in last.children)
+    assert last.tree(color=False) == states[-1].tree(color=False)
 
 
-def test_state_json_roundtrip_preserves_events(tmp_path: Path):
+def test_state_save_load_round_trip(tmp_path: Path):
+    """``state.save(path)`` / ``RLMState.load(path)`` round-trips cleanly."""
     agent = RLM(
         llm_client=DelegatingLLM(),
         runtime=LocalRuntime(),
         config=RLMConfig(max_depth=2),
     )
-    final = _run_to_completion(agent, "obs-json")[-1]
+    final = _run_to_completion(agent, "obs-save")[-1]
 
-    dumped = final.model_dump_json()
-    restored = RLMState.model_validate_json(dumped)
+    ckpt = tmp_path / "state.json"
+    final.save(ckpt)
+    restored = RLMState.load(ckpt)
 
     assert restored.tree(color=False) == final.tree(color=False)
     assert restored.tree_usage() == final.tree_usage()
+    assert type(restored.event) is type(final.event)
 
-    payload = json.loads(dumped)
+    payload = json.loads(ckpt.read_text())
     assert payload["children"][0]["agent_id"] == "root.child"

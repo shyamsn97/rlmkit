@@ -150,13 +150,14 @@ def main():
         print(f"Actual answer:  {answer}")
         print(f"Correct:        {answer in (state.result or '')}")
 
-        from rlmkit.utils.viewer import open_viewer, save_trace
+        from rlmkit.utils.trace import save_trace
         trace_dir = Path("traces/needle_haystack")
-        save_trace(states, trace_dir, query=state.query, metadata={"answer": answer})
+        save_trace(states, trace_dir, metadata={"answer": answer})
         print(f"Trace saved to {trace_dir}/")
 
         if args.viewer:
-            open_viewer(states, query=state.query)
+            from rlmkit.utils.viewer import open_viewer
+            open_viewer(states)
 
 
 if __name__ == "__main__":

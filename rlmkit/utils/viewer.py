@@ -1,21 +1,17 @@
-"""Interactive state viewer for RLM traces.
+"""Interactive Gradio state viewer for RLM traces.
 
 Usage::
 
-    from rlmkit.utils.viewer import save_trace, load_trace, view_trace, open_viewer
+    from rlmkit.utils.viewer import open_viewer, view_trace
 
-    # Save a trace (accepts RLMState objects or dicts)
-    save_trace(states, "traces/my_run", query="my query")
-    save_trace(states, "trace.json", query="my query", metadata={"model": "gpt-5"})
+    open_viewer(states)               # from a live run
+    view_trace("traces/my_run")       # from disk
 
-    # Load + view in one step
-    view_trace("traces/my_run")
+Per-step queries are read from ``state.query`` and shown in the detail
+panel — multi-turn sessions display correctly. Saving and loading
+traces lives in :mod:`rlmkit.utils.trace`.
 
-    # Or load separately
-    steps, query, meta = load_trace("traces/my_run")
-    open_viewer(steps, query=query)
-
-Requires: ``pip install gradio``
+Requires: ``pip install gradio``.
 """
 
 from __future__ import annotations
@@ -25,66 +21,17 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rlmkit.state import _dump_state
+
 if TYPE_CHECKING:
     from rlmkit.state import RLMState
 
 
-# ── Serialization ────────────────────────────────────────────────────
-
-
-def _dump_state(state) -> dict:
-    """Serialize an RLMState, preserving event subclass fields."""
-    d = state.model_dump(mode="json")
-    if state.event is not None:
-        d["event"] = state.event.model_dump(mode="json")
-        d["event"]["_type"] = type(state.event).__name__
-    d["children"] = [_dump_state(c) for c in state.children]
-    return d
-
-
-def save_trace(
-    states: list[RLMState] | list[dict],
-    path: str | Path = "trace.json",
-    query: str = "",
-    metadata: dict | None = None,
-) -> Path:
-    """Save a list of state snapshots to a JSON file.
-
-    *path* can be a ``.json`` file or a directory.  When a directory is given
-    the trace is written to ``<directory>/trace.json``.
-
-    An optional *metadata* dict is stored alongside the steps so callers can
-    record model, config, timestamps, etc.
-    """
-    path = Path(path)
-    if path.is_dir() or not path.suffix:
-        path.mkdir(parents=True, exist_ok=True)
-        path = path / "trace.json"
-    else:
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-    steps = [_dump_state(s) if hasattr(s, "model_dump") else s for s in states]
-    data: dict[str, Any] = {"query": query, "steps": steps}
-    if metadata:
-        data["metadata"] = metadata
-    path.write_text(json.dumps(data, default=str, indent=2))
-    return path
-
-
-def load_trace(path: str | Path) -> tuple[list[dict], str, dict]:
-    """Load a saved trace.  Returns ``(steps, query, metadata)``."""
-    path = Path(path)
-    if path.is_dir():
-        path = path / "trace.json"
-    data = json.loads(path.read_text())
-    q = data.get("query") or data.get("task", "")
-    return data["steps"], q, data.get("metadata", {})
-
-
 def view_trace(path: str | Path, **launch_kwargs: Any) -> None:
     """Load a trace from disk and open the viewer."""
-    steps, query, _meta = load_trace(path)
-    open_viewer(steps, query=query, **launch_kwargs)
+    from rlmkit.utils.trace import load_trace
+
+    open_viewer(load_trace(path).states, **launch_kwargs)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -463,7 +410,6 @@ footer { display: none !important; }
 
 def open_viewer(
     states: list[RLMState] | list[dict],
-    query: str = "",
     **launch_kwargs: Any,
 ) -> None:
     """Launch the Gradio viewer. Blocks until closed."""
@@ -513,7 +459,7 @@ def open_viewer(
     init_choices, init_val, init_state, _, _ = _get_view(0, None)
 
     with gr.Blocks() as app:
-        gr.Markdown(f"## RLM State Viewer\n{f'**Query:** {query}' if query else ''}")
+        gr.Markdown("## RLM State Viewer")
 
         with gr.Row(elem_id="sv-controls"):
             play_btn = gr.Button("▶ Play", scale=0, min_width=100)

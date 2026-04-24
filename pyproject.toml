@@ -40,6 +40,9 @@ Homepage = "https://github.com/ShyamSS-95/rlmkit"
 Repository = "https://github.com/ShyamSS-95/rlmkit"
 Issues = "https://github.com/ShyamSS-95/rlmkit/issues"
 
+[project.scripts]
+rlmkit = "rlmkit.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["rlmkit"]
 

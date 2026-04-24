@@ -144,24 +144,28 @@ def main():
         history = run(agent, state, args.no_viz)
         state = history[-1]
 
+        from rlmkit.utils.trace import save_trace
+        trace_dir = workspace / "trace"
+        save_trace(history, trace_dir)
+        print(f"\n{DIM}Trace saved to {trace_dir}/{RESET}")
+
         checkpoint_step = 3
-        checkpoint: str | None = None
+        ckpt_path: Path | None = None
         if len(history) > checkpoint_step:
-            checkpoint = history[checkpoint_step].model_dump_json()
-            print(f"\n{DIM}(Checkpoint auto-saved at step {checkpoint_step}){RESET}")
+            ckpt_path = workspace / "checkpoint.json"
+            history[checkpoint_step].save(ckpt_path)
+            print(f"{DIM}(Checkpoint auto-saved at step {checkpoint_step}){RESET}")
         print(f"\n{GREEN}Result:{RESET} {state.result}")
 
         # ── 2. Checkpoint: save and load ────────────────────────────
         banner("2. Checkpoint round-trip")
-        if checkpoint:
-            loaded = RLMState.model_validate_json(checkpoint)
+        if ckpt_path:
+            loaded = RLMState.load(ckpt_path)
             print(
                 f"Loaded checkpoint — status: {loaded.status.value}, "
                 f"iteration: {loaded.iteration}, children: {len(loaded.children)}"
             )
             print(f"\n{loaded.tree()}")
-            ckpt_path = workspace / "checkpoint.json"
-            ckpt_path.write_text(checkpoint)
             size_kb = ckpt_path.stat().st_size / 1024
             print(f"\n{DIM}Saved to {ckpt_path} ({size_kb:.1f} KB){RESET}")
         else:
@@ -172,8 +176,8 @@ def main():
 
         # ── 3. Fork: branch from checkpoint ─────────────────────────
         banner("3. Fork from checkpoint")
-        if checkpoint:
-            fork_state = RLMState.model_validate_json(checkpoint)
+        if ckpt_path:
+            fork_state = RLMState.load(ckpt_path)
             fork_state = fork_state.update(
                 query=(
                     "Create a simple Python calculator module (calc.py) with "

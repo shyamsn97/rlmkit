@@ -22,6 +22,7 @@ from rlmkit.runtime.local import LocalRuntime
 from rlmkit.session import FileSession
 from rlmkit.state import RLMState, Status
 from rlmkit.tools import FILE_TOOLS
+from rlmkit.utils.trace import save_trace
 
 
 def main():
@@ -85,9 +86,12 @@ def main():
     )
 
     ckpt = workspace / "checkpoint.json"
+    trace_dir = workspace / "trace"
     state: RLMState | None = None
+    trace: list[RLMState] = []
     if args.resume:
-        state = agent.restore(RLMState.model_validate_json(Path(args.resume).read_text()))
+        state = agent.restore(RLMState.load(args.resume))
+        trace = [state]
         print(f"Resumed from {args.resume}")
 
     print("Agent ready. Type a query, or 'quit' to exit.\n")
@@ -111,17 +115,22 @@ def main():
                 waiting_on=[],
                 messages=state.messages + [agent.first_action_message(query)],
             )
+        trace.append(state)
 
         if args.no_viz:
             while not state.finished:
                 state = agent.step(state)
+                trace.append(state)
         else:
             from rlmkit.utils.viz import live
-            state = live(agent, state)[-1]
+            for s in live(agent, state):
+                state = s
+                trace.append(state)
 
         print(f"\n{state.result or '(no result)'}\n")
-        ckpt.write_text(state.model_dump_json())
-        print(f"State saved to {ckpt}")
+        state.save(ckpt)
+        save_trace(trace, trace_dir)
+        print(f"Saved checkpoint → {ckpt}  |  trace → {trace_dir}/")
 
 
 if __name__ == "__main__":

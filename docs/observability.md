@@ -34,17 +34,31 @@ Each `step()` attaches one typed event:
 | `ResumeExec` | Generator resumed after children finished. |
 | `NoCodeBlock` | Reply had no ` ```repl ``` ` block. |
 
-## Traces
+## Save & load
+
+A single state tree — checkpoint, fork, rehydrate later:
 
 ```python
-from rlmkit.utils.viewer import save_trace, load_trace
-
-save_trace(states, "traces/run1", query=query)
-states, query, meta = load_trace("traces/run1")
+state.save("checkpoint.json")
+state = RLMState.load("checkpoint.json")
 ```
 
-A trace is a JSON list of `state.model_dump()` payloads — grep-able,
-diff-able.
+A full run — every step in order:
+
+```python
+from rlmkit.utils.trace import save_trace, load_trace
+
+save_trace(states, "traces/run1")
+save_trace(states, "traces/run1", metadata={"model": "gpt-5"})
+
+t = load_trace("traces/run1")
+t.states          # list[RLMState] — typed events preserved
+t.metadata
+```
+
+Per-turn queries already live on each `state.query`, so multi-turn
+sessions accumulate into a single trace without losing any context.
+Traces are plain JSON — grep-able, diff-able.
 
 ## Sessions
 
@@ -99,3 +113,19 @@ view_trace("traces/run1")                # from disk
 
 Requires `rlmkit[viewer]`. Hit ▶ to auto-advance through the trace;
 the speed slider controls steps/sec.
+
+## CLI
+
+The same helpers are reachable from a shell. `view` and `render`
+auto-detect trace directories, `trace.json` files, and single state
+checkpoints.
+
+```
+rlmkit view   traces/run1/
+rlmkit view   workspace/checkpoint.json --port 7861
+rlmkit render traces/run1/   -f gantt-html -o run1.html
+rlmkit render checkpoint.json -f mermaid          # stdout
+rlmkit render checkpoint.json -f dot -o graph.dot
+rlmkit render checkpoint.json -f tree
+rlmkit version
+```
