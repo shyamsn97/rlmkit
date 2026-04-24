@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rlmkit"
-version = "0.1.0"
+version = "0.1.1"
 description = "A state-machine framework for recursive LLM agents in ~1,200 lines of Python."
 readme = "README.md"
 license = "MIT"
