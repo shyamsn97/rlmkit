@@ -1,5 +1,10 @@
 # rlmkit
 
+<p align="center">
+  <a href="https://pypi.org/project/rlmkit/"><img src="https://img.shields.io/pypi/v/rlmkit.svg?label=pypi" alt="PyPI" /></a>
+  <a href="https://github.com/shyamsn97/rlmkit/pkgs/container/rlmkit"><img src="https://img.shields.io/badge/ghcr.io-rlmkit-2496ED?logo=docker&logoColor=white" alt="Docker" /></a>
+</p>
+
 A minimal state-machine library for [Recursive Language Model](https://github.com/alexzhang13/rlm-minimal)
 agents. Every agent — root and descendants — advances one step at a
 time, and the entire computation tree is a single immutable,
