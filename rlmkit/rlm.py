@@ -50,6 +50,28 @@ from rlmkit.utils import (
 
 @dataclass
 class RLMConfig:
+    """Engine-level knobs.
+
+    Attributes:
+        max_depth: Recursion limit. An agent at ``depth == max_depth``
+            cannot delegate.
+        max_iterations: Max LLM calls per agent before it force-finishes.
+        max_output_length: Truncate stdout from a code block beyond this.
+        max_messages: If set, messages are trimmed with a summary prefix
+            once the LLM history exceeds this count.
+        max_concurrency: Parallel children cap for the default pool.
+        child_max_iterations: Iteration cap for spawned children.
+            Defaults to ``max_iterations // 3`` when unset.
+        single_block: If True, only the first ``\\`\\`\\`repl\\`\\`\\``` block is
+            extracted per LLM reply; otherwise all blocks are concatenated.
+        session: ``Session`` instance, a path string (wraps in
+            :class:`FileSession`), or ``None`` to disable persistence.
+        system_prompt: Override the default system prompt entirely.
+        max_budget: Total token cap (input + output) across the whole
+            subtree. When exceeded, the agent finishes with a
+            ``[budget exceeded: ...]`` result.
+    """
+
     max_depth: int = 5
     max_iterations: int = 30
     max_output_length: int = 12000
@@ -87,6 +109,29 @@ class RLM(LLMClient):
         pool: Any = None,
         prompt_builder: Any = None,
     ) -> None:
+        """Build an engine.
+
+        Args:
+            llm_client: Any ``LLMClient`` (OpenAI, Anthropic, another
+                ``RLM``, or a custom subclass).
+            runtime: Executes agent Python. Use ``LocalRuntime`` for
+                in-process, ``DockerRuntime`` / ``SubprocessRuntime`` /
+                ``ModalRuntime`` for isolated execution.
+            config: Engine knobs. Defaults to ``RLMConfig()``.
+            agent_id: Identifier for this node. ``"root"`` for the
+                top-level agent; children inherit a dotted suffix.
+            depth: Depth in the tree. ``0`` for the root.
+            runtime_factory: Called to build a fresh runtime for each
+                child. Falls back to ``runtime.clone()`` when unset.
+            llm_clients: Named model registry exposed to the agent as
+                ``delegate(..., model=name)``. Values are
+                ``{"model": LLMClient, "description": str}`` dicts.
+            pool: ``Pool`` subclass, or a callable ``(batch) -> dict``.
+                Defaults to a ``ThreadPool`` sized by
+                ``config.max_concurrency``.
+            prompt_builder: ``PromptBuilder`` producing the system
+                prompt. Defaults to ``DEFAULT_BUILDER``.
+        """
         self.llm_client = llm_client
         self.runtime = runtime
         self.config = config or RLMConfig()

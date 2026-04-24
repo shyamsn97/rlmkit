@@ -2,6 +2,8 @@
 
 from rlmkit.llm import AnthropicClient, LLMClient, LLMUsage, OpenAIClient
 from rlmkit.rlm import RLM, RLMConfig
+from rlmkit.runtime import Runtime
+from rlmkit.session import FileSession, Session
 from rlmkit.state import (
     ChildHandle,
     ChildStep,
@@ -20,6 +22,7 @@ __all__ = [
     "ChildHandle",
     "ChildStep",
     "CodeExec",
+    "FileSession",
     "LLMClient",
     "LLMReply",
     "LLMUsage",
@@ -29,6 +32,8 @@ __all__ = [
     "RLMConfig",
     "RLMState",
     "ResumeExec",
+    "Runtime",
+    "Session",
     "Status",
     "StepEvent",
     "WaitRequest",

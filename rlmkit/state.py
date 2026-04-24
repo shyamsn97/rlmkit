@@ -99,6 +99,28 @@ class WaitRequest:
 
 
 class RLMState(BaseModel):
+    """Immutable snapshot of one agent plus its descendants.
+
+    A frozen Pydantic model — every ``step()`` returns a new instance.
+    The whole tree is reachable from the root via ``children``.
+
+    Attributes:
+        agent_id: Dotted path (``"root"``, ``"root.search_0"``, ...).
+        query: The prompt this agent is working on.
+        status: Current phase in the state machine.
+        iteration: LLM-call count for this agent.
+        config: Dict snapshot of engine config at ``start()`` time.
+        system_prompt: Resolved system prompt for the last LLM call.
+        event: The ``StepEvent`` produced by the last ``step()``.
+        messages: Full LLM message history (excluding the system message).
+        last_reply: Most recent assistant text.
+        result: Final answer when ``status == FINISHED``.
+        children: Child state trees.
+        waiting_on: Child ``agent_id``s this node is blocked on.
+        total_input_tokens: Cumulative input tokens for this agent.
+        total_output_tokens: Cumulative output tokens for this agent.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     agent_id: str = ""

@@ -35,8 +35,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from rlmkit.state import RLMState
 
-SESSION_TOOLS_HINT = """\
-
+SESSION_TOOLS_HINT = """
 **Tools for reading sessions:**
 - `list_sessions()` — lists every agent in the tree with its ID and task. Use this to see who has run and what they worked on.
 - `read_history(agent_id, last_n=20)` — reads the conversation transcript for any agent. Defaults to your own. Use this to review what you or any sibling/child agent has done.
@@ -45,14 +44,20 @@ SESSION_TOOLS_HINT = """\
 - **Before starting work** — call `list_sessions()` to see if other agents have already done relevant work. Don't redo what a sibling already finished.
 - **After children return** — if a child's `done()` result is too terse, use `read_history(child_id)` to read the full transcript of what they did.
 - **On resumption** — if you are a re-delegated agent (same name, new task), call `read_history()` to recall your previous work. Your variables are still set, but your context window is fresh.
-- **When context is truncated** — if your history was trimmed, use `read_history()` to re-read your earlier messages."""
+- **When context is truncated** — if your history was trimmed, use `read_history()` to re-read your earlier messages.
+"""
 
 
 class Session(ABC):
     """Persist and query agent message histories.
 
     The engine writes after each step.  Agents can read their own
-    or other agents' sessions via tools backed by the same store.
+    or other agents' sessions via the ``list_sessions`` /
+    ``read_history`` tools backed by the same store.
+
+    Subclass and implement :meth:`write`, :meth:`read`,
+    :meth:`list_agents`, and :meth:`exists` for non-file backends
+    (Redis, S3, DB, ...).
     """
 
     @abstractmethod
@@ -130,10 +135,8 @@ class FileSession(Session):
         return self._agent_path(agent_id).exists()
 
     def prompt_hint(self) -> str:
-        return (
-            f"""\
-`SESSION` points to the session store. Every agent's conversation history is \
-persisted as JSON files under `{self.base_dir}/`, mirroring the agent tree:
+        layout = f"""
+`SESSION` points to the session store. Every agent's conversation history is persisted as JSON files under `{self.base_dir}/`, mirroring the agent tree:
 ```
 {self.base_dir}/
 ├── session.json              ← root agent's history
@@ -145,6 +148,6 @@ persisted as JSON files under `{self.base_dir}/`, mirroring the agent tree:
     └── session.json
 ```
 
-You can also read session files directly via `read_file()` at the paths above."""
-            + SESSION_TOOLS_HINT
-        )
+You can also read session files directly via `read_file()` at the paths above.
+"""
+        return layout.strip() + "\n\n" + SESSION_TOOLS_HINT.strip()
