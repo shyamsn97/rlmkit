@@ -1,115 +1,81 @@
-"""Static topology exports of an ``RLMState`` tree.
-
-Turns the delegation tree into formats other tools already render:
-
-* :func:`to_mermaid` — Mermaid ``stateDiagram-v2`` (GitHub, Notion, docs).
-* :func:`to_dot`     — Graphviz DOT (``dot -Tsvg run.dot -o run.svg``).
-
-Both are pure strings with no optional dependencies.
-
-Usage::
-
-    from rlmkit.utils.export import to_mermaid, to_dot
-
-    print(to_mermaid(final_state))
-    Path("run.dot").write_text(to_dot(final_state))
-"""
+"""Static topology exports for typed RLMFlow node trees."""
 
 from __future__ import annotations
 
-from rlmkit.state import RLMState, Status
+from rlmkit.node import Node
 
 
-def _sanitize(agent_id: str) -> str:
-    """Mermaid / DOT IDs can't contain dots. Replace with underscores."""
-    return agent_id.replace(".", "_") or "root"
+def _sanitize(node_id: str) -> str:
+    return node_id.replace(".", "_").replace("-", "_") or "root"
 
 
-def _truncate(s: str, n: int = 60) -> str:
-    s = s.replace("\n", " ").strip()
-    return s[: n - 1] + "…" if len(s) > n else s
+def _truncate(text: str, n: int = 60) -> str:
+    text = text.replace("\n", " ").strip()
+    return text[: n - 1] + "..." if len(text) > n else text
 
 
-def _escape_mermaid(s: str) -> str:
-    return s.replace('"', "'").replace("\n", " ")
+def _escape_mermaid(text: str) -> str:
+    return text.replace('"', "'").replace("\n", " ")
 
 
-def _escape_dot(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+def _escape_dot(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-# ── Mermaid ──────────────────────────────────────────────────────────
+def to_mermaid(state: Node, *, include_results: bool = True) -> str:
+    lines = ["stateDiagram-v2"]
 
-
-def to_mermaid(state: RLMState, *, include_results: bool = True) -> str:
-    """Render a state tree as a Mermaid ``stateDiagram-v2`` string.
-
-    Each agent becomes a state; each parent→child edge is labeled ``delegate``;
-    each finished agent also emits a ``--> [*]`` edge carrying the truncated
-    result text.
-    """
-    lines: list[str] = ["stateDiagram-v2"]
-
-    def walk(node: RLMState, is_root: bool) -> None:
-        nid = _sanitize(node.agent_id)
-        status = node.status.value
-        label = f"{node.agent_id or 'root'} ({status}, iter {node.iteration})"
+    def walk(node: Node, is_root: bool) -> None:
+        nid = _sanitize(node.id)
+        label = f"{node.agent_id or 'root'} ({node.type})"
         lines.append(f'    state "{_escape_mermaid(label)}" as {nid}')
-
         if is_root:
             lines.append(f"    [*] --> {nid}")
-
-        for child in node.children:
-            cid = _sanitize(child.agent_id)
-            lines.append(f"    {nid} --> {cid} : delegate")
+        for child in node.child_nodes():
+            cid = _sanitize(child.id)
+            lines.append(f"    {nid} --> {cid}")
             walk(child, is_root=False)
+        result = getattr(node, "result", None)
+        if include_results and node.terminal and result:
+            lines.append(f'    {nid} --> [*] : "{_escape_mermaid(_truncate(result))}"')
 
-        if include_results and node.status == Status.FINISHED and node.result:
-            result = _escape_mermaid(_truncate(node.result, 60))
-            lines.append(f'    {nid} --> [*] : "{result}"')
-
-    walk(state, is_root=True)
+    walk(state, True)
     return "\n".join(lines)
 
 
-# ── Graphviz DOT ─────────────────────────────────────────────────────
-
-
-_STATUS_COLOR = {
-    "ready": "#58a6ff",
-    "executing": "#d29922",
+_NODE_COLOR = {
+    "query": "#58a6ff",
+    "observation": "#58a6ff",
+    "action": "#d29922",
     "supervising": "#bc8cff",
-    "finished": "#3fb950",
+    "resume": "#7ee787",
+    "error": "#f85149",
+    "result": "#3fb950",
 }
 
 
-def to_dot(state: RLMState, *, include_results: bool = True) -> str:
-    """Render a state tree as Graphviz DOT.
-
-    Nodes are colored by ``Status``. Edges are labeled ``delegate``. Finished
-    agents get their result text appended to the node label.
-    """
-    lines: list[str] = [
+def to_dot(state: Node, *, include_results: bool = True) -> str:
+    lines = [
         "digraph rlmkit {",
         "    rankdir=TB;",
         '    node [shape=box, style="rounded,filled", fontname="Helvetica"];',
         '    edge [fontname="Helvetica", fontsize=10];',
     ]
 
-    def walk(node: RLMState) -> None:
-        nid = _sanitize(node.agent_id)
-        status = node.status.value
-        color = _STATUS_COLOR.get(status, "#8b949e")
-        parts = [node.agent_id or "root", f"{status} · iter {node.iteration}"]
-        if include_results and node.status == Status.FINISHED and node.result:
-            parts.append(_truncate(node.result, 40))
-        label = "\\n".join(_escape_dot(p) for p in parts)
+    def walk(node: Node) -> None:
+        nid = _sanitize(node.id)
+        color = _NODE_COLOR.get(node.type, "#8b949e")
+        parts = [node.agent_id or "root", node.type]
+        result = getattr(node, "result", None)
+        if include_results and node.terminal and result:
+            parts.append(_truncate(result, 40))
+        label = "\\n".join(_escape_dot(part) for part in parts)
         lines.append(
             f'    {nid} [label="{label}", fillcolor="{color}22", color="{color}"];'
         )
-        for child in node.children:
-            cid = _sanitize(child.agent_id)
-            lines.append(f'    {nid} -> {cid} [label="delegate"];')
+        for child in node.child_nodes():
+            cid = _sanitize(child.id)
+            lines.append(f"    {nid} -> {cid};")
             walk(child)
 
     walk(state)

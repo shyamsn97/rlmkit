@@ -11,14 +11,15 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import shutil
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from rlmkit.node import WaitRequest
 from rlmkit.runtime.repl import deserialize, serialize
-from rlmkit.state import WaitRequest
 from rlmkit.tools import get_tool_metadata
 from rlmkit.tools import tool as tool_decorator
 
@@ -186,24 +187,67 @@ class Runtime(ABC):
             self.proxied[f"{name}.{m}"] = getattr(value, m)
         self.call({"cmd": "inject_object_proxy", "name": name, "methods": methods})
 
-    def clone(self) -> Runtime:
-        """Fresh runtime with the same tool registrations and workspace.
+    def clone(self, workspace: str | Path | None = None) -> Runtime:
+        """Fresh runtime with the same tool registrations.
 
         The REPL namespace (injected values, variables from executed
         code) does NOT carry over — the clone starts empty.
 
+        ``workspace`` overrides the new runtime's workspace path.
+        Useful when forking a branch — the forked engine's child
+        runtimes need to point at the forked workspace copy, not the
+        parent's. Defaults to this runtime's workspace.
+
         Override only if your ``__init__`` takes arguments other than
-        ``workspace``; the default calls ``type(self)(workspace=...)``.
+        ``workspace``; the default calls ``self.__class__(workspace=...)``.
         """
-        new = type(self)(workspace=self.workspace)
+        new = self.__class__(workspace=workspace or self.workspace)
         for name, td in self.tools.items():
             new.tools[name] = td
             new.inject(name, td.fn)
         return new
 
+    def fork(self, new_workspace: str | Path) -> Runtime:
+        """Deep-copy this runtime's workspace and return a clone over it.
+
+        Used by branching/best-of-N: each branch needs an isolated
+        copy of the workspace so writes by the divergent tail can't
+        clobber the parent's state. Subclasses with non-filesystem
+        state (containers, remote sandboxes) should override.
+        """
+        dst = Path(new_workspace).resolve()
+        if dst.exists():
+            shutil.rmtree(dst)
+        if self.workspace.exists():
+            shutil.copytree(self.workspace, dst)
+        else:
+            dst.mkdir(parents=True, exist_ok=True)
+        return self.clone(workspace=dst)
+
+    def close(self) -> None:
+        """Release any external resources held by this runtime.
+
+        Default is a no-op (``LocalRuntime`` has nothing to close).
+        Subclasses that spawn subprocesses, hold container handles, or
+        keep network connections open should override this to free
+        them — leaking subprocess pipes across many tasks is the most
+        common way to trip ``OSError: Too many open files``.
+        """
+
+    def __enter__(self) -> Runtime:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
     def available_modules(self) -> list[str]:
-        """Names of modules the REPL pre-imports, for inclusion in prompts."""
-        return []
+        """Names of modules the REPL pre-imports, for inclusion in prompts.
+
+        Defaults to the ``DEFAULT_MODULES`` list — every concrete subclass
+        ships with the same REPL preamble. Override only if your REPL is
+        wired up differently (e.g. a sandbox with a custom whitelist).
+        """
+        return list(DEFAULT_MODULES)
 
     # ── tool registration ────────────────────────────────────────────
 

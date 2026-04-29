@@ -20,19 +20,19 @@ import tempfile
 from pathlib import Path
 
 from rlmkit.llm import AnthropicClient, OpenAIClient
-from rlmkit.rlm import RLM, RLMConfig
+from rlmkit.node import Node
+from rlmkit.rlm import RLMConfig, RLMFlow
 from rlmkit.runtime.docker import DockerRuntime
 from rlmkit.runtime.local import LocalRuntime
-from rlmkit.state import RLMState
 from rlmkit.tools import FILE_TOOLS
 
 
-class LoggingRLM(RLM):
-    def extract_code(self, text: str, state: RLMState | None = None) -> str | None:
-        code = super().extract_code(text, state)
-        if code is None or state is None:
+class LoggingRLMFlow(RLMFlow):
+    def extract_code(self, text: str) -> str | None:
+        code = super().extract_code(text)
+        if code is None:
             return code
-        header = f'print("[{state.agent_id} iter {state.iteration}] executing...")'
+        header = 'print("[rlmflow] executing repl block...")'
         return header + "\n" + code
 
 
@@ -115,14 +115,10 @@ def main():
                 "fast": {"model": fast, "description": "Cheaper model for small sub-tasks."},
             }
 
-        agent = LoggingRLM(
+        agent = LoggingRLMFlow(
             llm_client=llm,
             runtime=make_runtime(),
-            config=RLMConfig(
-                max_depth=args.max_depth,
-                max_iterations=args.max_iterations,
-                session="needle-haystack/context",
-            ),
+            config=RLMConfig(max_depth=args.max_depth, max_iterations=args.max_iterations),
             llm_clients=llm_clients,
             runtime_factory=make_runtime,
         )
@@ -136,7 +132,7 @@ def main():
         )
 
         if args.no_viz:
-            states: list[RLMState] = [state]
+            states: list[Node] = [state]
             while not state.finished:
                 state = agent.step(state)
                 states.append(state)

@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from rlmkit.runtime.subprocess import SubprocessRuntime
-from rlmkit.state import ChildHandle, WaitRequest
+from rlmkit.node import ChildHandle, WaitRequest
 
 
 def _argv() -> list[str]:
@@ -27,7 +27,7 @@ def runtime():
     try:
         yield rt
     finally:
-        rt.terminate()
+        rt.close()
 
 
 def test_execute_returns_stdout(runtime):
@@ -179,7 +179,7 @@ def test_proxied_tool_sees_workspace_as_cwd(tmp_path, monkeypatch):
         # Caller's CWD is restored after each proxy invocation.
         assert Path(os.getcwd()) == caller_cwd
     finally:
-        rt.terminate()
+        rt.close()
 
 
 def test_annotated_assignment_inside_yielding_block(runtime):
@@ -223,4 +223,4 @@ def test_clone_is_independent_process(runtime):
         assert runtime.execute("print(x)") == "1"
         assert twin.execute("print(x)") == "99"
     finally:
-        twin.terminate()
+        twin.close()

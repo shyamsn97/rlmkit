@@ -64,7 +64,7 @@ rt = DockerRuntime(
     cpus=1.0,
     memory="512m",
 )
-agent = RLM(llm_client=llm, runtime=rt, runtime_factory=rt.factory)
+agent = RLM(llm_client=llm, runtime=rt, runtime_factory=rt.clone)
 ```
 
 ## Writing your own

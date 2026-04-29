@@ -30,7 +30,7 @@ import types
 from contextlib import contextmanager
 from typing import Any, TextIO
 
-from rlmkit.state import ChildHandle, WaitRequest
+from rlmkit.node import ChildHandle, WaitRequest
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 

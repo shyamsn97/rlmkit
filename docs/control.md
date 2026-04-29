@@ -21,7 +21,7 @@ user message becomes the query.
 ```python
 state.save("ckpt.json")
 
-state = agent.restore(RLMState.load("ckpt.json"))
+state = agent.restore(RLMNode.load("ckpt.json"))
 while not state.finished:
     state = agent.step(state)
 ```
@@ -85,10 +85,10 @@ Or pass a list to `runtime.register_tools([...])`.
 ## Custom prompt
 
 ```python
-from rlmkit.prompts.default import make_default_builder, GUARDRAILS_TEXT
+from rlmkit.prompts.default import DEFAULT_BUILDER, GUARDRAILS_TEXT
 
 agent = RLM(..., prompt_builder=(
-    make_default_builder()
+    DEFAULT_BUILDER
     .section("role", "You are a security auditor.", title="Role")
     .section("guardrails", GUARDRAILS_TEXT, title="Guardrails", after="recursion")
 ))
@@ -100,11 +100,11 @@ Or subclass `RLM` and override `build_system_prompt`, `build_messages`,
 ## Custom state
 
 ```python
-class ReviewState(RLMState):
+class ReviewState(RLMNode):
     findings: list[str] = []
 
 class CodeReviewer(RLM):
-    state_cls = ReviewState
+    node_cls = ReviewState
 ```
 
 The engine preserves your extra fields through `update()`.

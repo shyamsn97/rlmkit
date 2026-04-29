@@ -1,4 +1,4 @@
-"""Message templates used by the RLM engine.
+"""Message templates used by the RLMFlow engine.
 
 All user-facing text lives here so rlm.py stays logic-only.
 """
@@ -11,11 +11,23 @@ DEFAULT_QUERY = (
 FIRST_ACTION = (
     "Query: {query}\n\n"
     "Your response MUST contain exactly one ```repl``` code block. "
-    "Write Python that makes progress on the query."
+    "Write Python that makes progress on the query. "
+    "If the task has separable parts, delegate them in this first program; "
+    "if it is trivial, do it directly."
 )
 
 CONTINUE_ACTION = (
-    "Continue working on: {query}\n\n" "Respond with a ```repl``` code block."
+    "Continue working on: {query}\n\n"
+    "Respond with a ```repl``` code block. "
+    "Use delegation for separable remaining work; do direct code for small, coupled work."
+)
+
+FINAL_ANSWER_ACTION = (
+    "You have used the full iteration budget without calling done().\n\n"
+    "Based on the work above, provide the final answer now. "
+    "Respond with exactly one ```repl``` code block that calls done(answer). "
+    "The done() argument must be only the final answer string in the exact form "
+    "the query requested. Do not do more investigation."
 )
 
 NO_CODE_BLOCK = (
@@ -48,19 +60,18 @@ RESUME_MESSAGE = (
     "Pick up where you left off."
 )
 
-STATUS_DEPTH_ROOT = " You are the root agent — delegate freely to sub-agents."
-
-STATUS_DEPTH_MID = " Be more conservative with delegation the deeper you are."
-
-STATUS_DEPTH_NEAR_MAX = (
-    " You are near the depth limit — work directly, do not delegate."
+STATUS_DEPTH_ROOT = (
+    " You have the full recursion budget. Delegate based on task structure: "
+    "independent subtasks, multiple files, large context analysis, and review/test work are good candidates."
 )
+
+STATUS_DEPTH_MID = " You still may delegate when work is naturally separable; avoid unnecessary delegation chains."
+
+STATUS_DEPTH_NEAR_MAX = " You are near the recursion limit. Prefer direct work unless one final child would clearly isolate an independent subtask."
 
 TRUNCATION_SUMMARY = (
     "## Query\n{query}\n\n"
     "## History\n{total} messages so far, showing the last {cap}.{session_hint}"
 )
 
-TRUNCATION_SESSION_HINT = (
-    " Earlier messages were trimmed — call `read_history()` to recover them."
-)
+TRUNCATION_SESSION_HINT = ""

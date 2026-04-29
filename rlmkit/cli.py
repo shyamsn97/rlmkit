@@ -21,12 +21,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from rlmkit.state import RLMState
+from rlmkit.node import Node
 
 # ── path autodetect ──────────────────────────────────────────────────
 
 
-def _load(path: Path) -> list[RLMState]:
+def _load(path: Path) -> list[Node]:
     """Return a list of states for *path* — trace, checkpoint, or dir."""
     from rlmkit.utils.trace import load_trace
 
@@ -44,7 +44,7 @@ def _load(path: Path) -> list[RLMState]:
     if isinstance(head, dict) and "steps" in head:
         return load_trace(path).states
     if isinstance(head, dict) and "agent_id" in head:
-        return [RLMState.load(path)]
+        return [Node.load(path)]
     raise SystemExit(f"rlmkit: {path} doesn't look like a trace or a state checkpoint")
 
 

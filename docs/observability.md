@@ -1,6 +1,6 @@
 # Observability
 
-Everything you need to debug a run lives on `RLMState`.
+Everything you need to debug a run lives on `RLMNode`.
 
 ## State fields
 
@@ -13,7 +13,7 @@ state.messages            # full LLM history
 state.system_prompt       # resolved prompt for the last call
 state.last_reply
 state.result              # set when FINISHED
-state.children            # list[RLMState], recursive
+state.children            # list[RLMNode], recursive
 state.waiting_on          # agent_ids this node is blocked on
 state.total_input_tokens
 state.total_output_tokens
@@ -40,7 +40,7 @@ A single state tree — checkpoint, fork, rehydrate later:
 
 ```python
 state.save("checkpoint.json")
-state = RLMState.load("checkpoint.json")
+state = RLMNode.load("checkpoint.json")
 ```
 
 A full run — every step in order:
@@ -52,7 +52,7 @@ save_trace(states, "traces/run1")
 save_trace(states, "traces/run1", metadata={"model": "gpt-5"})
 
 t = load_trace("traces/run1")
-t.states          # list[RLMState] — typed events preserved
+t.states          # list[RLMNode] — typed events preserved
 t.metadata
 ```
 

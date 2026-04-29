@@ -23,8 +23,8 @@ from pathlib import Path
 import pytest
 
 from rlmkit.runtime.docker import DockerRuntime
-from rlmkit.session import FileSession
-from rlmkit.state import ChildHandle, WaitRequest
+from rlmkit.workspace import FileSession
+from rlmkit.node import ChildHandle, WaitRequest
 
 
 def _docker_available() -> bool:
@@ -62,21 +62,21 @@ def runtime(tmp_path: Path):
     try:
         yield rt, ws
     finally:
-        rt.terminate()
+        rt.close()
 
 
-def test_object_proxy_round_trips_session_methods(runtime, tmp_path: Path):
-    """Injecting a FileSession exposes its public methods as callable proxies."""
+def test_object_proxy_round_trips_file_session_methods(runtime, tmp_path: Path):
+    """Injected objects expose public methods as callable proxies."""
     rt, _ = runtime
     session = FileSession(tmp_path / "sessions")
-    rt.inject("SESSION", session)
+    rt.inject("STORE", session)
 
     rt.execute(
-        "SESSION.write('root', [{'role': 'user', 'content': 'hello from container'}])"
+        "STORE.write('root', [{'role': 'user', 'content': 'hello from container'}])"
     )
     assert session.read("root") == [{"role": "user", "content": "hello from container"}]
 
-    out = rt.execute("print(SESSION.read('root')[0]['content'])")
+    out = rt.execute("print(STORE.read('root')[0]['content'])")
     assert out == "hello from container"
 
 
@@ -116,3 +116,34 @@ def test_proxied_writes_land_in_host_workspace(runtime):
     rt.execute("write_rel('hello.txt', 'hi')")
 
     assert (ws / "hello.txt").read_text() == "hi"
+
+
+def test_end_to_end_delegate_wait():
+    """Spawn a fresh container; exercise execute, inject, and generator suspension."""
+    rt = DockerRuntime(IMAGE, network="none")
+    try:
+        assert rt.execute("print('hi from container')") == "hi from container"
+
+        def delegate(prompt: str) -> ChildHandle:
+            return ChildHandle(agent_id=f"child-{prompt}")
+
+        def wait(handles):
+            return WaitRequest(agent_ids=[h.agent_id for h in handles])
+
+        rt.inject("delegate", delegate)
+        rt.inject("wait", wait)
+
+        suspended, payload = rt.start_code(
+            "h = delegate('q1')\n"
+            "results = yield wait([h])\n"
+            "print('after:', results)\n"
+        )
+        assert suspended is True
+        request, _ = payload
+        assert request.agent_ids == ["child-q1"]
+
+        suspended, out = rt.resume_code({"child-q1": "answer"})
+        assert suspended is False
+        assert "after: {'child-q1': 'answer'}" in out
+    finally:
+        rt.close()

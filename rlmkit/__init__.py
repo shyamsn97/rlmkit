@@ -1,40 +1,54 @@
-"""rlmkit: a small, hackable engine for recursive language-model agents."""
+"""rlmkit: a small, hackable engine for recursive language-model flows."""
 
 from rlmkit.llm import AnthropicClient, LLMClient, LLMUsage, OpenAIClient
-from rlmkit.rlm import RLM, RLMConfig
-from rlmkit.runtime import Runtime
-from rlmkit.session import FileSession, Session
-from rlmkit.state import (
+from rlmkit.node import (
+    ActionNode,
     ChildHandle,
-    ChildStep,
-    CodeExec,
-    LLMReply,
-    NoCodeBlock,
-    ResumeExec,
-    RLMState,
-    Status,
-    StepEvent,
+    ErrorNode,
+    Node,
+    ObservationNode,
+    QueryNode,
+    ResultNode,
+    ResumeNode,
+    RuntimeRef,
+    SupervisingNode,
     WaitRequest,
+    WorkspaceRef,
+)
+from rlmkit.rlm import NodeScheduler, RLMConfig, RLMFlow
+from rlmkit.runtime import Runtime
+from rlmkit.workspace import (
+    ContextStore,
+    ContextTools,
+    FileContext,
+    InMemoryContext,
+    Workspace,
 )
 
 __all__ = [
+    "ActionNode",
     "AnthropicClient",
     "ChildHandle",
-    "ChildStep",
-    "CodeExec",
-    "FileSession",
+    "ContextStore",
+    "ContextTools",
+    "ErrorNode",
+    "FileContext",
     "LLMClient",
-    "LLMReply",
     "LLMUsage",
-    "NoCodeBlock",
+    "InMemoryContext",
+    "Node",
+    "NodeScheduler",
+    "ObservationNode",
     "OpenAIClient",
-    "RLM",
+    "QueryNode",
     "RLMConfig",
-    "RLMState",
-    "ResumeExec",
+    "RLMFlow",
+    "ResultNode",
+    "RuntimeRef",
+    "ResumeNode",
     "Runtime",
-    "Session",
-    "Status",
-    "StepEvent",
+    "SupervisingNode",
     "WaitRequest",
+    "Workspace",
+    "WorkspaceRef",
 ]

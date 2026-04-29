@@ -1,23 +1,13 @@
-"""Tests for DockerRuntime.
+"""Unit tests for ``DockerRuntime`` argv construction and clone semantics.
 
-Unit tests cover argv construction and clone semantics and run everywhere.
-The end-to-end test spawns an actual container and is skipped unless
-``docker`` is on PATH and ``RLMKIT_DOCKER_TEST=1`` is set.
+These run everywhere — they don't shell out to ``docker``. The
+end-to-end tests live in ``tests/integration/test_docker_runtime.py``
+and are gated on ``RLMKIT_DOCKER_TEST=1`` with a working daemon.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-
-import pytest
-
 from rlmkit.runtime.docker import DockerRuntime
-from rlmkit.state import ChildHandle, WaitRequest
-
-
-# ── unit tests (no docker required) ───────────────────────────────────
 
 
 def test_argv_defaults_to_python_repl_entrypoint():
@@ -82,61 +72,3 @@ def test_clone_preserves_config():
     assert twin.argv == rt.argv
     assert twin.image == rt.image
     assert twin.options == rt.options
-
-
-# ── end-to-end (requires docker) ──────────────────────────────────────
-
-
-def _docker_available() -> bool:
-    if shutil.which("docker") is None:
-        return False
-    try:
-        r = subprocess.run(
-            ["docker", "info"], capture_output=True, timeout=5, check=False
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-pytestmark_e2e = pytest.mark.skipif(
-    os.environ.get("RLMKIT_DOCKER_TEST") != "1" or not _docker_available(),
-    reason="set RLMKIT_DOCKER_TEST=1 with a working docker daemon to run",
-)
-
-
-@pytestmark_e2e
-def test_docker_end_to_end_delegate_wait():
-    """Spawn a real container; exercise execute, inject, and generator suspension.
-
-    Uses an image that has rlmkit installed.  Override with
-    ``RLMKIT_DOCKER_TEST_IMAGE``; defaults to ``rlmkit-test:latest``.
-    """
-    image = os.environ.get("RLMKIT_DOCKER_TEST_IMAGE", "rlmkit-test:latest")
-    rt = DockerRuntime(image, network="none")
-    try:
-        assert rt.execute("print('hi from container')") == "hi from container"
-
-        def delegate(prompt: str) -> ChildHandle:
-            return ChildHandle(agent_id=f"child-{prompt}")
-
-        def wait(handles):
-            return WaitRequest(agent_ids=[h.agent_id for h in handles])
-
-        rt.inject("delegate", delegate)
-        rt.inject("wait", wait)
-
-        suspended, payload = rt.start_code(
-            "h = delegate('q1')\n"
-            "results = yield wait([h])\n"
-            "print('after:', results)\n"
-        )
-        assert suspended is True
-        request, _ = payload
-        assert request.agent_ids == ["child-q1"]
-
-        suspended, out = rt.resume_code({"child-q1": "answer"})
-        assert suspended is False
-        assert "after: {'child-q1': 'answer'}" in out
-    finally:
-        rt.terminate()

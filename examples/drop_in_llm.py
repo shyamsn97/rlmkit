@@ -1,6 +1,6 @@
-"""RLM as a drop-in LLM.
+"""RLMFlow as a drop-in LLM.
 
-Because `RLM` inherits from `LLMClient`, you can swap it in anywhere you'd
+Because `RLMFlow` inherits from `LLMClient`, you can swap it in anywhere you'd
 use a raw LLM. Calling `agent.chat(messages)` runs the full recursive agent
 loop under the hood and returns a plain string — same signature as any other
 LLM client.
@@ -11,7 +11,7 @@ This enables two patterns:
    (e.g. a summarization helper, a router, a retrieval pipeline) gets agentic
    behavior for free — no code changes.
 
-2. **Nest agents.** An outer `RLM` can use an inner `RLM` as its `llm_client`.
+2. **Nest agents.** An outer `RLMFlow` can use an inner `RLMFlow` as its `llm_client`.
    The outer agent's every "LLM call" is itself a full recursive sub-agent run.
 
 Run with:
@@ -21,7 +21,7 @@ Run with:
 
 from __future__ import annotations
 
-from rlmkit import RLM, LLMClient, OpenAIClient, RLMConfig
+from rlmkit import LLMClient, OpenAIClient, RLMConfig, RLMFlow
 from rlmkit.runtime.local import LocalRuntime
 
 
@@ -43,8 +43,8 @@ def demo_plain_llm():
 
 
 def demo_rlm_as_llm():
-    print("=== RLM as LLMClient (drop-in) ===")
-    agent = RLM(
+    print("=== RLMFlow as LLMClient (drop-in) ===")
+    agent = RLMFlow(
         llm_client=OpenAIClient(model="gpt-4o-mini"),
         runtime=LocalRuntime(),
         config=RLMConfig(max_iterations=5, max_budget=20_000),
@@ -54,20 +54,19 @@ def demo_rlm_as_llm():
 
 
 def demo_nested_rlm():
-    print("=== nested RLM (outer agent uses inner agent as its LLM) ===")
-    inner = RLM(
+    print("=== nested RLMFlow (outer agent uses inner agent as its LLM) ===")
+    inner = RLMFlow(
         llm_client=OpenAIClient(model="gpt-4o-mini"),
         runtime=LocalRuntime(),
         config=RLMConfig(max_iterations=3),
     )
-    outer = RLM(
+    outer = RLMFlow(
         llm_client=inner,
         runtime=LocalRuntime(),
         config=RLMConfig(max_iterations=3, max_budget=50_000),
     )
     answer = outer.run("What's the 7th Fibonacci number? Use ```repl``` to compute.")
     print(answer)
-    print(f"outer.last_usage = {outer.last_usage}")
 
 
 if __name__ == "__main__":

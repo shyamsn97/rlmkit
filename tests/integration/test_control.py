@@ -14,7 +14,7 @@ from rlmkit import (
     LLMClient,
     LLMUsage,
     RLMConfig,
-    RLMState,
+    RLMNode,
     Status,
 )
 from rlmkit.runtime.local import LocalRuntime
@@ -98,7 +98,7 @@ def test_checkpoint_round_trip_resumes_cleanly():
         state = agent.step(state)
 
     blob = state.model_dump_json()
-    restored = RLMState.model_validate_json(blob)
+    restored = RLMNode.model_validate_json(blob)
 
     assert restored.status == state.status == Status.FINISHED
     assert restored.result == state.result
@@ -177,8 +177,8 @@ def test_intervene_kills_a_child_mid_run():
     patched = state.update(children=[killed_child])
     # Mirror the intervention in the engine's child registry so resume_exec
     # pulls the canned result.
-    agent.children["root.child"].is_done = True
-    agent.children["root.child"].result = "killed-by-supervisor"
+    agent.child_engines["root.child"].is_done = True
+    agent.child_engines["root.child"].result = "killed-by-supervisor"
 
     while not patched.finished:
         patched = agent.step(patched)

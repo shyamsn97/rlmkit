@@ -1,7 +1,7 @@
 """Recursive summarization of a long document.
 
 Generates a large document (~10k lines of synthetic meeting notes),
-then uses an RLM to summarize it recursively: chunk the document,
+then uses an RLMFlow to summarize it recursively: chunk the document,
 delegate each chunk's summary to a sub-agent, then combine the
 partial summaries into a final one.
 
@@ -25,9 +25,9 @@ import tempfile
 from pathlib import Path
 
 from rlmkit.llm import AnthropicClient, OpenAIClient
-from rlmkit.prompts import make_default_builder
+from rlmkit.prompts import DEFAULT_BUILDER
 from rlmkit.prompts.default import ROLE_TEXT
-from rlmkit.rlm import RLM, RLMConfig
+from rlmkit.rlm import RLMConfig, RLMFlow
 from rlmkit.runtime.docker import DockerRuntime
 from rlmkit.runtime.local import LocalRuntime
 from rlmkit.tools import FILE_TOOLS
@@ -137,8 +137,7 @@ When summarizing, follow these rules:
 
 def build_prompt_builder():
     return (
-        make_default_builder()
-        .section(
+        DEFAULT_BUILDER.section(
             "role",
             "You are a recursive document summarizer. You break large documents "
             "into chunks, summarize each chunk via sub-agents, and combine the "
@@ -208,14 +207,10 @@ def main():
                 "fast": {"model": fast, "description": "Cheaper model for small sub-tasks."},
             }
 
-        agent = RLM(
+        agent = RLMFlow(
             llm_client=llm,
             runtime=runtime,
-            config=RLMConfig(
-                max_depth=args.max_depth,
-                max_iterations=args.max_iterations,
-                session="context",
-            ),
+            config=RLMConfig(max_depth=args.max_depth, max_iterations=args.max_iterations),
             llm_clients=llm_clients,
             prompt_builder=build_prompt_builder(),
         )

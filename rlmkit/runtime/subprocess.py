@@ -26,7 +26,7 @@ import json
 import subprocess as sp
 from pathlib import Path
 
-from rlmkit.runtime.runtime import DEFAULT_MODULES, Runtime
+from rlmkit.runtime.runtime import Runtime
 
 
 class SubprocessRuntime(Runtime):
@@ -66,24 +66,50 @@ class SubprocessRuntime(Runtime):
             )
         return json.loads(line)
 
-    def terminate(self) -> None:
-        if self.proc is not None:
+    def close(self) -> None:
+        """Tear down the REPL subprocess and release its pipe FDs.
+
+        Closes ``stdin`` first — the ``serve()`` loop in ``rlmkit.runtime.repl``
+        reads until EOF, so that's enough for a graceful shutdown in the
+        common case (the REPL exits, the container's ``--rm`` flag wipes
+        it). We only escalate to ``terminate()``/``kill()`` if the child
+        is still alive after a short wait, then close the remaining
+        pipes and reap the process so its FDs aren't left behind for
+        the GC to clean up at some unspecified later time.
+        """
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+
+        try:
+            if proc.stdin is not None and not proc.stdin.closed:
+                proc.stdin.close()
+        except Exception:
+            pass
+
+        try:
+            proc.wait(timeout=2)
+        except sp.TimeoutExpired:
+            for action in (proc.terminate, proc.kill):
+                try:
+                    action()
+                    proc.wait(timeout=2)
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        for stream in (proc.stdout, proc.stderr):
             try:
-                self.proc.terminate()
+                if stream is not None and not stream.closed:
+                    stream.close()
             except Exception:
                 pass
-            self.proc = None
 
-    def clone(self) -> SubprocessRuntime:
-        new = type(self)(self.argv, workspace=self.workspace)
+    def clone(self, workspace: str | Path | None = None) -> SubprocessRuntime:
+        new = self.__class__(self.argv, workspace=workspace or self.workspace)
         for name, td in self.tools.items():
             new.tools[name] = td
             new.inject(name, td.fn)
         return new
-
-    def factory(self) -> SubprocessRuntime:
-        """Use as ``runtime_factory=runtime.factory`` on the RLM engine."""
-        return self.clone()
-
-    def available_modules(self) -> list[str]:
-        return DEFAULT_MODULES

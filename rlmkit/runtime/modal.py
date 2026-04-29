@@ -11,14 +11,14 @@ Usage::
         app_name="my-rlm-app",
         image=modal.Image.debian_slim().pip_install("rlmkit"),
     )
-    agent = RLM(llm_client=llm, runtime=runtime, runtime_factory=runtime.factory)
+    agent = RLMFlow(llm_client=llm, runtime=runtime, runtime_factory=runtime.clone)
 """
 
 from __future__ import annotations
 
 import json
 
-from rlmkit.runtime.runtime import DEFAULT_MODULES, Runtime
+from rlmkit.runtime.runtime import Runtime
 
 
 class ModalRuntime(Runtime):
@@ -78,14 +78,18 @@ class ModalRuntime(Runtime):
     def recv(self) -> dict:
         return json.loads(next(iter(self.process.stdout)))
 
-    def terminate(self) -> None:
+    def close(self) -> None:
         """Shut down the Modal container."""
         if self.container:
             self.container.terminate()
             self.container = None
             self.process = None
 
-    def clone(self) -> ModalRuntime:
+    def clone(self, workspace: object | None = None) -> ModalRuntime:
+        # ModalRuntime manages its own workspace inside the container,
+        # so the ``workspace`` argument is accepted for API consistency
+        # with the base ``Runtime.clone`` but otherwise unused.
+        del workspace
         new = ModalRuntime(
             self.app_name,
             image=self.image,
@@ -95,9 +99,9 @@ class ModalRuntime(Runtime):
         new.tools = dict(self.tools)
         return new
 
-    def factory(self) -> ModalRuntime:
-        """Use as ``runtime_factory=runtime.factory`` on the RLM engine."""
+    def fork(self, new_workspace: object) -> ModalRuntime:
+        # No host filesystem to copy — Modal manages its own workspace
+        # inside the container. Use container snapshots / Volume forks
+        # for true isolation if you need it.
+        del new_workspace
         return self.clone()
-
-    def available_modules(self) -> list[str]:
-        return DEFAULT_MODULES

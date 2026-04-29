@@ -18,7 +18,7 @@ Example::
         cpus=1.0,
         memory="512m",
     )
-    agent = RLM(llm_client=llm, runtime=runtime, runtime_factory=runtime.factory)
+    agent = RLMFlow(llm_client=llm, runtime=runtime, runtime_factory=runtime.clone)
 
 Prerequisites:
 
@@ -110,8 +110,10 @@ class DockerRuntime(SubprocessRuntime):
         )
         super().__init__(build_argv(image, **self.options), workspace=workspace)
 
-    def clone(self) -> DockerRuntime:
-        new = type(self)(self.image, workspace=self.workspace, **self.options)
+    def clone(self, workspace: str | Path | None = None) -> DockerRuntime:
+        new = self.__class__(
+            self.image, workspace=workspace or self.workspace, **self.options
+        )
         for name, td in self.tools.items():
             new.tools[name] = td
             new.inject(name, td.fn)

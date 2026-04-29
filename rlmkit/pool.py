@@ -4,8 +4,10 @@ A pool has one method: ``execute(tasks) -> results``, where *tasks* is a
 list of ``(id, callable)`` pairs and *results* is a ``dict[str, Any]``
 mapping IDs to return values.
 
-Pass a pool to ``RLM(pool=...)``.  If you pass a plain callable instead
-of a Pool subclass, it gets wrapped in ``CallablePool`` automatically.
+Pass a pool to ``RLMFlow(pool=...)``. If you pass a plain callable instead
+of a Pool instance, it gets wrapped in ``CallablePool`` automatically.
+If no pool is passed, ``RLMConfig.max_concurrency`` selects
+``ThreadPool``; otherwise the engine uses ``SequentialPool``.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ class Pool(ABC):
 
 
 class ThreadPool(Pool):
-    """Default pool — runs steps in a ThreadPoolExecutor."""
+    """Run steps concurrently in a ThreadPoolExecutor."""
 
     def __init__(self, max_concurrency: int = 8) -> None:
         self.max_concurrency = max_concurrency

@@ -41,6 +41,3 @@ class LocalRuntime(Runtime):
     def inject(self, name: str, value: Any) -> None:
         # In-process: bind directly, skip the proxy protocol entirely.
         self.repl.namespace[name] = value
-
-    def available_modules(self) -> list[str]:
-        return DEFAULT_MODULES
