@@ -18,6 +18,7 @@ def _summary(node: Node) -> str:
         f"agent: {node.agent_id}",
         f"node: {node.id}",
         f"type: {node.type}",
+        f"model: {node.model_label}",
         f"terminal: {node.terminal}",
     ]
     if result:
@@ -29,7 +30,10 @@ def open_viewer(states: list[Node] | list[dict], **launch_kwargs: Any):
     import gradio as gr
 
     nodes = [_as_node(state) for state in states]
-    choices = [f"{i}: {node.agent_id} [{node.type}]" for i, node in enumerate(nodes)]
+    choices = [
+        f"{i}: {node.agent_id} [{node.type}] {{{node.model_label}}}"
+        for i, node in enumerate(nodes)
+    ]
 
     def render(choice: str):
         idx = int(choice.split(":", 1)[0]) if choice else 0

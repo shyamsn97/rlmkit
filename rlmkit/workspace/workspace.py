@@ -1,4 +1,4 @@
-"""Workspace — branch-local files, context, trace, and checkpoint handles."""
+"""Workspace — branch-local working tree, context, trace, and checkpoint handles."""
 
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ class Workspace:
     context: ContextStore
     branch_id: str = "main"
 
-    @property
-    def files(self) -> Path:
-        return self.root / "files"
+    def path(self, *parts: str) -> Path:
+        """Return a path inside the workspace working tree."""
+        return self.root.joinpath(*parts)
 
     @property
     def trace_dir(self) -> Path:
@@ -44,7 +44,6 @@ class Workspace:
     ) -> Workspace:
         root = Path(dir).resolve()
         root.mkdir(parents=True, exist_ok=True)
-        (root / "files").mkdir(parents=True, exist_ok=True)
         (root / "trace").mkdir(parents=True, exist_ok=True)
         if context is None:
             context = FileContext(root / "context")
@@ -62,7 +61,7 @@ class Workspace:
     def materialize_runtime(self) -> Runtime:
         from rlmkit.runtime.local import LocalRuntime
 
-        return LocalRuntime(workspace=self.files)
+        return LocalRuntime(workspace=self)
 
     def fork(
         self,
@@ -76,10 +75,15 @@ class Workspace:
         new_root.mkdir(parents=True, exist_ok=True)
         (new_root / "trace").mkdir(parents=True, exist_ok=True)
 
-        if self.files.exists():
-            shutil.copytree(self.files, new_root / "files")
-        else:
-            (new_root / "files").mkdir(parents=True, exist_ok=True)
+        reserved = {"context", "trace", "checkpoint.json"}
+        for item in self.root.iterdir():
+            if item.name in reserved:
+                continue
+            dst = new_root / item.name
+            if item.is_dir():
+                shutil.copytree(item, dst)
+            else:
+                shutil.copy2(item, dst)
 
         new_context = self.context.fork(new_root / "context")
         return Workspace(root=new_root, context=new_context, branch_id=new_branch_id)

@@ -15,6 +15,7 @@ def _node_label(state: Node):
     info = Text()
     info.append(state.agent_id or "root", style="bold")
     info.append(f" [{state.type}]", style="magenta" if active else "green")
+    info.append(f" {{{state.model_label}}}", style="cyan")
     result = getattr(state, "result", None)
     if result:
         info.append(f" -> {str(result)[:80].replace(chr(10), ' ')}", style="dim green")
@@ -73,7 +74,7 @@ def gantt_matrix(states: list[Node]) -> tuple[list[str], list[list[str | None]]]
         step_map: dict[str, str] = {}
         for node in _flatten_state(state):
             aid = node.agent_id or "root"
-            step_map[aid] = node.type
+            step_map[aid] = f"{node.type} ({node.model_label})"
             if aid not in seen:
                 seen.add(aid)
                 order.append(aid)
@@ -124,7 +125,8 @@ def gantt(states: list[Node]) -> None:
             if kind is None:
                 cells.append(Text(" ", style="dim"))
             else:
-                glyph, color = _TYPE_CELL.get(kind, ("?", "dim"))
+                node_type = kind.split(" ", 1)[0]
+                glyph, color = _TYPE_CELL.get(node_type, ("?", "dim"))
                 cells.append(Text(glyph, style=color))
         table.add_row(*cells)
     Console().print(table)
@@ -143,7 +145,8 @@ def gantt_html(states: list[Node], *, title: str = "rlmkit gantt") -> str:
             if kind is None:
                 cells_html.append('<div class="cell empty"></div>')
             else:
-                color = _TYPE_HTML.get(kind, "#8b949e")
+                node_type = kind.split(" ", 1)[0]
+                color = _TYPE_HTML.get(node_type, "#8b949e")
                 cells_html.append(
                     f'<div class="cell" style="background:{color}" title="{kind}"></div>'
                 )

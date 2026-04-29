@@ -182,6 +182,23 @@ def test_proxied_tool_sees_workspace_as_cwd(tmp_path, monkeypatch):
         rt.close()
 
 
+def test_repl_code_sees_workspace_as_cwd(tmp_path, monkeypatch):
+    """Relative writes in agent code should land in the runtime workspace."""
+    workspace = tmp_path / "ws"
+    caller_cwd = tmp_path / "caller"
+    caller_cwd.mkdir()
+    monkeypatch.chdir(caller_cwd)
+
+    rt = SubprocessRuntime(_argv(), workspace=workspace)
+    try:
+        rt.execute("from pathlib import Path\nPath('style.css').write_text('body{}')")
+
+        assert (workspace / "style.css").read_text() == "body{}"
+        assert not (caller_cwd / "style.css").exists()
+    finally:
+        rt.close()
+
+
 def test_annotated_assignment_inside_yielding_block(runtime):
     """``x: T = v`` must not clash with the generator wrapper's implicit
     ``global x``. Python raises ``SyntaxError: annotated name 'x' can't be

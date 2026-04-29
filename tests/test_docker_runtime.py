@@ -8,6 +8,7 @@ and are gated on ``RLMKIT_DOCKER_TEST=1`` with a working daemon.
 from __future__ import annotations
 
 from rlmkit.runtime.docker import DockerRuntime
+from rlmkit.workspace import Workspace
 
 
 def test_argv_defaults_to_python_repl_entrypoint():
@@ -72,3 +73,16 @@ def test_clone_preserves_config():
     assert twin.argv == rt.argv
     assert twin.image == rt.image
     assert twin.options == rt.options
+
+
+def test_workspace_mount_is_writable_workdir(tmp_path):
+    workspace = Workspace.create(tmp_path / "workspace")
+    rt = DockerRuntime("myimage", workspace=workspace)
+
+    assert "-v" in rt.argv
+    assert f"{workspace.root}:/workspace" in rt.argv
+    assert "--workdir" in rt.argv
+    assert rt.argv[rt.argv.index("--workdir") + 1] == "/workspace"
+
+    child = rt.clone()
+    assert child.argv == rt.argv

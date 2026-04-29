@@ -38,7 +38,9 @@ If you need to run the server under a different interpreter or path, set
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+from rlmkit.runtime.runtime import workspace_path
 from rlmkit.runtime.subprocess import SubprocessRuntime
 
 
@@ -83,7 +85,7 @@ class DockerRuntime(SubprocessRuntime):
         self,
         image: str,
         *,
-        workspace: str | Path = ".",
+        workspace: str | Path | Any = ".",
         mounts: dict[str, str] | None = None,
         env: dict[str, str] | None = None,
         network: str | None = None,
@@ -95,6 +97,15 @@ class DockerRuntime(SubprocessRuntime):
         docker_bin: str = "docker",
         entrypoint_argv: list[str] | None = None,
     ) -> None:
+        runtime_workspace = workspace_path(workspace)
+        is_workspace = not isinstance(workspace, str | Path) and hasattr(
+            workspace, "root"
+        )
+        if mounts is None and is_workspace:
+            mounts = {str(runtime_workspace): "/workspace"}
+        if workdir is None and is_workspace:
+            workdir = "/workspace"
+
         self.image = image
         self.options = dict(
             mounts=mounts,
@@ -108,7 +119,7 @@ class DockerRuntime(SubprocessRuntime):
             docker_bin=docker_bin,
             entrypoint_argv=entrypoint_argv,
         )
-        super().__init__(build_argv(image, **self.options), workspace=workspace)
+        super().__init__(build_argv(image, **self.options), workspace=runtime_workspace)
 
     def clone(self, workspace: str | Path | None = None) -> DockerRuntime:
         new = self.__class__(

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import subprocess as sp
 from pathlib import Path
+from typing import Any
 
 from rlmkit.runtime.runtime import Runtime
 
@@ -32,7 +33,7 @@ from rlmkit.runtime.runtime import Runtime
 class SubprocessRuntime(Runtime):
     """Run the REPL server as a subprocess and talk to it over stdio."""
 
-    def __init__(self, argv: list[str], *, workspace: str | Path = ".") -> None:
+    def __init__(self, argv: list[str], *, workspace: str | Path | Any = ".") -> None:
         super().__init__(workspace=workspace)
         self.argv = list(argv)
         self.proc: sp.Popen | None = None
@@ -44,6 +45,7 @@ class SubprocessRuntime(Runtime):
                 stdin=sp.PIPE,
                 stdout=sp.PIPE,
                 stderr=sp.PIPE,
+                cwd=self.workspace,
                 bufsize=0,
             )
         assert self.proc.stdin is not None

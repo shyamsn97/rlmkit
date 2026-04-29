@@ -82,11 +82,11 @@ class RepairLLM(LLMClient):
 
 
 def setup_project(workspace: Workspace) -> None:
-    (workspace.files / "tests").mkdir(parents=True, exist_ok=True)
-    (workspace.files / "slugify.py").write_text(
+    workspace.path("tests").mkdir(parents=True, exist_ok=True)
+    workspace.path("slugify.py").write_text(
         "def slugify(text: str) -> str:\n    raise NotImplementedError\n"
     )
-    (workspace.files / "tests" / "test_slugify.py").write_text(TESTS)
+    workspace.path("tests", "test_slugify.py").write_text(TESTS)
 
 
 def run_tests(files_dir: Path) -> tuple[bool, str]:
@@ -114,7 +114,7 @@ def run_branch(root: Path, name: str, implementation: str, label: str):
     node = engine.start(TASK)
     while not node.finished:
         node = engine.step(node)
-    passed, output = run_tests(workspace.files)
+    passed, output = run_tests(workspace.path())
     return workspace, node, passed, output
 
 
@@ -142,7 +142,7 @@ def main() -> None:
 
     winner = next((item for item in results if item[0]), results[0])
     _passed, workspace, _node, _output = winner
-    print(f"\n[best] {workspace.branch_id} workspace={workspace.files}")
+    print(f"\n[best] {workspace.branch_id} workspace={workspace.root}")
 
 
 def brief_test_output(output: str) -> str:

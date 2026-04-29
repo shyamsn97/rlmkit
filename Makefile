@@ -81,6 +81,9 @@ OOLONG_MODEL ?= gpt-5
 OOLONG_MAX_DEPTH ?= 1
 OOLONG_MAX_ITERATIONS ?= 20
 
+build-docker-image:
+	docker build -t rlmkit:local .
+
 oolong-paper: ## Paper-style OOLONG RLM run: synth validation, depth 1, 20 iterations.
 	python benchmarks/oolong/run.py --mode rlm --subset synth \
 		--split validation --limit $(OOLONG_N) --shuffle --seed 42 \

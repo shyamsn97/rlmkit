@@ -66,7 +66,7 @@ def banner(msg: str) -> None:
 
 
 def make_agent(workspace: Workspace, *, max_depth: int, max_iterations: int) -> RLMFlow:
-    runtime = LocalRuntime(workspace=workspace.files)
+    runtime = LocalRuntime(workspace=workspace)
     runtime.register_tools(FILE_TOOLS)
     return RLMFlow(
         llm_client=DemoLLM(),

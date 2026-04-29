@@ -242,15 +242,10 @@ def make_llm(model: str, *, api_key_var: str | None = None) -> LLMClient:
     return OpenAIClient(model=model, **kwargs)
 
 
-def make_runtime(workspace: Path | str, *, docker_image: str | None):
+def make_runtime(workspace: Path | str | Workspace, *, docker_image: str | None):
     """Build a runtime over *workspace* and register OOLONG file tools."""
     if docker_image:
-        rt = DockerRuntime(
-            docker_image,
-            workspace=workspace,
-            mounts={str(Path(workspace).resolve()): "/workspace"},
-            workdir="/workspace",
-        )
+        rt = DockerRuntime(docker_image, workspace=workspace)
     else:
         rt = LocalRuntime(workspace=workspace)
     rt.register_tools(FILE_TOOLS)
@@ -317,12 +312,12 @@ def run_rlm_task(
     """RLM scaffold: per-task workspace, file-backed context, recursive REPL."""
     workspace = Workspace.create(workspace_root / task_id, branch_id=task_id)
     context_file = f"task_{row['example_id']:04d}.txt"
-    (workspace.files / context_file).write_text(row["context"])
+    workspace.path(context_file).write_text(row["context"])
 
-    runtime = make_runtime(workspace.files, docker_image=args.docker_image)
+    runtime = make_runtime(workspace, docker_image=args.docker_image)
 
     def runtime_factory():
-        return make_runtime(workspace.files, docker_image=args.docker_image)
+        return make_runtime(workspace, docker_image=args.docker_image)
 
     config = RLMConfig(
         max_depth=args.max_depth,
@@ -734,7 +729,7 @@ Git SHA: `{metadata.get('git_sha') or 'n/a'}`
 - `reports/report.md` — human-readable summary.
 - `reports/errors.md` — errors and incomplete tasks with trace links.
 - `traces/<task_id>/trace.json` — full RLM trace per task.
-- `workspaces/<task_id>/files/` — task-local context files.
+- `workspaces/<task_id>/` — task-local runtime workspace and metadata.
 
 Root-level `metadata.json`, `results.jsonl`, `summary.json`, and `summary.md`
 are compatibility copies for existing aggregation scripts.

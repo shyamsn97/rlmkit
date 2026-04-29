@@ -22,7 +22,7 @@ class LocalRuntime(Runtime):
     against the caller's CWD.
     """
 
-    def __init__(self, workspace: str | Path = ".") -> None:
+    def __init__(self, workspace: str | Path | Any = ".") -> None:
         super().__init__(workspace=workspace)
         self.repl = REPL()
         for mod in DEFAULT_MODULES:

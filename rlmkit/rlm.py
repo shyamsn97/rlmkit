@@ -637,6 +637,7 @@ class RLMFlow(LLMClient):
 
     def node_config(self) -> dict[str, Any]:
         return {
+            "model": "default",
             "max_depth": self.config.max_depth,
             "max_iterations": self.config.max_iterations,
             "max_output_length": self.config.max_output_length,

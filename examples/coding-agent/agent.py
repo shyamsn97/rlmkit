@@ -50,12 +50,10 @@ def main():
     if args.docker_image:
         runtime = DockerRuntime(
             args.docker_image,
-            workspace=workspace.files,
-            mounts={str(workspace.files): "/workspace"},
-            workdir="/workspace",
+            workspace=workspace,
         )
     else:
-        runtime = LocalRuntime(workspace=workspace.files)
+        runtime = LocalRuntime(workspace=workspace)
     runtime.register_tools(FILE_TOOLS)
 
     llm = (

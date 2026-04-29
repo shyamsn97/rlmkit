@@ -66,6 +66,15 @@ class ToolDef:
         )
 
 
+def workspace_path(workspace: Any) -> Path:
+    """Return the filesystem working tree for a runtime workspace handle."""
+    if isinstance(workspace, str | Path):
+        return Path(workspace).resolve()
+    if hasattr(workspace, "root"):
+        return Path(workspace.root).resolve()
+    return Path(workspace).resolve()
+
+
 class Runtime(ABC):
     """Where agent code runs.
 
@@ -78,8 +87,8 @@ class Runtime(ABC):
     :class:`LocalRuntime` for the in-process one.
     """
 
-    def __init__(self, workspace: str | Path = ".") -> None:
-        self.workspace = Path(workspace).resolve()
+    def __init__(self, workspace: str | Path | Any = ".") -> None:
+        self.workspace = workspace_path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.tools: dict[str, ToolDef] = {}
         self.proxied: dict[str, Callable] = {}

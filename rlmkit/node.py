@@ -21,10 +21,6 @@ class WorkspaceRef(BaseModel):
     branch_id: str = "main"
 
     @property
-    def files(self) -> Path:
-        return Path(self.root) / "files"
-
-    @property
     def context_dir(self) -> Path:
         return Path(self.root) / "context"
 
@@ -103,6 +99,17 @@ class Node(BaseModel):
     def total_tokens(self) -> int:
         return self.total_input_tokens + self.total_output_tokens
 
+    @property
+    def model_key(self) -> str:
+        return str(self.config.get("model") or "default")
+
+    @property
+    def model_label(self) -> str:
+        actual = getattr(self, "model", None)
+        if actual and actual != self.model_key:
+            return f"{self.model_key}:{actual}"
+        return self.model_key
+
     def update(self, **changes: Any) -> "Node":
         return self.model_copy(update=changes)
 
@@ -148,7 +155,7 @@ class Node(BaseModel):
 
     def tree(self, *, color: bool = False, indent: str = "") -> str:
         del color
-        label = f"{self.agent_id or 'root'} [{self.type}]"
+        label = f"{self.agent_id or 'root'} [{self.type}] {{{self.model_label}}}"
         result = getattr(self, "result", None)
         if result:
             label += f" -> {str(result)[:80]}"

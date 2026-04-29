@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from rlmkit import RLMConfig, RLMFlow, ResultNode, SupervisingNode, Workspace
+from rlmkit import (
+    ActionNode,
+    QueryNode,
+    RLMConfig,
+    RLMFlow,
+    ResultNode,
+    SupervisingNode,
+    Workspace,
+)
 from rlmkit.llm import LLMClient
 from rlmkit.runtime.local import LocalRuntime
 
@@ -75,6 +83,21 @@ def test_workspace_context_persists_nodes(tmp_path):
     assert isinstance(node, ResultNode)
     assert ws.context.read_context("context") == "hello"
     assert len(ws.context.load()) == 3
+
+
+def test_tree_displays_model_labels():
+    child = ActionNode(
+        agent_id="root.fast_worker",
+        config={"model": "fast"},
+        model="gpt-5-mini",
+        code="done('ok')",
+    )
+    root = QueryNode(config={"model": "default"}, children=[child])
+
+    tree = root.tree()
+
+    assert "root [query] {default}" in tree
+    assert "root.fast_worker [action] {fast:gpt-5-mini}" in tree
 
 
 def test_child_scope_lives_on_node_not_child_flow():

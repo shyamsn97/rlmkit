@@ -104,8 +104,9 @@ benchmarks/oolong/outputs/evals/<timestamp>_<mode>_<subset>_<model>/
   summary.md
   workspaces/
     task_0000/
-      files/
-      session/
+      context/
+      trace/
+      task_0000.txt
     traces/
 ```
 
@@ -202,11 +203,11 @@ The runner supports two modes so you can quantify how much the
 recursive scaffold actually buys you:
 
 - **`--mode rlm`** (default) — the rlmkit recursive scaffold. Each task
-  gets a branch `Workspace`: durable files under `files/` and session
-  history under `session/`. The context is written to
-  `files/task_XXXX.txt`; the runtime (`LocalRuntime` or, with
-  `--docker-image`, `DockerRuntime`) is materialized over that files
-  directory. The agent gets only `ls`, `read_file`, and recursive
+  gets a branch `Workspace`: the workspace root is the runtime working
+  tree, while node history lives under `context/`. The context is written
+  to `task_XXXX.txt` at the workspace root. The runtime (`LocalRuntime`
+  or, with `--docker-image`, `DockerRuntime`) is materialized over the
+  workspace itself. The agent gets only `ls`, `read_file`, and recursive
   delegation, so it has to read, chunk, classify/extract, and aggregate.
 
 - **`--mode flat`** — baseline. A single LLM call with the entire
@@ -224,9 +225,9 @@ runner follows that setup with a file-backed task input and a small tool
 surface:
 
 1. Create a per-task branch `Workspace`.
-2. Write `context_window_text` to `files/task_XXXX.txt`.
-3. Materialize the runtime over `Workspace.files` and the session over
-   `Workspace.session_dir`.
+2. Write `context_window_text` to `task_XXXX.txt` in the workspace root.
+3. Materialize the runtime over the `Workspace`; node history is stored
+   in `Workspace.context`.
 4. Give the agent a prompt telling it where the task file lives, how
    big it is (approx. tokens + bytes), and that it can `read_file`,
    chunk with Python, and delegate chunk work.
