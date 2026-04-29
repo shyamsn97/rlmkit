@@ -1,4 +1,4 @@
-"""Workspace — branch-local working tree, context, trace, and checkpoint handles."""
+"""Workspace — branch-local working tree, session, context, trace handles."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rlmkit.workspace.context import ContextStore, FileContext
+from rlmkit.workspace.context import Context, FileContext
+from rlmkit.workspace.session import FileSession, Session
 
 if TYPE_CHECKING:
     from rlmkit.node import WorkspaceRef
@@ -19,7 +20,8 @@ class Workspace:
     """Branch-local handle bundle."""
 
     root: Path
-    context: ContextStore
+    session: Session
+    context: Context
     branch_id: str = "main"
 
     def path(self, *parts: str) -> Path:
@@ -40,14 +42,17 @@ class Workspace:
         dir: str | Path,
         *,
         branch_id: str = "main",
-        context: ContextStore | None = None,
+        session: Session | None = None,
+        context: Context | None = None,
     ) -> Workspace:
         root = Path(dir).resolve()
         root.mkdir(parents=True, exist_ok=True)
         (root / "trace").mkdir(parents=True, exist_ok=True)
+        if session is None:
+            session = FileSession(root / "session")
         if context is None:
             context = FileContext(root / "context")
-        return cls(root=root, context=context, branch_id=branch_id)
+        return cls(root=root, session=session, context=context, branch_id=branch_id)
 
     @classmethod
     def open(cls, ref: WorkspaceRef) -> Workspace:
@@ -75,7 +80,7 @@ class Workspace:
         new_root.mkdir(parents=True, exist_ok=True)
         (new_root / "trace").mkdir(parents=True, exist_ok=True)
 
-        reserved = {"context", "trace", "checkpoint.json"}
+        reserved = {"session", "context", "trace", "checkpoint.json"}
         for item in self.root.iterdir():
             if item.name in reserved:
                 continue
@@ -85,8 +90,14 @@ class Workspace:
             else:
                 shutil.copy2(item, dst)
 
+        new_session = self.session.fork(new_root / "session")
         new_context = self.context.fork(new_root / "context")
-        return Workspace(root=new_root, context=new_context, branch_id=new_branch_id)
+        return Workspace(
+            root=new_root,
+            session=new_session,
+            context=new_context,
+            branch_id=new_branch_id,
+        )
 
 
 __all__ = ["Workspace"]

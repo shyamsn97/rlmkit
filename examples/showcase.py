@@ -4,7 +4,7 @@ This walks through the pieces that still matter after the refactor:
 
 1. Step-by-step execution over typed nodes.
 2. Checkpoint round-trip with `Node.save/load`.
-3. Context graph persistence through `Workspace.context`.
+3. Session graph persistence through `Workspace.session`.
 4. Time travel by keeping a list of node snapshots.
 5. Manual intervention by replacing a child leaf.
 6. Gym-style stepping with a scalar reward.
@@ -120,9 +120,9 @@ def main() -> None:
         print(f"Loaded {loaded.type} checkpoint with {len(loaded.children)} child refs")
         print(loaded.tree())
 
-        banner("3. Context graph persistence")
-        nodes = workspace.context.load()
-        print(f"Persisted {len(nodes)} node events in {workspace.root / 'context'}")
+        banner("3. Session graph persistence")
+        nodes = workspace.session.load()
+        print(f"Persisted {len(nodes)} node events in {workspace.root / 'session'}")
         print("Latest agents:")
         for node in sorted(nodes.values(), key=lambda item: item.agent_id):
             print(f"  {node.agent_id}: {node.type}")

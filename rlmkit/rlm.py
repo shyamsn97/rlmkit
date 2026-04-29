@@ -40,7 +40,14 @@ from rlmkit.prompts.messages import (
 from rlmkit.runtime import Runtime
 from rlmkit.tools import tool
 from rlmkit.utils import OrphanedDelegatesError, check_yield_errors, find_code_blocks
-from rlmkit.workspace import ContextStore, ContextTools, InMemoryContext, Workspace
+from rlmkit.workspace import (
+    Context,
+    ContextVariable,
+    InMemoryContext,
+    InMemorySession,
+    Session,
+    Workspace,
+)
 
 ROOT_RUNTIME_ID = "root"
 
@@ -159,9 +166,8 @@ class RLMFlow(LLMClient):
         self.llm_client = llm_client
         self.runtime = runtime
         self.workspace = workspace
-        self.context: ContextStore = (
-            workspace.context if workspace else InMemoryContext()
-        )
+        self.session: Session = workspace.session if workspace else InMemorySession()
+        self.context: Context = workspace.context if workspace else InMemoryContext()
         self.config = config or RLMConfig()
         self.runtime_factory = runtime_factory
         self.prompt_builder = prompt_builder or DEFAULT_BUILDER
@@ -194,14 +200,14 @@ class RLMFlow(LLMClient):
         query = query or DEFAULT_QUERY
 
         if context is not None:
-            self.context.write_context(
+            self.context.write(
                 "context",
                 context,
                 agent_id=agent_id,
                 metadata=context_metadata,
             )
         for key, value in (contexts or {}).items():
-            self.context.write_context(key, value, agent_id=agent_id)
+            self.context.write(key, value, agent_id=agent_id)
 
         root = QueryNode(
             agent_id=agent_id,
@@ -448,7 +454,7 @@ class RLMFlow(LLMClient):
     # ── graph/context bookkeeping ─────────────────────────────────────
 
     def record(self, node: Node) -> Node:
-        self.context.write(node)
+        self.session.write(node)
         return node
 
     def record_successor(self, prev: Node, node: Node) -> Node:
@@ -456,7 +462,7 @@ class RLMFlow(LLMClient):
         return self.record(node)
 
     def chain_to_root(self, node: Node) -> list[Node]:
-        return self.context.chain_to(node)
+        return self.session.chain_to(node)
 
     def iteration_of(self, node: Node) -> int:
         return sum(isinstance(item, ActionNode) for item in self.chain_to_root(node))
@@ -498,9 +504,17 @@ class RLMFlow(LLMClient):
         runtime.inject("AGENT_ID", node.agent_id)
         runtime.inject("DEPTH", str(node.depth))
         runtime.inject("MAX_DEPTH", str(self.config.max_depth))
+        runtime.inject(
+            "RLM_SESSION",
+            {
+                "agent_id": node.agent_id,
+                "node_id": node.id,
+                "branch_id": node.branch_id,
+            },
+        )
         if self.context.list_contexts(agent_id=node.agent_id):
             runtime.inject(
-                "CONTEXT", ContextTools(self.context, agent_id=node.agent_id)
+                "CONTEXT", ContextVariable(self.context, agent_id=node.agent_id)
             )
         return runtime
 
@@ -691,6 +705,7 @@ class RLMFlow(LLMClient):
             name: str,
             query: str,
             *,
+            context: str | None = None,
             max_iterations: int | None = None,
             model: str = "default",
         ) -> ChildHandle | str:
@@ -698,6 +713,7 @@ class RLMFlow(LLMClient):
                 step,
                 name,
                 query,
+                context=context,
                 max_iterations=max_iterations,
                 model=model,
             )
@@ -726,6 +742,7 @@ class RLMFlow(LLMClient):
         name: str,
         query: str,
         *,
+        context: str | None = None,
         max_iterations: int | None = None,
         model: str = "default",
     ) -> ChildHandle | str:
@@ -737,6 +754,7 @@ class RLMFlow(LLMClient):
         name: str,
         query: str,
         *,
+        context: str | None = None,
         max_iterations: int | None = None,
         model: str = "default",
     ) -> ChildHandle | str:
@@ -748,6 +766,8 @@ class RLMFlow(LLMClient):
             return f"[error: unknown model {model!r}. available: {keys}]"
 
         agent_id = self.unique_child_id(parent, name, step.delegated)
+        if context is not None:
+            self.context.write("context", context, agent_id=agent_id)
         runtime_ref = self.create_runtime_session(parent, agent_id=agent_id)
         child = QueryNode(
             agent_id=agent_id,

@@ -18,10 +18,13 @@ from rlmkit.node import (
 from rlmkit.rlm import NodeScheduler, RLMConfig, RLMFlow
 from rlmkit.runtime import Runtime
 from rlmkit.workspace import (
-    ContextStore,
-    ContextTools,
+    Context,
+    ContextVariable,
     FileContext,
+    FileSession,
     InMemoryContext,
+    InMemorySession,
+    Session,
     Workspace,
 )
 
@@ -29,13 +32,15 @@ __all__ = [
     "ActionNode",
     "AnthropicClient",
     "ChildHandle",
-    "ContextStore",
-    "ContextTools",
+    "Context",
+    "ContextVariable",
     "ErrorNode",
     "FileContext",
+    "FileSession",
     "LLMClient",
     "LLMUsage",
     "InMemoryContext",
+    "InMemorySession",
     "Node",
     "NodeScheduler",
     "ObservationNode",
@@ -47,6 +52,7 @@ __all__ = [
     "RuntimeRef",
     "ResumeNode",
     "Runtime",
+    "Session",
     "SupervisingNode",
     "WaitRequest",
     "Workspace",

@@ -70,7 +70,7 @@ def test_delegation_resumes_parent():
     assert node.result == "parent:child-result"
 
 
-def test_workspace_context_persists_nodes(tmp_path):
+def test_workspace_session_persists_nodes_and_context_payload(tmp_path):
     ws = Workspace.create(tmp_path / "workspace")
     agent = RLMFlow(
         StaticLLM('```repl\ndone("ok")\n```'),
@@ -81,8 +81,8 @@ def test_workspace_context_persists_nodes(tmp_path):
     node = agent.step(agent.start("say ok", context="hello"))
 
     assert isinstance(node, ResultNode)
-    assert ws.context.read_context("context") == "hello"
-    assert len(ws.context.load()) == 3
+    assert ws.context.read("context") == "hello"
+    assert len(ws.session.load()) == 3
 
 
 def test_tree_displays_model_labels():
@@ -137,3 +137,33 @@ def test_child_scope_lives_on_node_not_child_flow():
     node = agent.step(node)
     assert isinstance(node.children[0], ResultNode)
     assert node.children[0].result == "child"
+
+
+def test_delegate_can_pass_child_context_payload(tmp_path):
+    class ScriptedLLM(LLMClient):
+        def chat(self, messages, *args, **kwargs) -> str:
+            prompt = messages[-1]["content"].lower()
+            if "child task" in prompt:
+                return '```repl\ndone(CONTEXT.read())\n```'
+            return (
+                "```repl\n"
+                'h = delegate("child", "child task", context="child payload")\n'
+                "results = yield wait(h)\n"
+                'done(results[0])\n'
+                "```"
+            )
+
+    workspace = Workspace.create(tmp_path / "workspace")
+    agent = RLMFlow(
+        ScriptedLLM(),
+        workspace=workspace,
+        config=RLMConfig(max_depth=1, max_iterations=5),
+    )
+
+    node = agent.step(agent.start("parent task", context="root payload"))
+    node = agent.step(node)
+    node = agent.step(node)
+
+    assert isinstance(node, ResultNode)
+    assert node.result == "child payload"
+    assert workspace.context.read("context", agent_id="root.child") == "child payload"

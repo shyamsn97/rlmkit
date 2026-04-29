@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from rlmkit.runtime.docker import DockerRuntime
-from rlmkit.workspace import FileSession
+from rlmkit.workspace import FileContext
 from rlmkit.node import ChildHandle, WaitRequest
 
 
@@ -65,18 +65,16 @@ def runtime(tmp_path: Path):
         rt.close()
 
 
-def test_object_proxy_round_trips_file_session_methods(runtime, tmp_path: Path):
+def test_object_proxy_round_trips_file_context_methods(runtime, tmp_path: Path):
     """Injected objects expose public methods as callable proxies."""
     rt, _ = runtime
-    session = FileSession(tmp_path / "sessions")
-    rt.inject("STORE", session)
+    context = FileContext(tmp_path / "context")
+    rt.inject("STORE", context)
 
-    rt.execute(
-        "STORE.write('root', [{'role': 'user', 'content': 'hello from container'}])"
-    )
-    assert session.read("root") == [{"role": "user", "content": "hello from container"}]
+    rt.execute("STORE.write('context', 'hello from container')")
+    assert context.read("context") == "hello from container"
 
-    out = rt.execute("print(STORE.read('root')[0]['content'])")
+    out = rt.execute("print(STORE.read('context'))")
     assert out == "hello from container"
 
 

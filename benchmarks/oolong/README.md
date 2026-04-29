@@ -104,6 +104,7 @@ benchmarks/oolong/outputs/evals/<timestamp>_<mode>_<subset>_<model>/
   summary.md
   workspaces/
     task_0000/
+      session/
       context/
       trace/
       task_0000.txt
@@ -204,7 +205,7 @@ recursive scaffold actually buys you:
 
 - **`--mode rlm`** (default) — the rlmkit recursive scaffold. Each task
   gets a branch `Workspace`: the workspace root is the runtime working
-  tree, while node history lives under `context/`. The context is written
+  tree, while node/message history lives under `session/`. The context is written
   to `task_XXXX.txt` at the workspace root. The runtime (`LocalRuntime`
   or, with `--docker-image`, `DockerRuntime`) is materialized over the
   workspace itself. The agent gets only `ls`, `read_file`, and recursive
@@ -226,8 +227,8 @@ surface:
 
 1. Create a per-task branch `Workspace`.
 2. Write `context_window_text` to `task_XXXX.txt` in the workspace root.
-3. Materialize the runtime over the `Workspace`; node history is stored
-   in `Workspace.context`.
+3. Materialize the runtime over the `Workspace`; node/message history is
+   stored in `Workspace.session`.
 4. Give the agent a prompt telling it where the task file lives, how
    big it is (approx. tokens + bytes), and that it can `read_file`,
    chunk with Python, and delegate chunk work.
