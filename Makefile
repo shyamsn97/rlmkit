@@ -1,4 +1,4 @@
-.PHONY: clean clean-build clean-pyc clean-test coverage dist docs help install lint lint/flake8 oolong-paper oolong-rlm oolong-rlm-tips oolong-standard oolong-real oolong-ablations oolong-aggregate
+.PHONY: clean clean-build clean-pyc clean-test coverage dist docs help install lint lint/flake8 oolong-paper oolong-rlm oolong-rlm-tips oolong-standard oolong-real oolong-ablations oolong-aggregate animation animation-preview animation-mp4 animation-gif animation-gif-small animation-clean
 	{%- if cookiecutter.use_black == 'y' %} lint/black{% endif %}
 .DEFAULT_GOAL := help
 
@@ -116,3 +116,29 @@ oolong-ablations: ## Full mode × subset sweep — see benchmarks/oolong/run_abl
 
 oolong-aggregate: ## Aggregate everything under benchmarks/oolong/outputs/.
 	python benchmarks/oolong/aggregate.py
+
+# ── Animation (manim) ────────────────────────────────────────────────
+ANIMATION_SRC := docs/rlm_animation.py
+ANIMATION_SCENE := RLMFlowHero
+ANIMATION_OUT_DIR := media/videos/rlm_animation/1080p60
+
+animation: animation-mp4 animation-gif-small ## Render the rlmflow animation: MP4 + share-friendly GIF.
+
+animation-preview: ## Quick low-res manim preview of the rlmflow animation.
+	manim -pql $(ANIMATION_SRC) $(ANIMATION_SCENE)
+
+animation-mp4: ## Render docs/rlm_animation.mp4 (1080p60).
+	manim -qh $(ANIMATION_SRC) $(ANIMATION_SCENE)
+	cp $(ANIMATION_OUT_DIR)/$(ANIMATION_SCENE).mp4 docs/rlm_animation.mp4
+
+animation-gif: ## Raw 1080p60 GIF from manim — WARNING: ~1GB+ output.
+	manim -qh --format=gif $(ANIMATION_SRC) $(ANIMATION_SCENE)
+	cp "$$(ls -t $(ANIMATION_OUT_DIR)/$(ANIMATION_SCENE)*.gif | head -n 1)" docs/rlm_animation.gif
+
+animation-gif-small: animation-mp4 ## Share-friendly GIF (ffmpeg, ~5MB) — replaces the README hero.
+	ffmpeg -y -i docs/rlm_animation.mp4 \
+		-vf "fps=20,scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5" \
+		docs/rlm_animation.gif
+
+animation-clean: ## Remove manim render artifacts (media/).
+	rm -rf media/

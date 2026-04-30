@@ -5,18 +5,38 @@
   <a href="https://github.com/shyamsn97/rlmflow/pkgs/container/rlmflow"><img src="https://img.shields.io/badge/ghcr.io-rlmflow-2496ED?logo=docker&logoColor=white" alt="Docker" /></a>
 </p>
 
-A Python library for building [Recursive Language Models](https://github.com/alexzhang13/rlm-minimal)
-as inspectable execution graphs.
+A Python library for [Recursive Language Models](https://arxiv.org/abs/2512.24601) —
+a typed graph for every recursive run.
 
-Recursive agents get messy fast: one parent spawns children, children spawn
-more children, some branches wait, some fail, and some resume later with
-partial results. A flat chat log hides that structure.
+Recursive agents get messy fast: parents spawn children, children spawn
+children, branches wait, fail, and resume later with partial results. A
+flat chat log hides that structure.
 
-**rlmflow** turns the run into a graph instead, where every query, action, observation, child call, etc. is a typed node you can inspect, visualize, step, fork, and replay.
+**rlmflow** turns the run into an explicit graph. Every query, action,
+observation, child call, wait, resume, and result is a typed, immutable
+node you can step, inspect, fork, and replay.
 
 <p align="center">
   <img src="docs/rlm_animation.gif" alt="rlmflow animation" />
 </p>
+
+## Why a graph
+
+Most RLM tools leave you with a chat log. rlmflow gives you the recursive
+tree itself, so deep runs stay readable:
+
+- **Typed nodes, not messages.** Query, Action, Observation, Supervising,
+  Resume, Result — the graph is the source of truth; messages are derived.
+- **Deep recursion stays readable.** Child calls, waits, resumes,
+  failures, and final results are explicit graph structure.
+- **`step(node) → node'`.** Pure function, frozen Pydantic snapshot.
+  Checkpoint, time-travel, or wrap as a Gym `step()` for free.
+- **Fork at any node.** The prefix replays from cached LLM replies and
+  cached tool outputs. Only the divergent tail goes live. Best-of-N,
+  counterfactuals, and self-repair are one primitive.
+
+See [`docs/internal/what_makes_rlmflow_special.md`](docs/internal/what_makes_rlmflow_special.md)
+for the full positioning brief.
 
 ## Install
 
