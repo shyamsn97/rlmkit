@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rlmflow"
-version = "0.1.2"
+version = "0.1.3"
 description = "Build Recursive Language Models as inspectable execution graphs."
 readme = "README.md"
 license = "MIT"
