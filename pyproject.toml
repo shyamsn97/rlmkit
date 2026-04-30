@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rlmflow"
-version = "0.1.1"
+version = "0.1.2"
 description = "Build Recursive Language Models as inspectable execution graphs."
 readme = "README.md"
 license = "MIT"
@@ -36,9 +36,9 @@ all = ["openai>=1.0", "anthropic>=0.20", "gradio>=4.29"]
 dev = ["pytest>=7.0", "ruff>=0.4"]
 
 [project.urls]
-Homepage = "https://github.com/ShyamSS-95/rlmflow"
-Repository = "https://github.com/ShyamSS-95/rlmflow"
-Issues = "https://github.com/ShyamSS-95/rlmflow/issues"
+Homepage = "https://github.com/shyamsn97/rlmflow"
+Repository = "https://github.com/shyamsn97/rlmflow"
+Issues = "https://github.com/shyamsn97/rlmflow/issues"
 
 [project.scripts]
 rlmflow = "rlmflow.cli:main"

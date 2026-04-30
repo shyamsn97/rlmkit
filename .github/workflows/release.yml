@@ -1,12 +1,12 @@
 # Tag-driven release: tests → PyPI (trusted publishing) → Docker image (GHCR).
 #
 # Trigger:
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.1.2 && git push origin v0.1.2
 #
 # One-time setup:
 #   1. PyPI → Your projects → rlmflow → Publishing → Add a new pending
 #      publisher with:
-#         owner:       <your-github-user>
+#         owner:       shyamsn97
 #         repository:  rlmflow
 #         workflow:    release.yml
 #         environment: release
@@ -103,7 +103,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # Produces: ghcr.io/OWNER/rlmflow:0.1.0, :0.1, :latest
+          # Produces: ghcr.io/OWNER/rlmflow:0.1.2, :0.1, :latest
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
