@@ -82,6 +82,7 @@ class Node(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     workspace: WorkspaceRef | None = None
     runtime: RuntimeRef | None = None
+    model: str | None = None
     terminate_requested: bool = False
 
     total_input_tokens: int = 0
@@ -123,6 +124,7 @@ class Node(BaseModel):
             "config": self.config,
             "workspace": self.workspace,
             "runtime": self.runtime,
+            "model": self.model,
             "terminate_requested": self.terminate_requested,
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
@@ -236,7 +238,6 @@ class ActionNode(Node):
     type: Literal["action"] = "action"
     reply: str = ""
     code: str = ""
-    model: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
 
@@ -267,6 +268,18 @@ class _NodeParser(BaseModel):
 
 
 def parse_node_obj(data: dict) -> Node:
+    if isinstance(data.get("children"), list):
+        data = {
+            **data,
+            "children": [
+                (
+                    parse_node_obj(child)
+                    if isinstance(child, dict) and "type" in child
+                    else child
+                )
+                for child in data["children"]
+            ],
+        }
     return _NodeParser.model_validate({"node": data}).node
 
 

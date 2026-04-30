@@ -1,59 +1,35 @@
-"""Integration test: step-level control primitives.
-
-Exercises the operations promised in ``docs/control.md``:
-- step-by-step loop
-- ``state.model_dump_json`` → ``model_validate_json`` round trip
-- list-of-states rewind / fork (divergence after a branch)
-- intervention via ``state.update(...)`` killing a child mid-run
-"""
+"""Integration tests for step-level control over typed nodes."""
 
 from __future__ import annotations
 
-from rlmflow import (
-    RLM,
-    LLMClient,
-    LLMUsage,
-    RLMConfig,
-    RLMNode,
-    Status,
-)
+from rlmflow import LLMClient, LLMUsage, RLMConfig, RLMFlow, ResultNode, SupervisingNode
+from rlmflow.node import Node, parse_node_json
 from rlmflow.runtime.local import LocalRuntime
 
 
 class ScriptedLLM(LLMClient):
-    """Returns replies from a per-agent script; raises if exhausted.
-
-    Keyed by ``agent_id`` so the same LLM instance can drive the root and
-    any number of children deterministically.
-    """
-
     def __init__(self, scripts: dict[str, list[str]]) -> None:
-        self.scripts = {k: list(v) for k, v in scripts.items()}
-        self.cursors: dict[str, int] = {k: 0 for k in scripts}
+        self.scripts = {key: list(values) for key, values in scripts.items()}
+        self.cursors = {key: 0 for key in scripts}
 
     def chat(self, messages, *args, **kwargs):
         self.last_usage = LLMUsage(input_tokens=4, output_tokens=4)
-        aid = self._agent_id(messages)
-        script = self.scripts.get(aid)
+        agent_id = self._agent_id(messages)
+        script = self.scripts.get(agent_id)
         if not script:
-            raise AssertionError(f"no script for {aid!r}")
-        i = self.cursors[aid]
-        if i >= len(script):
-            raise AssertionError(f"script exhausted for {aid!r}")
-        self.cursors[aid] = i + 1
-        return script[i]
+            raise AssertionError(f"no script for {agent_id!r}")
+        index = self.cursors[agent_id]
+        if index >= len(script):
+            raise AssertionError(f"script exhausted for {agent_id!r}")
+        self.cursors[agent_id] = index + 1
+        return script[index]
 
     @staticmethod
     def _agent_id(messages: list[dict]) -> str:
-        sysmsg = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
-        for line in sysmsg.splitlines():
+        system = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+        for line in system.splitlines():
             if line.startswith("AGENT_ID"):
                 return line.split("=", 1)[1].strip()
-        # Fallback: find the 'do the thing' child query or default to root.
-        for m in messages:
-            c = m.get("content") or ""
-            if "delegate-done" in c:
-                return "root.child"
         return "root"
 
 
@@ -71,118 +47,92 @@ def _delegate_one(child_name: str, query: str) -> str:
     )
 
 
-# ── tests ─────────────────────────────────────────────────────────────
+def _run(agent: RLMFlow, node: Node) -> Node:
+    while not node.finished:
+        node = agent.step(node)
+    return node
 
 
-def test_step_loop_reaches_finished():
-    llm = ScriptedLLM({"root": [_done("direct-answer")]})
-    agent = RLM(llm_client=llm, runtime=LocalRuntime())
+def test_step_loop_reaches_result_node():
+    agent = RLMFlow(
+        llm_client=ScriptedLLM({"root": [_done("direct-answer")]}),
+        runtime=LocalRuntime(),
+    )
 
-    state = agent.start("control-step")
-    states = [state]
-    while not state.finished:
-        state = agent.step(state)
-        states.append(state)
-        assert len(states) < 20
+    final = _run(agent, agent.start("control-step"))
 
-    assert state.status == Status.FINISHED
-    assert state.result == "direct-answer"
+    assert isinstance(final, ResultNode)
+    assert final.result == "direct-answer"
 
 
 def test_checkpoint_round_trip_resumes_cleanly():
-    llm = ScriptedLLM({"root": [_done("checkpoint-me")]})
-    agent = RLM(llm_client=llm, runtime=LocalRuntime())
+    agent = RLMFlow(
+        llm_client=ScriptedLLM({"root": [_done("checkpoint-me")]}),
+        runtime=LocalRuntime(),
+    )
 
-    state = agent.start("control-ckpt")
-    while not state.finished:
-        state = agent.step(state)
+    final = _run(agent, agent.start("control-ckpt"))
+    restored = parse_node_json(final.model_dump_json())
 
-    blob = state.model_dump_json()
-    restored = RLMNode.model_validate_json(blob)
-
-    assert restored.status == state.status == Status.FINISHED
-    assert restored.result == state.result
-    assert restored.messages == state.messages
-    assert restored.tree_usage() == state.tree_usage()
+    assert isinstance(restored, ResultNode)
+    assert restored.result == final.result
+    assert restored.tree_usage() == final.tree_usage()
 
 
-def test_fork_from_midrun_state_diverges():
-    """Two agents sharing a midrun snapshot can produce different results."""
-    llm_a = ScriptedLLM({"root": [_done("path-A")]})
-    llm_b = ScriptedLLM({"root": [_done("path-B")]})
-
-    agent_a = RLM(llm_client=llm_a, runtime=LocalRuntime())
-    agent_b = RLM(llm_client=llm_b, runtime=LocalRuntime())
-
+def test_fork_from_midrun_node_diverges():
+    agent_a = RLMFlow(
+        llm_client=ScriptedLLM({"root": [_done("path-A")]}),
+        runtime=LocalRuntime(),
+    )
+    agent_b = RLMFlow(
+        llm_client=ScriptedLLM({"root": [_done("path-B")]}),
+        runtime=LocalRuntime(),
+    )
     mid = agent_a.start("control-fork")
 
-    final_a = mid
-    while not final_a.finished:
-        final_a = agent_a.step(final_a)
-
-    resumed = agent_b.restore(mid)
-    while not resumed.finished:
-        resumed = agent_b.step(resumed)
+    final_a = _run(agent_a, mid)
+    final_b = _run(agent_b, mid)
 
     assert final_a.result == "path-A"
-    assert resumed.result == "path-B"
+    assert final_b.result == "path-B"
 
 
 def test_rewind_is_just_list_indexing():
-    llm = ScriptedLLM({"root": [_done("rewind-me")]})
-    agent = RLM(llm_client=llm, runtime=LocalRuntime())
-
-    state = agent.start("control-rewind")
-    states = [state]
-    while not state.finished:
-        state = agent.step(state)
-        states.append(state)
-
-    earlier = states[0]
-    latest = states[-1]
-    assert earlier.status == Status.READY
-    assert latest.status == Status.FINISHED
-    # Earlier snapshot is unchanged by later stepping — immutability.
-    assert earlier is not latest
-    assert earlier.iteration == 0
-    assert latest.iteration >= 1
-
-
-def test_intervene_kills_a_child_mid_run():
-    """Force-finish a child by rewriting the supervising state between steps."""
-    llm = ScriptedLLM(
-        {
-            "root": [_delegate_one("child", "delegate-done"), _done("root-done")],
-            "root.child": [_done("(will not finish)")],
-        }
+    agent = RLMFlow(
+        llm_client=ScriptedLLM({"root": [_done("rewind-me")]}),
+        runtime=LocalRuntime(),
     )
-    agent = RLM(
-        llm_client=llm,
+
+    node = agent.start("control-rewind")
+    states = [node]
+    while not node.finished:
+        node = agent.step(node)
+        states.append(node)
+
+    assert states[0].type == "query"
+    assert states[-1].type == "result"
+    assert states[0] is not states[-1]
+
+
+def test_intervene_replaces_child_result_before_resume():
+    agent = RLMFlow(
+        llm_client=ScriptedLLM(
+            {
+                "root": [_delegate_one("child", "delegate-done")],
+                "root.child": [_done("(will not finish)")],
+            }
+        ),
         runtime=LocalRuntime(),
         config=RLMConfig(max_depth=2),
     )
 
-    state = agent.start("control-intervene")
-    while state.status != Status.SUPERVISING:
-        state = agent.step(state)
-        assert state.iteration < 20
+    node = agent.step(agent.start("control-intervene"))
+    assert isinstance(node, SupervisingNode)
+    assert node.waiting_on == ["root.child"]
 
-    assert state.waiting_on == ["root.child"]
+    killed_child = node.children[0].successor(ResultNode, result="killed-by-supervisor")
+    patched = node.update(children=[killed_child])
+    final = _run(agent, patched)
 
-    # Intervene: mark the child finished with a canned result and clear the wait.
-    killed_child = state.children[0].update(
-        status=Status.FINISHED,
-        result="killed-by-supervisor",
-    )
-    patched = state.update(children=[killed_child])
-    # Mirror the intervention in the engine's child registry so resume_exec
-    # pulls the canned result.
-    agent.child_engines["root.child"].is_done = True
-    agent.child_engines["root.child"].result = "killed-by-supervisor"
-
-    while not patched.finished:
-        patched = agent.step(patched)
-        assert patched.iteration < 20
-
-    assert patched.status == Status.FINISHED
-    assert patched.children[0].result == "killed-by-supervisor"
+    assert isinstance(final, ResultNode)
+    assert final.result == "killed-by-supervisor"

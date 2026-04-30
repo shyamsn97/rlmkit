@@ -1,151 +1,72 @@
-"""ReplayLog: append, get, save/load round-trip, fork truncation."""
+"""Session-store tests replacing the removed replay-log contract."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
-from rlmflow.workspace import ReplayEntry, ReplayLog
+from rlmflow import FileSession, InMemorySession, QueryNode, ResultNode, SupervisingNode
 
 
-def _entry(branch: str, agent: str, it: int, reply: str = "") -> ReplayEntry:
-    return ReplayEntry(
-        branch_id=branch,
-        agent_id=agent,
-        iteration=it,
-        reply=reply or f"reply for {agent}:{it}",
-        input_tokens=10,
-        output_tokens=5,
-    )
+def test_file_session_appends_and_loads_typed_nodes(tmp_path):
+    session = FileSession(tmp_path / "session")
+    root = QueryNode(agent_id="root", content="start")
+    result = ResultNode(agent_id="root", result="done")
+
+    session.write(root)
+    session.write(result)
+
+    loaded = session.load()
+    assert loaded[root.id].content == "start"
+    assert loaded[result.id].result == "done"
 
 
-def test_append_and_get():
-    log = ReplayLog()
-    e = _entry("b1", "root", 1)
-    log.append(e)
-    assert log.get("root", 1) is e
-    assert log.get("root", 2) is None
-    assert log.get("missing", 1) is None
+def test_file_session_latest_agent_view_tracks_terminal_result(tmp_path):
+    session = FileSession(tmp_path / "session")
+    session.write(QueryNode(agent_id="root.worker", depth=1))
+    session.write(ResultNode(agent_id="root.worker", depth=1, result="ok"))
+
+    view = (tmp_path / "session" / "agents" / "root.worker.json").read_text()
+
+    assert '"depth": 1' in view
+    assert '"type": "result"' in view
+    assert '"terminal": true' in view
+    assert '"result": "ok"' in view
 
 
-def test_duplicate_append_raises():
-    log = ReplayLog()
-    log.append(_entry("b1", "root", 1))
-    with pytest.raises(ValueError, match="duplicate"):
-        log.append(_entry("b2", "root", 1))
+def test_in_memory_session_fork_isolates_subsequent_writes():
+    source = InMemorySession()
+    root = QueryNode(agent_id="root", content="source")
+    source.write(root)
+
+    forked = source.fork(None)
+    divergent = QueryNode(agent_id="root", content="forked")
+    forked.write(divergent)
+
+    assert divergent.id not in source.load()
+    assert divergent.id in forked.load()
 
 
-def test_save_load_roundtrip(tmp_path: Path):
-    path = tmp_path / "replay.jsonl"
-    log = ReplayLog(path=path)
-    log.append(_entry("b1", "root", 1, "hello"))
-    log.append(_entry("b1", "root.child", 1, "world"))
-    log.save()
+def test_session_chain_to_follows_same_agent_successors():
+    session = InMemorySession()
+    first = QueryNode(agent_id="root", content="first")
+    second = first.successor(QueryNode, content="second")
+    third = second.successor(ResultNode, result="done")
 
-    loaded = ReplayLog.load(path)
-    assert len(loaded) == 2
-    assert loaded.get("root", 1).reply == "hello"
-    assert loaded.get("root.child", 1).reply == "world"
-    assert loaded.get("root.child", 1).branch_id == "b1"
+    session.write(first.update(children=[second.id]))
+    session.write(second.update(children=[third.id]))
+    session.write(third)
 
-
-def test_load_missing_returns_empty(tmp_path: Path):
-    path = tmp_path / "nonexistent.jsonl"
-    log = ReplayLog.load(path)
-    assert len(log) == 0
-    assert log.path == path
+    assert [node.id for node in session.chain_to(third)] == [
+        first.id,
+        second.id,
+        third.id,
+    ]
 
 
-def test_fork_drops_target_and_descendants(tmp_path: Path):
-    """Fork at root.b:1 drops root.b:1+, root.b.* (descendants)."""
-    log = ReplayLog()
-    log.append(_entry("b1", "root", 1))           # 0
-    log.append(_entry("b1", "root.a", 1))         # 1
-    log.append(_entry("b1", "root.b", 1))         # 2  ← target
-    log.append(_entry("b1", "root.b.x", 1))       # 3  descendant of target
-    log.append(_entry("b1", "root.b", 2))         # 4  later iter of target
-    log.append(_entry("b1", "root", 2))           # 5  ancestor, AFTER target
+def test_session_chain_stops_at_nested_agent_boundary():
+    session = InMemorySession()
+    child = QueryNode(agent_id="root.child", depth=1, content="child")
+    root = SupervisingNode(agent_id="root", waiting_on=["root.child"], children=[child])
 
-    new_path = tmp_path / "b2.jsonl"
-    forked = log.fork(
-        agent_id="root.b",
-        iteration=1,
-        new_branch_id="b2",
-        new_path=new_path,
-    )
+    session.write(root)
+    session.write(child)
 
-    kept = [(e.agent_id, e.iteration) for e in forked]
-    assert ("root", 1) in kept                   # ancestor BEFORE target
-    assert ("root.a", 1) in kept                 # sibling
-    assert ("root.b", 1) not in kept             # target itself
-    assert ("root.b.x", 1) not in kept           # descendant of target
-    assert ("root.b", 2) not in kept             # target later iter
-    assert ("root", 2) not in kept               # ancestor AFTER target
-
-
-def test_fork_keeps_independent_siblings_logged_after_target(tmp_path: Path):
-    """A sibling that *happened* to log after the target is still kept."""
-    log = ReplayLog()
-    log.append(_entry("b1", "root", 1))           # 0
-    log.append(_entry("b1", "root.b", 1))         # 1  ← target
-    log.append(_entry("b1", "root.a", 1))         # 2  sibling, logged AFTER target
-
-    forked = log.fork(
-        agent_id="root.b",
-        iteration=1,
-        new_branch_id="b2",
-        new_path=tmp_path / "b2.jsonl",
-    )
-
-    kept = [(e.agent_id, e.iteration) for e in forked]
-    assert ("root.a", 1) in kept                 # sibling causally independent
-
-
-def test_fork_preserves_branch_id_provenance(tmp_path: Path):
-    """Kept entries keep their original branch_id; new branch_id is for new appends."""
-    log = ReplayLog()
-    log.append(_entry("b1", "root", 1))
-    log.append(_entry("b1", "root.a", 1))
-    log.append(_entry("b1", "root.b", 1))         # target
-
-    forked = log.fork(
-        agent_id="root.b",
-        iteration=1,
-        new_branch_id="b2",
-        new_path=tmp_path / "b2.jsonl",
-    )
-
-    for e in forked:
-        assert e.branch_id == "b1"
-
-
-def test_fork_writes_file(tmp_path: Path):
-    log = ReplayLog()
-    log.append(_entry("b1", "root", 1))
-    log.append(_entry("b1", "root.target", 1))
-
-    new_path = tmp_path / "b2" / "replay.jsonl"
-    log.fork(
-        agent_id="root.target",
-        iteration=1,
-        new_branch_id="b2",
-        new_path=new_path,
-    )
-
-    assert new_path.exists()
-    reloaded = ReplayLog.load(new_path)
-    assert len(reloaded) == 1
-    assert reloaded.get("root", 1) is not None
-
-
-def test_fork_unknown_target_raises(tmp_path: Path):
-    log = ReplayLog()
-    log.append(_entry("b1", "root", 1))
-    with pytest.raises(ValueError, match="not in replay log"):
-        log.fork(
-            agent_id="root.missing",
-            iteration=1,
-            new_branch_id="b2",
-            new_path=tmp_path / "b2.jsonl",
-        )
+    assert session.chain_to(child) == [child]

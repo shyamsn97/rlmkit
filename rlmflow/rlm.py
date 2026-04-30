@@ -355,7 +355,11 @@ class RLMFlow(LLMClient):
         if step.done_result is not None:
             return self.record_successor(
                 node,
-                node.successor(ResultNode, result=step.done_result.strip()),
+                node.successor(
+                    ResultNode,
+                    result=step.done_result.strip(),
+                    children=list(node.children),
+                ),
             )
 
         if suspended:
@@ -411,7 +415,11 @@ class RLMFlow(LLMClient):
         if step.done_result is not None:
             return self.record_successor(
                 node,
-                node.successor(ResultNode, result=step.done_result.strip()),
+                node.successor(
+                    ResultNode,
+                    result=step.done_result.strip(),
+                    children=list(node.children),
+                ),
             )
 
         if suspended:
@@ -591,7 +599,10 @@ class RLMFlow(LLMClient):
         client: LLMClient | None = None,
     ) -> str:
         del node
-        return "".join((client or self.llm_client).stream(messages))
+        active_client = client or self.llm_client
+        result = "".join(active_client.stream(messages))
+        self.last_usage = active_client.last_usage
+        return result
 
     def extract_code(self, text: str) -> str | None:
         blocks = find_code_blocks(text)

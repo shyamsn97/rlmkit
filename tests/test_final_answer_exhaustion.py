@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from rlmflow import QueryNode, ResultNode, RLMConfig, RLMFlow, SupervisingNode
 from rlmflow.llm import LLMClient, LLMUsage
 from rlmflow.prompts.messages import FINAL_ANSWER_ACTION
-from rlmflow.rlm import RLM, RLMConfig
 from rlmflow.runtime.local import LocalRuntime
 
 
@@ -15,52 +15,44 @@ class StallingThenFinalLLM(LLMClient):
     def chat(self, messages, *args, **kwargs):
         self.calls += 1
         self.last_messages = list(messages)
-        if any("full iteration budget" in m.get("content", "") for m in messages):
+        if any("full iteration budget" in message.get("content", "") for message in messages):
             return '```repl\ndone("final answer")\n```'
         return "```repl\nx = 1\n```"
 
 
-def run_to_completion(agent: RLM):
-    state = agent.start("answer the question")
-    states = [state]
-    while not state.finished:
-        state = agent.step(state)
-        states.append(state)
-    return state, states
+def run_to_completion(agent: RLMFlow):
+    node = agent.start("answer the question")
+    states = [node]
+    while not node.finished:
+        node = agent.step(node)
+        states.append(node)
+    return node, states
 
 
 def test_exhaustion_marks_terminate_requested_and_runs_one_more_repl_turn():
     llm = StallingThenFinalLLM()
-    agent = RLM(
+    agent = RLMFlow(
         llm_client=llm,
         runtime=LocalRuntime(),
         config=RLMConfig(max_iterations=1, max_depth=0),
     )
 
-    state, states = run_to_completion(agent)
+    node, _states = run_to_completion(agent)
 
-    assert state.result == "final answer"
+    assert isinstance(node, ResultNode)
+    assert node.result == "final answer"
+    assert node.terminate_requested
     assert llm.calls == 2
-    assert state.terminate_requested
-    # Final-action prompt is transient — never stored in node.messages.
-    assert not any(
-        m.get("content") == FINAL_ANSWER_ACTION for m in state.messages
-    )
-    # …but it WAS injected into the last LLM input.
     assert any(
-        "full iteration budget" in m.get("content", "")
-        for m in llm.last_messages
-        if m.get("role") == "user"
+        message.get("content") == FINAL_ANSWER_ACTION
+        for message in llm.last_messages
+        if message.get("role") == "user"
     )
-    # The exhausted READY node was marked terminate_requested and got a
-    # one-iteration bump so the next READY turn can run.
-    assert states[-2].terminate_requested
-    assert states[-2].config["max_iterations"] == 2
 
 
 def test_final_message_is_last_user_instruction_on_recovery_turn():
     llm = StallingThenFinalLLM()
-    agent = RLM(
+    agent = RLMFlow(
         llm_client=llm,
         runtime=LocalRuntime(),
         config=RLMConfig(max_iterations=1, max_depth=0),
@@ -68,69 +60,51 @@ def test_final_message_is_last_user_instruction_on_recovery_turn():
 
     run_to_completion(agent)
 
-    user_messages = [m["content"] for m in llm.last_messages if m.get("role") == "user"]
-    assert "full iteration budget" in user_messages[-1]
-    assert "Continue working on:" not in user_messages[-1]
+    user_messages = [
+        message["content"] for message in llm.last_messages if message.get("role") == "user"
+    ]
+    assert user_messages[-1] == FINAL_ANSWER_ACTION
 
 
-def test_explicit_terminate_on_ready_node_drives_one_final_turn():
+def test_explicit_terminate_on_query_node_drives_one_final_turn():
     llm = StallingThenFinalLLM()
-    agent = RLM(
+    agent = RLMFlow(
         llm_client=llm,
         runtime=LocalRuntime(),
         config=RLMConfig(max_iterations=10, max_depth=0),
     )
 
-    state = agent.start("answer the question")
-    state = agent.terminate(state)
+    node = agent.terminate(agent.start("answer the question"))
 
-    assert state.terminate_requested
-    assert llm.calls == 0  # terminate is pure state edit
+    assert node.terminate_requested
+    assert llm.calls == 0
 
-    while not state.finished:
-        state = agent.step(state)
+    while not node.finished:
+        node = agent.step(node)
 
-    assert state.result == "final answer"
-    assert state.terminate_requested
-    assert llm.calls == 1  # exactly one extra turn
-    assert any(
-        "full iteration budget" in m.get("content", "")
-        for m in llm.last_messages
-        if m.get("role") == "user"
-    )
+    assert node.result == "final answer"
+    assert node.terminate_requested
+    assert llm.calls == 1
 
 
 def test_terminate_is_recursive_over_unfinished_children():
-    llm = StallingThenFinalLLM()
-    agent = RLM(
-        llm_client=llm,
+    agent = RLMFlow(
+        llm_client=StallingThenFinalLLM(),
         runtime=LocalRuntime(),
         config=RLMConfig(max_iterations=10, max_depth=2),
     )
-
-    # Hand-built tree: root SUPERVISING with two children, one finished.
-    from rlmflow.node import RLMNode, Status
-
-    finished_child = RLMNode(
-        agent_id="root.search_0",
-        status=Status.FINISHED,
-        result="early result",
-    )
-    pending_child = RLMNode(
-        agent_id="root.search_1",
-        status=Status.READY,
-    )
-    root = RLMNode(
+    finished_child = ResultNode(agent_id="root.search_0", depth=1, result="early result")
+    pending_child = QueryNode(agent_id="root.search_1", depth=1)
+    root = SupervisingNode(
         agent_id="root",
-        status=Status.SUPERVISING,
-        children=[finished_child, pending_child],
         waiting_on=["root.search_0", "root.search_1"],
+        children=[finished_child, pending_child],
     )
 
     out = agent.terminate(root)
 
     assert out.terminate_requested
-    assert out.children[0].status == Status.FINISHED  # untouched
     assert not out.children[0].terminate_requested
-    assert out.children[1].terminate_requested  # propagated
-    assert out.children[1].status == Status.READY  # status preserved
+    assert out.children[1].terminate_requested
+    assert isinstance(out.children[0], ResultNode)
+    assert isinstance(out.children[1], QueryNode)

@@ -1,30 +1,13 @@
-"""Release-contract tests: chat smoke, budget, token propagation, checkpoint round-trip.
-
-These exercise the pieces users interact with most directly:
-- `RLM.chat(messages)` — the drop-in-LLM surface
-- `RLMConfig.max_budget` — the budget cap
-- `state.tree_usage()` — token propagation across the tree
-- `RLMNode.model_dump_json` / `model_validate_json` — checkpoint round-trip
-"""
+"""Release-contract tests for the current RLMFlow public surface."""
 
 from __future__ import annotations
 
-from rlmflow import (
-    RLM,
-    LLMClient,
-    LLMUsage,
-    RLMConfig,
-    RLMNode,
-    Status,
-)
+from rlmflow import LLMClient, LLMUsage, RLMConfig, RLMFlow, ResultNode, SupervisingNode
+from rlmflow.node import ActionNode, QueryNode, parse_node_json
 from rlmflow.runtime.local import LocalRuntime
-
-# ── Scripted LLMs ────────────────────────────────────────────────────
 
 
 class DoneLLM(LLMClient):
-    """Emits a single ```repl``` block that calls done(text). One-shot."""
-
     def __init__(self, text: str = "hello", input_tokens: int = 10, output_tokens: int = 5):
         self.text = text
         self.input_tokens = input_tokens
@@ -41,12 +24,6 @@ class DoneLLM(LLMClient):
 
 
 class DelegatingLLM(LLMClient):
-    """Root delegates to one child, then returns the child's result.
-
-    Children call done() directly. Used to verify token propagation across
-    a parent/child boundary.
-    """
-
     ROOT_REPLY = '''```repl
 h = delegate("child", "do the thing")
 results = yield wait(h)
@@ -68,16 +45,13 @@ done("child-answer")
             input_tokens=self.input_tokens,
             output_tokens=self.output_tokens,
         )
-        # Simple heuristic: if the latest user/system prompt mentions "delegate" in the query, act as root
-        for m in messages:
-            if m.get("role") == "user" and "do the thing" in (m.get("content") or ""):
+        for message in messages:
+            if "do the thing" in (message.get("content") or ""):
                 return self.CHILD_REPLY
         return self.ROOT_REPLY
 
 
 class BudgetBusterLLM(LLMClient):
-    """Every call burns a lot of tokens but never calls done(). Used for budget tests."""
-
     def __init__(self, input_tokens: int = 100, output_tokens: int = 100):
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
@@ -92,17 +66,18 @@ class BudgetBusterLLM(LLMClient):
         return '```repl\nprint("still going")\n```'
 
 
-# ── Tests ────────────────────────────────────────────────────────────
+def _run(agent: RLMFlow, node):
+    while not node.finished:
+        node = agent.step(node)
+    return node
 
 
 def test_chat_smoke_returns_string_and_sets_last_usage():
-    """RLM.chat() must return a string and populate last_usage."""
     llm = DoneLLM(text="hi there", input_tokens=12, output_tokens=4)
-    agent = RLM(llm_client=llm, runtime=LocalRuntime())
+    agent = RLMFlow(llm_client=llm, runtime=LocalRuntime())
 
     result = agent.chat([{"role": "user", "content": "say hi"}])
 
-    assert isinstance(result, str)
     assert result == "hi there"
     assert agent.last_usage is not None
     assert agent.last_usage.input_tokens == 12
@@ -110,9 +85,8 @@ def test_chat_smoke_returns_string_and_sets_last_usage():
 
 
 def test_max_budget_stops_the_loop():
-    """When tree_usage exceeds max_budget, the agent finishes with a budget message."""
     llm = BudgetBusterLLM(input_tokens=50, output_tokens=50)
-    agent = RLM(
+    agent = RLMFlow(
         llm_client=llm,
         runtime=LocalRuntime(),
         config=RLMConfig(max_budget=150, max_iterations=100),
@@ -121,105 +95,81 @@ def test_max_budget_stops_the_loop():
     result = agent.run("loop forever")
 
     assert "budget exceeded" in result
-    # At most 2 LLM calls (after the 2nd, tree_usage = 200 >= 150 → finish on next loop entry).
     assert llm.calls <= 3
 
 
 def test_token_propagation_parent_sees_child_tokens():
-    """A parent's tree_usage() should sum its own tokens plus all descendants."""
-    llm = DelegatingLLM(input_tokens=10, output_tokens=5)
-    agent = RLM(
-        llm_client=llm,
+    agent = RLMFlow(
+        llm_client=DelegatingLLM(input_tokens=10, output_tokens=5),
         runtime=LocalRuntime(),
         config=RLMConfig(max_depth=2),
     )
 
-    state = agent.start("root task")
-    steps = 0
-    while not state.finished:
-        state = agent.step(state)
-        steps += 1
-        assert steps < 100, "agent failed to finish"
+    node = agent.step(agent.start("root task"))
+    assert isinstance(node, SupervisingNode)
+    node = agent.step(node)
+    final = agent.step(node)
 
-    # Root burned some tokens; child burned some tokens; tree_usage is the sum.
-    assert len(state.children) >= 1
-    child = state.children[0]
-    assert child.total_input_tokens > 0
-    assert child.total_output_tokens > 0
-
-    tree_in, tree_out = state.tree_usage()
-    root_in = state.total_input_tokens
-    root_out = state.total_output_tokens
+    assert isinstance(final, ResultNode)
+    assert len(final.children) == 1
+    child = final.children[0]
+    tree_in, tree_out = final.tree_usage()
     child_in, child_out = child.tree_usage()
 
-    assert tree_in == root_in + child_in
-    assert tree_out == root_out + child_out
-    assert tree_in > root_in  # child contributed
+    assert tree_in == final.total_input_tokens + child_in
+    assert tree_out == final.total_output_tokens + child_out
+    assert child_in > 0
+    assert child_out > 0
 
 
 def test_checkpoint_round_trip_preserves_tree():
-    """state.model_dump_json → RLMNode.model_validate_json round-trips cleanly."""
-    llm = DelegatingLLM()
-    agent = RLM(
-        llm_client=llm,
+    agent = RLMFlow(
+        llm_client=DelegatingLLM(),
         runtime=LocalRuntime(),
         config=RLMConfig(max_depth=2),
     )
 
-    state = agent.start("checkpoint me")
-    while not state.finished:
-        state = agent.step(state)
+    final = _run(agent, agent.start("checkpoint me"))
+    restored = parse_node_json(final.model_dump_json())
 
-    serialized = state.model_dump_json()
-    restored = RLMNode.model_validate_json(serialized)
-
-    assert restored.agent_id == state.agent_id
-    assert restored.query == state.query
-    assert restored.status == state.status == Status.FINISHED
-    assert restored.result == state.result
-    assert restored.total_input_tokens == state.total_input_tokens
-    assert restored.total_output_tokens == state.total_output_tokens
-    assert len(restored.children) == len(state.children)
-    assert restored.tree_usage() == state.tree_usage()
-    assert restored.messages == state.messages
+    assert isinstance(restored, ResultNode)
+    assert restored.result == final.result
+    assert len(restored.children) == len(final.children)
+    assert restored.tree_usage() == final.tree_usage()
+    assert restored.tree(color=False) == final.tree(color=False)
 
 
-def test_node_helpers_return_recursive_subtrees_and_edit_immutably():
-    """Every child is an RLMNode, and subtree edits return a new tree."""
-    leaf = RLMNode(agent_id="root.plan.search", status=Status.FINISHED, result="old")
-    plan = RLMNode(
-        agent_id="root.plan",
-        children=[leaf],
-        waiting_on=["root.plan.search"],
-    )
-    verify = RLMNode(agent_id="root.verify")
-    root = RLMNode(
-        agent_id="root",
-        children=[plan, verify],
-        waiting_on=["root.plan", "root.verify"],
-    )
+def test_node_helpers_walk_find_replace_and_edit_immutably():
+    leaf = QueryNode(agent_id="root.plan.search", content="old")
+    plan = QueryNode(agent_id="root.plan", children=[leaf])
+    verify = QueryNode(agent_id="root.verify")
+    root = QueryNode(agent_id="root", children=[plan, verify])
 
-    assert root.require("root.plan.search") is leaf
-    assert root.child_ids() == ["root.plan", "root.verify"]
+    assert root.find("root.plan.search") is leaf
     assert [node.agent_id for node in root.walk()] == [
         "root",
         "root.plan",
         "root.plan.search",
         "root.verify",
     ]
-    assert [node.agent_id for node in root.wait_targets()] == [
-        "root.plan",
-        "root.verify",
-    ]
 
-    better_leaf = leaf.update(result="better")
-    edited = root.replace("root.plan.search", better_leaf)
+    better_leaf = leaf.update(content="better")
+    edited = root.replace_many({leaf.id: better_leaf})
 
-    assert root.require("root.plan.search").result == "old"
-    assert edited.require("root.plan.search").result == "better"
-    assert edited.require("root.plan").wait_targets()[0].result == "better"
+    assert root.find("root.plan.search").content == "old"
+    assert edited.find("root.plan.search").content == "better"
 
-    pruned = edited.remove("root.plan")
 
-    assert pruned.child_ids() == ["root.verify"]
-    assert pruned.waiting_on == ["root.verify"]
+def test_tree_displays_action_model_label():
+    child = ActionNode(
+        agent_id="root.fast_worker",
+        config={"model": "fast"},
+        model="gpt-5-mini",
+        code="done('ok')",
+    )
+    root = QueryNode(config={"model": "default"}, children=[child])
+
+    tree = root.tree()
+
+    assert "root [query] {default}" in tree
+    assert "root.fast_worker [action] {fast:gpt-5-mini}" in tree
