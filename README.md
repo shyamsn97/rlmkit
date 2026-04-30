@@ -8,9 +8,7 @@
 A Python library for [Recursive Language Models](https://arxiv.org/abs/2512.24601) —
 a typed graph for every recursive run.
 
-Recursive agents get messy fast: parents spawn children, children spawn
-children, branches wait, fail, and resume later with partial results. A
-flat chat log hides that structure.
+Recursive Language Models are powerful systems -- capable of handling long-context tasks by spawning sub-agents with their own fresh context windows. However. RLMs get messy fast: parents spawn children, children spawn more children, which also can run for multiple steps, etc.
 
 **rlmflow** turns the run into an explicit graph. Every query, action,
 observation, child call, wait, resume, and result is a typed, immutable
@@ -20,23 +18,36 @@ node you can step, inspect, fork, and replay.
   <img src="docs/rlm_animation.gif" alt="rlmflow animation" />
 </p>
 
-## Why a graph
+## RLMs are Graphs
 
-Most RLM tools leave you with a chat log. rlmflow gives you the recursive
-tree itself, so deep runs stay readable:
+An RLM run is a tree of agents. A parent agent delegates subtasks to
+children, those children can delegate to their own children, and waits
+and resumes connect their results back up. rlmflow represents that tree
+directly: every step inside an agent is a typed node, and every
+delegation is an edge between agents.
 
-- **Typed nodes, not messages.** Query, Action, Observation, Supervising,
-  Resume, Result — the graph is the source of truth; messages are derived.
-- **Deep recursion stays readable.** Child calls, waits, resumes,
-  failures, and final results are explicit graph structure.
-- **`step(node) → node'`.** Pure function, frozen Pydantic snapshot.
-  Checkpoint, time-travel, or wrap as a Gym `step()` for free.
-- **Fork at any node.** The prefix replays from cached LLM replies and
-  cached tool outputs. Only the divergent tail goes live. Best-of-N,
-  counterfactuals, and self-repair are one primitive.
+For example, this RLM code:
 
-See [`docs/internal/what_makes_rlmflow_special.md`](docs/internal/what_makes_rlmflow_special.md)
-for the full positioning brief.
+```python
+h1 = delegate("search", "Find evidence", context=chunk_a)
+h2 = delegate("verify", "Check the answer", context=chunk_b)
+results = yield wait(h1, h2)
+done(combine(results))
+```
+
+becomes this execution graph:
+
+```text
+Query(root)
+  -> Action(root: delegate search + verify)
+  -> Supervising(root: waiting on search, verify)
+      -> Query(root.search)
+      -> Result(root.search)
+      -> Query(root.verify)
+      -> Result(root.verify)
+  -> Resume(root: search + verify results)
+  -> Result(root)
+```
 
 ## Install
 
@@ -56,6 +67,8 @@ pip install -e .
 ```
 
 ## Quick start
+
+This example is all you need for a simple and interpretable recursive coding agent.
 
 ```python
 from rlmflow import OpenAIClient, RLMConfig, RLMFlow, Workspace
@@ -93,11 +106,9 @@ save_trace(states, "traces/run1")
 open_viewer(states)
 ```
 
-## RLMFlow as a Graph Engine
+## Drop-in `LLMClient`
 
 `RLMFlow` implements `LLMClient`, so it is a drop-in replacement for any LLM.
-Call `chat(messages)` or `run(query)` and it runs a recursive agent loop
-underneath:
 
 ```python
 def ask(llm: LLMClient, q: str) -> str:
@@ -109,48 +120,67 @@ ask(RLMFlow(llm_client=..., runtime=...), "2+2?")    # full agent, same return t
 
 Nest agents by passing one `RLMFlow` as another's `llm_client`.
 
-The runtime model stays small:
+## Step and inspect
 
-- `RLMFlow` is the lightweight interpreter that advances nodes.
-- `Node` objects are the source of truth for what happened.
-- `Workspace.session` stores node/message history under `session/`.
-- `Workspace.context` stores task payloads exposed in the REPL as `CONTEXT`.
-- `Runtime` owns live REPL execution state.
-
-Each transition returns a new immutable node. A live tree might look like:
-
-```
-root [supervising] {default}
-├── root.scanner_auth [result] {fast:gpt-5-mini} -> Found SQL injection in login.py
-├── root.scanner_api [supervising] {default}
-│   ├── root.scanner_api.chunk_0 [result] {fast:gpt-5-mini} -> Clean
-│   └── root.scanner_api.chunk_1 [result] {fast:gpt-5-mini} -> Payment flow is safe
-└── root.scanner_db [result] {fast:gpt-5-mini} -> No issues found
-```
-
-Each `step(node) -> node'` is one atomic graph transition:
-
-```
-ObservationNode -> LLM -> ActionNode -> Runtime -> ObservationNode
-                                      -> done() -> ResultNode
-                                      -> wait() -> SupervisingNode
-SupervisingNode -> step child leaves -> ResumeNode -> LLM -> ...
-```
-
-- `ObservationNode`: input to the next LLM call: query, REPL output, resume,
-  error, or terminal result.
-- `ActionNode`: raw LLM reply plus extracted REPL code.
-- `SupervisingNode`: suspended action waiting on child agents.
-- `ResultNode`: terminal answer from `done(result)`.
-
-Delegation:
+`step(node) -> node'` is one atomic graph transition. Every step returns a
+new immutable `Node`, so the live tree is just `state.tree()`:
 
 ```python
-h1 = delegate("searcher", "Find all TODOs in src/")
-h2 = delegate("searcher", "Find all FIXMEs in src/")   # auto-suffixed
-results = yield wait(h1, h2)
-done(f"Found {len(results)} batches")
+state = agent.start(query)
+while not state.finished:
+    state = agent.step(state)
+print(state.tree())
 ```
+
+```text
+root [supervising] {default}
+├── root.scanner_auth [result] {fast} -> Found SQL injection in login.py
+├── root.scanner_api  [supervising] {default}
+│   ├── root.scanner_api.chunk_0 [result] {fast} -> Clean
+│   └── root.scanner_api.chunk_1 [result] {fast} -> Payment flow is safe
+└── root.scanner_db   [result] {fast} -> No issues found
+```
+
+Every transition follows the same shape:
+
+```text
+Observation -> LLM -> Action -> Runtime -> Observation     (REPL output)
+                              -> done()  -> Result          (terminal answer)
+                              -> wait()  -> Supervising     (waiting on children)
+Supervising -> children done -> Resume   -> LLM  -> ...
+```
+
+`Observation`, `Action`, `Supervising`, `Resume`, and `Result` are all
+typed Pydantic nodes. `state.tree()`, `state.find(agent_id)`, and
+`state.model_dump_json()` are just attribute access on the graph.
+
+## Checkpoint, branch, replay
+
+Every node is a frozen Pydantic snapshot, so the whole run is data:
+
+```python
+from rlmflow import Node
+
+state.save(workspace.checkpoint_path)
+
+# resume later, in another process, with a different model
+state = Node.load(workspace.checkpoint_path)
+agent = RLMFlow(llm_client=AnotherModel(), workspace=workspace, ...)
+while not state.finished:
+    state = agent.step(state)
+```
+
+To branch into an isolated workspace with its own session, context, and
+working tree:
+
+```python
+alt = workspace.fork(new_branch_id="repair", new_dir="./runs/repair")
+alt_agent = RLMFlow(llm_client=..., workspace=alt, ...)
+```
+
+Or intervene mid-run by replacing a child node before the parent resumes —
+see [`examples/showcase.py`](examples/showcase.py) for checkpointing,
+time travel, manual intervention, and gym-style stepping in one file.
 
 ## Examples
 
@@ -179,9 +209,6 @@ rlmflow version
 Formats: `mermaid`, `dot`, `tree`, `gantt-html`.
 
 ## Docs
-
-- [RLMs Are Graphs](docs/internal/rlms_are_graphs.md): the design thesis:
-  typed execution graphs, flow interpreter, session/context/runtime split.
 - [Positioning](docs/positioning.md): why rlmflow treats RLMs as graphs.
 - [Observability](docs/observability.md): nodes, session/context, traces,
   visualizations, and the viewer.
