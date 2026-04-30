@@ -1,29 +1,20 @@
-"""Tests for DockerRuntime.
+"""Unit tests for ``DockerRuntime`` argv construction and clone semantics.
 
-Unit tests cover argv construction and clone semantics and run everywhere.
-The end-to-end test spawns an actual container and is skipped unless
-``docker`` is on PATH and ``RLMKIT_DOCKER_TEST=1`` is set.
+These run everywhere — they don't shell out to ``docker``. The
+end-to-end tests live in ``tests/integration/test_docker_runtime.py``
+and are gated on ``RLMKIT_DOCKER_TEST=1`` with a working daemon.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-
-import pytest
-
-from rlmkit.runtime.docker import DockerRuntime
-from rlmkit.state import ChildHandle, WaitRequest
-
-
-# ── unit tests (no docker required) ───────────────────────────────────
+from rlmflow.runtime.docker import DockerRuntime
+from rlmflow.workspace import Workspace
 
 
 def test_argv_defaults_to_python_repl_entrypoint():
     rt = DockerRuntime("python:3.12-slim")
     assert rt.argv[:4] == ["docker", "run", "-i", "--rm"]
-    assert rt.argv[-4:] == ["python:3.12-slim", "python", "-m", "rlmkit.runtime.repl"]
+    assert rt.argv[-4:] == ["python:3.12-slim", "python", "-m", "rlmflow.runtime.repl"]
 
 
 def test_argv_includes_mounts_env_network_limits(tmp_path):
@@ -56,10 +47,10 @@ def test_custom_docker_bin_and_entrypoint():
     rt = DockerRuntime(
         "myimage",
         docker_bin="podman",
-        entrypoint_argv=["/opt/venv/bin/python", "-m", "rlmkit.runtime.repl"],
+        entrypoint_argv=["/opt/venv/bin/python", "-m", "rlmflow.runtime.repl"],
     )
     assert rt.argv[0] == "podman"
-    assert rt.argv[-3:] == ["/opt/venv/bin/python", "-m", "rlmkit.runtime.repl"]
+    assert rt.argv[-3:] == ["/opt/venv/bin/python", "-m", "rlmflow.runtime.repl"]
 
 
 def test_extra_args_are_spliced_before_image():
@@ -84,59 +75,14 @@ def test_clone_preserves_config():
     assert twin.options == rt.options
 
 
-# ── end-to-end (requires docker) ──────────────────────────────────────
+def test_workspace_mount_is_writable_workdir(tmp_path):
+    workspace = Workspace.create(tmp_path / "workspace")
+    rt = DockerRuntime("myimage", workspace=workspace)
 
+    assert "-v" in rt.argv
+    assert f"{workspace.root}:/workspace" in rt.argv
+    assert "--workdir" in rt.argv
+    assert rt.argv[rt.argv.index("--workdir") + 1] == "/workspace"
 
-def _docker_available() -> bool:
-    if shutil.which("docker") is None:
-        return False
-    try:
-        r = subprocess.run(
-            ["docker", "info"], capture_output=True, timeout=5, check=False
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-pytestmark_e2e = pytest.mark.skipif(
-    os.environ.get("RLMKIT_DOCKER_TEST") != "1" or not _docker_available(),
-    reason="set RLMKIT_DOCKER_TEST=1 with a working docker daemon to run",
-)
-
-
-@pytestmark_e2e
-def test_docker_end_to_end_delegate_wait():
-    """Spawn a real container; exercise execute, inject, and generator suspension.
-
-    Uses an image that has rlmkit installed.  Override with
-    ``RLMKIT_DOCKER_TEST_IMAGE``; defaults to ``rlmkit-test:latest``.
-    """
-    image = os.environ.get("RLMKIT_DOCKER_TEST_IMAGE", "rlmkit-test:latest")
-    rt = DockerRuntime(image, network="none")
-    try:
-        assert rt.execute("print('hi from container')") == "hi from container"
-
-        def delegate(prompt: str) -> ChildHandle:
-            return ChildHandle(agent_id=f"child-{prompt}")
-
-        def wait(handles):
-            return WaitRequest(agent_ids=[h.agent_id for h in handles])
-
-        rt.inject("delegate", delegate)
-        rt.inject("wait", wait)
-
-        suspended, payload = rt.start_code(
-            "h = delegate('q1')\n"
-            "results = yield wait([h])\n"
-            "print('after:', results)\n"
-        )
-        assert suspended is True
-        request, _ = payload
-        assert request.agent_ids == ["child-q1"]
-
-        suspended, out = rt.resume_code({"child-q1": "answer"})
-        assert suspended is False
-        assert "after: {'child-q1': 'answer'}" in out
-    finally:
-        rt.terminate()
+    child = rt.clone()
+    assert child.argv == rt.argv

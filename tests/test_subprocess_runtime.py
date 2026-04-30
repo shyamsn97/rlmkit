@@ -1,6 +1,6 @@
 """End-to-end tests for SubprocessRuntime.
 
-Spawns a real ``python -m rlmkit.runtime.repl`` subprocess and exercises
+Spawns a real ``python -m rlmflow.runtime.repl`` subprocess and exercises
 the full JSON-over-stdio protocol: execute, inject (value + proxy), and
 generator-based suspension with proxied tool calls during yield/resume.
 """
@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from rlmkit.runtime.subprocess import SubprocessRuntime
-from rlmkit.state import ChildHandle, WaitRequest
+from rlmflow.runtime.subprocess import SubprocessRuntime
+from rlmflow.node import ChildHandle, WaitRequest
 
 
 def _argv() -> list[str]:
-    return [sys.executable, "-m", "rlmkit.runtime.repl"]
+    return [sys.executable, "-m", "rlmflow.runtime.repl"]
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def runtime():
     try:
         yield rt
     finally:
-        rt.terminate()
+        rt.close()
 
 
 def test_execute_returns_stdout(runtime):
@@ -179,7 +179,24 @@ def test_proxied_tool_sees_workspace_as_cwd(tmp_path, monkeypatch):
         # Caller's CWD is restored after each proxy invocation.
         assert Path(os.getcwd()) == caller_cwd
     finally:
-        rt.terminate()
+        rt.close()
+
+
+def test_repl_code_sees_workspace_as_cwd(tmp_path, monkeypatch):
+    """Relative writes in agent code should land in the runtime workspace."""
+    workspace = tmp_path / "ws"
+    caller_cwd = tmp_path / "caller"
+    caller_cwd.mkdir()
+    monkeypatch.chdir(caller_cwd)
+
+    rt = SubprocessRuntime(_argv(), workspace=workspace)
+    try:
+        rt.execute("from pathlib import Path\nPath('style.css').write_text('body{}')")
+
+        assert (workspace / "style.css").read_text() == "body{}"
+        assert not (caller_cwd / "style.css").exists()
+    finally:
+        rt.close()
 
 
 def test_annotated_assignment_inside_yielding_block(runtime):
@@ -223,4 +240,4 @@ def test_clone_is_independent_process(runtime):
         assert runtime.execute("print(x)") == "1"
         assert twin.execute("print(x)") == "99"
     finally:
-        twin.terminate()
+        twin.close()

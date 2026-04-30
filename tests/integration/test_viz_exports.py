@@ -11,17 +11,17 @@ Checks:
 
 from __future__ import annotations
 
-from rlmkit import (
+from rlmflow import (
     RLM,
     LLMClient,
     LLMUsage,
     RLMConfig,
-    RLMState,
+    RLMNode,
     Status,
 )
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.utils.export import to_dot, to_mermaid
-from rlmkit.utils.viz import gantt_html, gantt_matrix
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.utils.export import to_dot, to_mermaid
+from rlmflow.utils.viz import gantt_html, gantt_matrix
 
 
 class DelegatingLLM(LLMClient):
@@ -42,7 +42,7 @@ class DelegatingLLM(LLMClient):
         return self.ROOT
 
 
-def _run(agent: RLM, query: str) -> list[RLMState]:
+def _run(agent: RLM, query: str) -> list[RLMNode]:
     state = agent.start(query)
     states = [state]
     while not state.finished:
@@ -85,7 +85,7 @@ def test_dot_export_has_edges_and_status_labels():
     states = _run(_agent(), "dot-test")
     dot = to_dot(states[-1])
 
-    assert dot.startswith("digraph rlmkit {")
+    assert dot.startswith("digraph rlmflow {")
     assert dot.rstrip().endswith("}")
     assert "root -> root_child [label=\"delegate\"];" in dot
     assert "finished" in dot

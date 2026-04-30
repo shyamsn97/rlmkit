@@ -17,7 +17,7 @@ isolated runtime:
 
 ```python
 DockerRuntime(
-    image="rlmkit:local",
+    image="rlmflow:local",
     network="none",           # no outbound traffic
     cpus=1.0,                 # CPU quota
     memory="512m",            # OOM cap
@@ -42,7 +42,7 @@ Independent of the runtime:
 - `max_iterations` — LLM calls per agent.
 - `max_budget` — total tokens across the subtree.
 - `max_output_length` — truncate oversized stdout.
-- `max_concurrency` — parallel children.
+- `max_concurrency` — opt into threaded parallel children when set.
 
 ## Proxied tools
 

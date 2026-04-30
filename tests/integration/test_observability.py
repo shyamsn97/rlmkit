@@ -1,8 +1,8 @@
 """Integration test: a parent-plus-child run exposes every observability hook.
 
 Checks that after a run we can read:
-- ``state.tree()`` containing every agent in the tree
-- ``state.tree_usage()`` summing child usage into the root
+- ``node.tree()`` containing every agent in the tree
+- ``node.tree_usage()`` summing child usage into the root
 - a typed ``StepEvent`` on every step (LLMReply | CodeExec | ResumeExec | NoCodeBlock)
 - ``save_trace`` → ``load_trace`` round-trip preserving the tree shape
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rlmkit import (
+from rlmflow import (
     RLM,
     CodeExec,
     LLMClient,
@@ -21,11 +21,11 @@ from rlmkit import (
     NoCodeBlock,
     ResumeExec,
     RLMConfig,
-    RLMState,
+    RLMNode,
     StepEvent,
 )
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.utils.trace import Trace, load_trace, save_trace
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.utils.trace import Trace, load_trace, save_trace
 
 
 class DelegatingLLM(LLMClient):
@@ -52,7 +52,7 @@ class DelegatingLLM(LLMClient):
         return self.ROOT
 
 
-def _run_to_completion(agent: RLM, query: str) -> list[RLMState]:
+def _run_to_completion(agent: RLM, query: str) -> list[RLMNode]:
     state = agent.start(query)
     states = [state]
     while not state.finished:
@@ -136,10 +136,10 @@ def test_trace_save_and_load_round_trip(tmp_path: Path):
     assert loaded.metadata == {"kind": "test"}
     assert len(loaded.states) == len(states)
 
-    # States are hydrated back into RLMState objects with typed events.
+    # States are hydrated back into RLMNode objects with typed events.
     first = loaded.states[0]
     last = loaded.states[-1]
-    assert isinstance(first, RLMState)
+    assert isinstance(first, RLMNode)
     assert first.agent_id == "root"
     assert first.query == "obs-trace"    # query survives on each state
     assert last.status.value == "finished"
@@ -148,7 +148,7 @@ def test_trace_save_and_load_round_trip(tmp_path: Path):
 
 
 def test_state_save_load_round_trip(tmp_path: Path):
-    """``state.save(path)`` / ``RLMState.load(path)`` round-trips cleanly."""
+    """``state.save(path)`` / ``RLMNode.load(path)`` round-trips cleanly."""
     agent = RLM(
         llm_client=DelegatingLLM(),
         runtime=LocalRuntime(),
@@ -158,7 +158,7 @@ def test_state_save_load_round_trip(tmp_path: Path):
 
     ckpt = tmp_path / "state.json"
     final.save(ckpt)
-    restored = RLMState.load(ckpt)
+    restored = RLMNode.load(ckpt)
 
     assert restored.tree(color=False) == final.tree(color=False)
     assert restored.tree_usage() == final.tree_usage()

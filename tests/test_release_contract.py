@@ -4,20 +4,20 @@ These exercise the pieces users interact with most directly:
 - `RLM.chat(messages)` — the drop-in-LLM surface
 - `RLMConfig.max_budget` — the budget cap
 - `state.tree_usage()` — token propagation across the tree
-- `RLMState.model_dump_json` / `model_validate_json` — checkpoint round-trip
+- `RLMNode.model_dump_json` / `model_validate_json` — checkpoint round-trip
 """
 
 from __future__ import annotations
 
-from rlmkit import (
+from rlmflow import (
     RLM,
     LLMClient,
     LLMUsage,
     RLMConfig,
-    RLMState,
+    RLMNode,
     Status,
 )
-from rlmkit.runtime.local import LocalRuntime
+from rlmflow.runtime.local import LocalRuntime
 
 # ── Scripted LLMs ────────────────────────────────────────────────────
 
@@ -68,8 +68,6 @@ done("child-answer")
             input_tokens=self.input_tokens,
             output_tokens=self.output_tokens,
         )
-        is_root = any("MAX_DEPTH" in (m.get("content") or "") and "DEPTH=0" in (m.get("content") or "")
-                      for m in messages)
         # Simple heuristic: if the latest user/system prompt mentions "delegate" in the query, act as root
         for m in messages:
             if m.get("role") == "user" and "do the thing" in (m.get("content") or ""):
@@ -160,7 +158,7 @@ def test_token_propagation_parent_sees_child_tokens():
 
 
 def test_checkpoint_round_trip_preserves_tree():
-    """state.model_dump_json → RLMState.model_validate_json round-trips cleanly."""
+    """state.model_dump_json → RLMNode.model_validate_json round-trips cleanly."""
     llm = DelegatingLLM()
     agent = RLM(
         llm_client=llm,
@@ -173,7 +171,7 @@ def test_checkpoint_round_trip_preserves_tree():
         state = agent.step(state)
 
     serialized = state.model_dump_json()
-    restored = RLMState.model_validate_json(serialized)
+    restored = RLMNode.model_validate_json(serialized)
 
     assert restored.agent_id == state.agent_id
     assert restored.query == state.query
@@ -184,3 +182,44 @@ def test_checkpoint_round_trip_preserves_tree():
     assert len(restored.children) == len(state.children)
     assert restored.tree_usage() == state.tree_usage()
     assert restored.messages == state.messages
+
+
+def test_node_helpers_return_recursive_subtrees_and_edit_immutably():
+    """Every child is an RLMNode, and subtree edits return a new tree."""
+    leaf = RLMNode(agent_id="root.plan.search", status=Status.FINISHED, result="old")
+    plan = RLMNode(
+        agent_id="root.plan",
+        children=[leaf],
+        waiting_on=["root.plan.search"],
+    )
+    verify = RLMNode(agent_id="root.verify")
+    root = RLMNode(
+        agent_id="root",
+        children=[plan, verify],
+        waiting_on=["root.plan", "root.verify"],
+    )
+
+    assert root.require("root.plan.search") is leaf
+    assert root.child_ids() == ["root.plan", "root.verify"]
+    assert [node.agent_id for node in root.walk()] == [
+        "root",
+        "root.plan",
+        "root.plan.search",
+        "root.verify",
+    ]
+    assert [node.agent_id for node in root.wait_targets()] == [
+        "root.plan",
+        "root.verify",
+    ]
+
+    better_leaf = leaf.update(result="better")
+    edited = root.replace("root.plan.search", better_leaf)
+
+    assert root.require("root.plan.search").result == "old"
+    assert edited.require("root.plan.search").result == "better"
+    assert edited.require("root.plan").wait_targets()[0].result == "better"
+
+    pruned = edited.remove("root.plan")
+
+    assert pruned.child_ids() == ["root.verify"]
+    assert pruned.waiting_on == ["root.verify"]

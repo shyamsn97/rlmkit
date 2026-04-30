@@ -7,10 +7,10 @@ deeper if possible, otherwise does work directly and calls done().
 
 from __future__ import annotations
 
-from rlmkit.llm import LLMClient
-from rlmkit.rlm import RLM, RLMConfig
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.state import CodeExec, LLMReply, ResumeExec, RLMState, Status
+from rlmflow.llm import LLMClient
+from rlmflow.rlm import RLM, RLMConfig
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.node import CodeExec, ResumeExec, Status
 
 UNIVERSAL_REPLY = '''```repl
 if int(DEPTH) < int(MAX_DEPTH):
@@ -489,25 +489,25 @@ done(r1 + "|" + r2)
     print(f"  result: {final.result}")
 
 
-def test_flatten_and_rebuild():
-    """flatten + rebuild round-trip preserves the tree structure."""
+def test_index_runtime_tree_and_rebuild_tree():
+    """index_runtime_tree + rebuild_tree round-trip preserves the structure."""
     llm = FakeLLM()
     agent = RLM(llm_client=llm, runtime=LocalRuntime(), config=RLMConfig(max_depth=1))
 
-    state = agent.start("test")
-    state = agent.step_llm(state)
-    state = agent.step_exec(state)
-    assert state.status == Status.SUPERVISING
+    node = agent.start("test")
+    node = agent.step_llm(node)
+    node = agent.step_exec(node)
+    assert node.status == Status.SUPERVISING
 
-    nodes, engines = {}, {}
-    agent.flatten(state, nodes, engines)
-    assert "root.child" in nodes
+    snapshots, engines = {}, {}
+    agent.index_runtime_tree(node, snapshots, engines)
+    assert "root.child" in snapshots
     assert "root.child" in engines
 
-    rebuilt = agent.rebuild(state, nodes)
-    assert rebuilt.children[0].agent_id == state.children[0].agent_id
-    assert rebuilt.children[0].status == state.children[0].status
-    print(f"  flatten found: {list(nodes.keys())}")
+    rebuilt = agent.rebuild_tree(node, snapshots)
+    assert rebuilt.children[0].agent_id == node.children[0].agent_id
+    assert rebuilt.children[0].status == node.children[0].status
+    print(f"  indexed: {list(snapshots.keys())}")
 
 
 def test_dynamic_child_creation():

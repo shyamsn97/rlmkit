@@ -1,90 +1,107 @@
 # Observability
 
-Everything you need to debug a run lives on `RLMState`.
+Everything you need to debug a run lives in the typed node graph.
 
-## State fields
+## Node Fields
 
 ```python
-state.agent_id            # "root", "root.search_0", ...
-state.status              # READY | EXECUTING | SUPERVISING | FINISHED
-state.iteration
-state.event               # last StepEvent
-state.messages            # full LLM history
-state.system_prompt       # resolved prompt for the last call
-state.last_reply
-state.result              # set when FINISHED
-state.children            # list[RLMState], recursive
-state.waiting_on          # agent_ids this node is blocked on
-state.total_input_tokens
-state.total_output_tokens
-state.total_tokens        # property — this agent only (in + out)
-state.tree_usage()        # (in, out) across the subtree
-state.tree_tokens         # property — subtree total (in + out)
-state.tree()              # ASCII tree render
+node.id
+node.type                 # query | action | observation | supervising | resume | result | error
+node.agent_id             # "root", "root.search_0", ...
+node.depth                # root = 0, children = 1, ...
+node.children             # successor ids or live child nodes
+node.query                # original task for this agent
+node.system_prompt        # prompt snapshot for this agent
+node.config               # node-local max_depth, max_iterations, model, ...
+node.workspace            # serializable WorkspaceRef
+node.runtime              # RuntimeRef for REPL continuity
+node.total_input_tokens
+node.total_output_tokens
+node.tree_usage()         # (in, out) across the subtree
+node.tree_tokens          # subtree total
+node.tree()               # ASCII tree render
 ```
 
-## Step events
+Action nodes additionally store `reply`, `code`, `model`, and turn token usage.
+Result nodes store `result`. Supervising nodes store `waiting_on` and child
+leaves.
 
-Each `step()` attaches one typed event:
+## Node Types
 
-| Event | Emitted when |
+Each `step()` returns a new node:
+
+| Node | Meaning |
 |---|---|
-| `LLMReply` | LLM returned. `text`, `code`, token counts. |
-| `CodeExec` | Code block ran. `code`, `output`, `suspended`. |
-| `ResumeExec` | Generator resumed after children finished. |
-| `NoCodeBlock` | Reply had no ` ```repl ``` ` block. |
+| `QueryNode` | First user/task input for an agent. |
+| `ActionNode` | Raw LLM reply plus extracted REPL code. |
+| `ObservationNode` | REPL output after code execution. |
+| `SupervisingNode` | Action suspended on `yield wait(...)`. |
+| `ResumeNode` | Parent resumed after children finished. |
+| `ErrorNode` | Failure observation. |
+| `ResultNode` | Terminal answer from `done(...)`. |
 
 ## Save & load
 
-A single state tree — checkpoint, fork, rehydrate later:
+A single node checkpoint — save, load, and continue later:
 
 ```python
-state.save("checkpoint.json")
-state = RLMState.load("checkpoint.json")
+node.save("checkpoint.json")
+node = Node.load("checkpoint.json")
 ```
 
 A full run — every step in order:
 
 ```python
-from rlmkit.utils.trace import save_trace, load_trace
+from rlmflow.utils.trace import save_trace, load_trace
 
 save_trace(states, "traces/run1")
 save_trace(states, "traces/run1", metadata={"model": "gpt-5"})
 
 t = load_trace("traces/run1")
-t.states          # list[RLMState] — typed events preserved
+t.states          # list[Node] — typed events preserved
 t.metadata
 ```
 
-Per-turn queries already live on each `state.query`, so multi-turn
-sessions accumulate into a single trace without losing any context.
 Traces are plain JSON — grep-able, diff-able.
 
-## Sessions
+## Session And Context
 
-Pass `session="context"` (or a `Session` instance) and the engine
-writes `state.messages` to disk after every step, using one directory
-per agent. Subclass `Session` to plug in a different backend.
+`Workspace` separates message history from task payloads:
 
-Traces persist **states**. Sessions persist **messages**.
+```text
+workspace/
+  session/
+    nodes.jsonl
+    agents/root.json
+    agents/root.child.json
+  context/
+    context.txt
+  trace/
+```
+
+`Workspace.session` persists the node/message graph. `Workspace.context`
+persists optional payload data exposed in the REPL as `CONTEXT`.
+
+Messages are derived from `Session.chain_to(node)`, not stored as a second
+source of truth.
 
 ## Live terminal
 
 ```python
-from rlmkit.utils.viz import live
-for state in live(agent, agent.start(query)):
+from rlmflow.utils.viz import live
+for node in live(agent, agent.start(query)):
     pass
 ```
 
-Or just `print(state.tree())` in a step loop.
+Or just `print(node.tree())` in a step loop.
 
 ## Gantt swimlane
 
-One row per agent, one column per step, colored by status. Makes
+One row per agent, one column per step, colored by node type. Makes
 parallelism and critical path obvious at a glance.
 
 ```python
-from rlmkit.utils.viz import gantt, gantt_html
+from rlmflow.utils.viz import gantt, gantt_html
 
 gantt(states)                            # print to terminal (Rich)
 Path("run.html").write_text(gantt_html(states, title="run 1"))
@@ -95,7 +112,7 @@ Path("run.html").write_text(gantt_html(states, title="run 1"))
 Static renders of the tree, for READMEs, issues, and post-mortems.
 
 ```python
-from rlmkit.utils.export import to_mermaid, to_dot
+from rlmflow.utils.export import to_mermaid, to_dot
 
 print(to_mermaid(states[-1]))            # stateDiagram-v2 — paste into GitHub
 Path("run.dot").write_text(to_dot(states[-1]))
@@ -105,14 +122,12 @@ Path("run.dot").write_text(to_dot(states[-1]))
 ## Viewer
 
 ```python
-from rlmkit.utils.viewer import view_trace, open_viewer
+from rlmflow.utils.viewer import open_viewer
 
-open_viewer(states, query=query)         # from an in-memory run
-view_trace("traces/run1")                # from disk
+open_viewer(states)                      # from an in-memory run
 ```
 
-Requires `rlmkit[viewer]`. Hit ▶ to auto-advance through the trace;
-the speed slider controls steps/sec.
+Requires `rlmflow[viewer]`.
 
 ## CLI
 
@@ -121,11 +136,11 @@ auto-detect trace directories, `trace.json` files, and single state
 checkpoints.
 
 ```
-rlmkit view   traces/run1/
-rlmkit view   workspace/checkpoint.json --port 7861
-rlmkit render traces/run1/   -f gantt-html -o run1.html
-rlmkit render checkpoint.json -f mermaid          # stdout
-rlmkit render checkpoint.json -f dot -o graph.dot
-rlmkit render checkpoint.json -f tree
-rlmkit version
+rlmflow view   traces/run1/
+rlmflow view   workspace/checkpoint.json --port 7861
+rlmflow render traces/run1/   -f gantt-html -o run1.html
+rlmflow render checkpoint.json -f mermaid          # stdout
+rlmflow render checkpoint.json -f dot -o graph.dot
+rlmflow render checkpoint.json -f tree
+rlmflow version
 ```

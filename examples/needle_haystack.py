@@ -8,7 +8,7 @@ Usage:
     python examples/needle_haystack.py
     python examples/needle_haystack.py --no-viz
     python examples/needle_haystack.py --viewer
-    python examples/needle_haystack.py --docker-image rlmkit:local
+    python examples/needle_haystack.py --docker-image rlmflow:local
 """
 
 from __future__ import annotations
@@ -19,20 +19,20 @@ import string
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import AnthropicClient, OpenAIClient
-from rlmkit.rlm import RLM, RLMConfig
-from rlmkit.runtime.docker import DockerRuntime
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.state import RLMState
-from rlmkit.tools import FILE_TOOLS
+from rlmflow.llm import AnthropicClient, OpenAIClient
+from rlmflow.node import Node
+from rlmflow.rlm import RLMConfig, RLMFlow
+from rlmflow.runtime.docker import DockerRuntime
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.tools import FILE_TOOLS
 
 
-class LoggingRLM(RLM):
-    def extract_code(self, text: str, state: RLMState | None = None) -> str | None:
-        code = super().extract_code(text, state)
-        if code is None or state is None:
+class LoggingRLMFlow(RLMFlow):
+    def extract_code(self, text: str) -> str | None:
+        code = super().extract_code(text)
+        if code is None:
             return code
-        header = f'print("[{state.agent_id} iter {state.iteration}] executing...")'
+        header = 'print("[rlmflow] executing repl block...")'
         return header + "\n" + code
 
 
@@ -70,7 +70,7 @@ def main():
     parser.add_argument("--model", default="claude-opus-4-6")
     parser.add_argument("--fast-model", default=None)
     parser.add_argument("--docker-image", default=None,
-                        help="If set, run agent code inside this Docker image (e.g. rlmkit:local).")
+                        help="If set, run agent code inside this Docker image (e.g. rlmflow:local).")
     parser.add_argument("--max-depth", type=int, default=3)
     parser.add_argument("--max-iterations", type=int, default=15)
     parser.add_argument("--no-viz", action="store_true")
@@ -115,14 +115,10 @@ def main():
                 "fast": {"model": fast, "description": "Cheaper model for small sub-tasks."},
             }
 
-        agent = LoggingRLM(
+        agent = LoggingRLMFlow(
             llm_client=llm,
             runtime=make_runtime(),
-            config=RLMConfig(
-                max_depth=args.max_depth,
-                max_iterations=args.max_iterations,
-                session="needle-haystack/context",
-            ),
+            config=RLMConfig(max_depth=args.max_depth, max_iterations=args.max_iterations),
             llm_clients=llm_clients,
             runtime_factory=make_runtime,
         )
@@ -136,13 +132,13 @@ def main():
         )
 
         if args.no_viz:
-            states: list[RLMState] = [state]
+            states: list[Node] = [state]
             while not state.finished:
                 state = agent.step(state)
                 states.append(state)
                 print(state.tree())
         else:
-            from rlmkit.utils.viz import live
+            from rlmflow.utils.viz import live
             states = live(agent, state)
             state = states[-1]
 
@@ -150,13 +146,13 @@ def main():
         print(f"Actual answer:  {answer}")
         print(f"Correct:        {answer in (state.result or '')}")
 
-        from rlmkit.utils.trace import save_trace
+        from rlmflow.utils.trace import save_trace
         trace_dir = Path("traces/needle_haystack")
         save_trace(states, trace_dir, metadata={"answer": answer})
         print(f"Trace saved to {trace_dir}/")
 
         if args.viewer:
-            from rlmkit.utils.viewer import open_viewer
+            from rlmflow.utils.viewer import open_viewer
             open_viewer(states)
 
 

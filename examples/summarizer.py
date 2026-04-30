@@ -1,7 +1,7 @@
 """Recursive summarization of a long document.
 
 Generates a large document (~10k lines of synthetic meeting notes),
-then uses an RLM to summarize it recursively: chunk the document,
+then uses an RLMFlow to summarize it recursively: chunk the document,
 delegate each chunk's summary to a sub-agent, then combine the
 partial summaries into a final one.
 
@@ -14,7 +14,7 @@ Usage:
     python examples/summarizer.py
     python examples/summarizer.py --lines 5000
     python examples/summarizer.py --no-viz
-    python examples/summarizer.py --docker-image rlmkit:local
+    python examples/summarizer.py --docker-image rlmflow:local
 """
 
 from __future__ import annotations
@@ -24,13 +24,13 @@ import random
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import AnthropicClient, OpenAIClient
-from rlmkit.prompts import make_default_builder
-from rlmkit.prompts.default import ROLE_TEXT
-from rlmkit.rlm import RLM, RLMConfig
-from rlmkit.runtime.docker import DockerRuntime
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.tools import FILE_TOOLS
+from rlmflow.llm import AnthropicClient, OpenAIClient
+from rlmflow.prompts import DEFAULT_BUILDER
+from rlmflow.prompts.default import ROLE_TEXT
+from rlmflow.rlm import RLMConfig, RLMFlow
+from rlmflow.runtime.docker import DockerRuntime
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.tools import FILE_TOOLS
 
 
 # ── Generate a long document ────────────────────────────────────────
@@ -137,8 +137,7 @@ When summarizing, follow these rules:
 
 def build_prompt_builder():
     return (
-        make_default_builder()
-        .section(
+        DEFAULT_BUILDER.section(
             "role",
             "You are a recursive document summarizer. You break large documents "
             "into chunks, summarize each chunk via sub-agents, and combine the "
@@ -162,7 +161,7 @@ def main():
     parser.add_argument("--model", default="claude-opus-4-6")
     parser.add_argument("--fast-model", default=None)
     parser.add_argument("--docker-image", default=None,
-                        help="If set, run agent code inside this Docker image (e.g. rlmkit:local).")
+                        help="If set, run agent code inside this Docker image (e.g. rlmflow:local).")
     parser.add_argument("--max-depth", type=int, default=3)
     parser.add_argument("--max-iterations", type=int, default=15)
     parser.add_argument("--no-viz", action="store_true")
@@ -208,14 +207,10 @@ def main():
                 "fast": {"model": fast, "description": "Cheaper model for small sub-tasks."},
             }
 
-        agent = RLM(
+        agent = RLMFlow(
             llm_client=llm,
             runtime=runtime,
-            config=RLMConfig(
-                max_depth=args.max_depth,
-                max_iterations=args.max_iterations,
-                session="context",
-            ),
+            config=RLMConfig(max_depth=args.max_depth, max_iterations=args.max_iterations),
             llm_clients=llm_clients,
             prompt_builder=build_prompt_builder(),
         )
@@ -234,7 +229,7 @@ def main():
                 trace.append(state)
                 print(state.tree())
         else:
-            from rlmkit.utils.viz import live
+            from rlmflow.utils.viz import live
             for s in live(agent, state):
                 state = s
                 trace.append(state)
@@ -243,7 +238,7 @@ def main():
         print(f"SUMMARY ({len((state.result or '').splitlines())} lines):\n")
         print(state.result or "(no result)")
 
-        from rlmkit.utils.trace import save_trace
+        from rlmflow.utils.trace import save_trace
         trace_dir = Path("traces/summarizer")
         save_trace(trace, trace_dir, metadata={"lines": actual_lines})
         print(f"\nTrace saved to {trace_dir}/")

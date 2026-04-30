@@ -6,16 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from rlmkit import (
+from rlmflow import (
     RLM,
     LLMClient,
     LLMUsage,
     RLMConfig,
-    RLMState,
+    RLMNode,
 )
-from rlmkit.cli import _load, main
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.utils.trace import save_trace
+from rlmflow.cli import _load, main
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.utils.trace import save_trace
 
 
 class DelegatingLLM(LLMClient):
@@ -39,7 +39,7 @@ class DelegatingLLM(LLMClient):
 
 
 @pytest.fixture
-def run_states() -> list[RLMState]:
+def run_states() -> list[RLMNode]:
     agent = RLM(
         llm_client=DelegatingLLM(),
         runtime=LocalRuntime(),
@@ -57,21 +57,21 @@ def run_states() -> list[RLMState]:
 # ── _load() autodetection ────────────────────────────────────────────
 
 
-def test_load_trace_directory(tmp_path: Path, run_states: list[RLMState]):
+def test_load_trace_directory(tmp_path: Path, run_states: list[RLMNode]):
     save_trace(run_states, tmp_path / "run")
     states = _load(tmp_path / "run")
     assert len(states) == len(run_states)
-    assert all(isinstance(s, RLMState) for s in states)
+    assert all(isinstance(s, RLMNode) for s in states)
 
 
-def test_load_trace_file(tmp_path: Path, run_states: list[RLMState]):
+def test_load_trace_file(tmp_path: Path, run_states: list[RLMNode]):
     out = tmp_path / "trace.json"
     save_trace(run_states, out)
     states = _load(out)
     assert len(states) == len(run_states)
 
 
-def test_load_checkpoint_file(tmp_path: Path, run_states: list[RLMState]):
+def test_load_checkpoint_file(tmp_path: Path, run_states: list[RLMNode]):
     ckpt = tmp_path / "ckpt.json"
     run_states[-1].save(ckpt)
     states = _load(ckpt)
@@ -103,7 +103,7 @@ def test_load_unknown_shape(tmp_path: Path):
 
 def test_render_mermaid_stdout(
     tmp_path: Path,
-    run_states: list[RLMState],
+    run_states: list[RLMNode],
     capsys: pytest.CaptureFixture,
 ):
     ckpt = tmp_path / "c.json"
@@ -115,7 +115,7 @@ def test_render_mermaid_stdout(
     assert "root" in out
 
 
-def test_render_dot_to_file(tmp_path: Path, run_states: list[RLMState]):
+def test_render_dot_to_file(tmp_path: Path, run_states: list[RLMNode]):
     ckpt = tmp_path / "c.json"
     run_states[-1].save(ckpt)
     out_file = tmp_path / "graph.dot"
@@ -128,7 +128,7 @@ def test_render_dot_to_file(tmp_path: Path, run_states: list[RLMState]):
 
 def test_render_tree(
     tmp_path: Path,
-    run_states: list[RLMState],
+    run_states: list[RLMNode],
     capsys: pytest.CaptureFixture,
 ):
     ckpt = tmp_path / "c.json"
@@ -140,7 +140,7 @@ def test_render_tree(
     assert "[finished]" in out
 
 
-def test_render_gantt_html_over_trace(tmp_path: Path, run_states: list[RLMState]):
+def test_render_gantt_html_over_trace(tmp_path: Path, run_states: list[RLMNode]):
     trace_dir = tmp_path / "trace"
     save_trace(run_states, trace_dir)
     out_file = tmp_path / "g.html"
@@ -158,7 +158,7 @@ def test_version(capsys: pytest.CaptureFixture):
     rc = main(["version"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "rlmkit" in out
+    assert "rlmflow" in out
     assert "python" in out
 
 
@@ -167,7 +167,7 @@ def test_version(capsys: pytest.CaptureFixture):
 
 def test_view_dispatches_to_open_viewer(
     tmp_path: Path,
-    run_states: list[RLMState],
+    run_states: list[RLMNode],
     monkeypatch: pytest.MonkeyPatch,
 ):
     trace_dir = tmp_path / "trace"
@@ -179,7 +179,7 @@ def test_view_dispatches_to_open_viewer(
         captured["n"] = len(states)
         captured["kwargs"] = kwargs
 
-    monkeypatch.setattr("rlmkit.utils.viewer.open_viewer", fake_open_viewer)
+    monkeypatch.setattr("rlmflow.utils.viewer.open_viewer", fake_open_viewer)
 
     rc = main(["view", str(trace_dir), "--port", "7861"])
     assert rc == 0
@@ -195,7 +195,7 @@ def test_missing_subcommand_exits():
         main([])
 
 
-def test_render_requires_format(tmp_path: Path, run_states: list[RLMState]):
+def test_render_requires_format(tmp_path: Path, run_states: list[RLMNode]):
     ckpt = tmp_path / "c.json"
     run_states[-1].save(ckpt)
     with pytest.raises(SystemExit):
