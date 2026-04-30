@@ -14,7 +14,7 @@ import argparse
 import shutil
 from pathlib import Path
 
-from rlmkit import LLMClient, LLMUsage, RLMConfig, RLMFlow, Workspace
+from rlmflow import LLMClient, LLMUsage, RLMConfig, RLMFlow, Workspace
 
 FRUITS = [
     ("lemon", "citrus"),

@@ -9,7 +9,7 @@ Exercises the operations promised in ``docs/control.md``:
 
 from __future__ import annotations
 
-from rlmkit import (
+from rlmflow import (
     RLM,
     LLMClient,
     LLMUsage,
@@ -17,7 +17,7 @@ from rlmkit import (
     RLMNode,
     Status,
 )
-from rlmkit.runtime.local import LocalRuntime
+from rlmflow.runtime.local import LocalRuntime
 
 
 class ScriptedLLM(LLMClient):

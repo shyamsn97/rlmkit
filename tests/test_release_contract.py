@@ -9,7 +9,7 @@ These exercise the pieces users interact with most directly:
 
 from __future__ import annotations
 
-from rlmkit import (
+from rlmflow import (
     RLM,
     LLMClient,
     LLMUsage,
@@ -17,7 +17,7 @@ from rlmkit import (
     RLMNode,
     Status,
 )
-from rlmkit.runtime.local import LocalRuntime
+from rlmflow.runtime.local import LocalRuntime
 
 # ── Scripted LLMs ────────────────────────────────────────────────────
 

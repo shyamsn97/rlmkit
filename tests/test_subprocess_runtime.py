@@ -1,6 +1,6 @@
 """End-to-end tests for SubprocessRuntime.
 
-Spawns a real ``python -m rlmkit.runtime.repl`` subprocess and exercises
+Spawns a real ``python -m rlmflow.runtime.repl`` subprocess and exercises
 the full JSON-over-stdio protocol: execute, inject (value + proxy), and
 generator-based suspension with proxied tool calls during yield/resume.
 """
@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from rlmkit.runtime.subprocess import SubprocessRuntime
-from rlmkit.node import ChildHandle, WaitRequest
+from rlmflow.runtime.subprocess import SubprocessRuntime
+from rlmflow.node import ChildHandle, WaitRequest
 
 
 def _argv() -> list[str]:
-    return [sys.executable, "-m", "rlmkit.runtime.repl"]
+    return [sys.executable, "-m", "rlmflow.runtime.repl"]
 
 
 @pytest.fixture

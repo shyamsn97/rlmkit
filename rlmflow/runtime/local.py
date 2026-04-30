@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from rlmkit.runtime.repl import REPL
-from rlmkit.runtime.runtime import DEFAULT_MODULES, Runtime
+from rlmflow.runtime.repl import REPL
+from rlmflow.runtime.runtime import DEFAULT_MODULES, Runtime
 
 
 class LocalRuntime(Runtime):

@@ -3,7 +3,7 @@
 
 Port of Prime Intellect's
 [`aggregate_results.py`](https://github.com/PrimeIntellect-ai/verifiers/blob/sebastian/experiment/rlm/environments/oolong/aggregate_results.py)
-adapted to read the rlmkit runner's output layout. Treats every
+adapted to read the rlmflow runner's output layout. Treats every
 ``<dir>/{metadata.json, results.jsonl}`` pair as one configuration and
 groups summary statistics by ``(model, mode, subset)``.
 

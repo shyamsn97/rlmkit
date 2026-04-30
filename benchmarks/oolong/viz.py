@@ -19,7 +19,7 @@ import time
 from threading import Lock
 from typing import Any
 
-from rlmkit.node import RLMNode, Status
+from rlmflow.node import RLMNode, Status
 
 
 # ── Mini-tree renderer (compact, no spinners — many panels share screen) ──

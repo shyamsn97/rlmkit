@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from rlmkit import (
+from rlmflow import (
     ActionNode,
     QueryNode,
     RLMConfig,
@@ -9,8 +9,8 @@ from rlmkit import (
     SupervisingNode,
     Workspace,
 )
-from rlmkit.llm import LLMClient
-from rlmkit.runtime.local import LocalRuntime
+from rlmflow.llm import LLMClient
+from rlmflow.runtime.local import LocalRuntime
 
 
 class StaticLLM(LLMClient):

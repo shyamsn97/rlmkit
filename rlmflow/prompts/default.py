@@ -11,7 +11,7 @@ it noticeably increases the rate of malformed delegation (forgotten
 
 from __future__ import annotations
 
-from rlmkit.prompts.builder import PromptBuilder
+from rlmflow.prompts.builder import PromptBuilder
 
 ROLE_TEXT = """
 You are a recursive agent with a Python REPL. You solve tasks by writing and executing Python programs, and you can delegate subtasks to sub-agents with fresh context windows.

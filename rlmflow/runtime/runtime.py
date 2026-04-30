@@ -1,7 +1,7 @@
 """Runtime — ship a JSON message to a REPL, get the response back.
 
 The REPL itself (code execution, generator suspension, tool-call
-proxying) lives in :mod:`rlmkit.runtime.repl`.  A :class:`Runtime`
+proxying) lives in :mod:`rlmflow.runtime.repl`.  A :class:`Runtime`
 subclass just decides *how* to talk to it: in-process, over a
 subprocess pipe, over a container's stdio, over SSH, whatever.
 """
@@ -18,10 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from rlmkit.node import WaitRequest
-from rlmkit.runtime.repl import deserialize, serialize
-from rlmkit.tools import get_tool_metadata
-from rlmkit.tools import tool as tool_decorator
+from rlmflow.node import WaitRequest
+from rlmflow.runtime.repl import deserialize, serialize
+from rlmflow.tools import get_tool_metadata
+from rlmflow.tools import tool as tool_decorator
 
 DEFAULT_MODULES: list[str] = [
     "re",

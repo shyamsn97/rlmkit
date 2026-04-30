@@ -7,10 +7,10 @@ deeper if possible, otherwise does work directly and calls done().
 
 from __future__ import annotations
 
-from rlmkit.llm import LLMClient
-from rlmkit.rlm import RLM, RLMConfig
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.node import CodeExec, ResumeExec, Status
+from rlmflow.llm import LLMClient
+from rlmflow.rlm import RLM, RLMConfig
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.node import CodeExec, ResumeExec, Status
 
 UNIVERSAL_REPLY = '''```repl
 if int(DEPTH) < int(MAX_DEPTH):

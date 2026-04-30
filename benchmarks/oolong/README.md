@@ -1,10 +1,10 @@
 # OOLONG
 
-Runnable rlmkit harness for the OOLONG long-context aggregation benchmark.
+Runnable rlmflow harness for the OOLONG long-context aggregation benchmark.
 
 This is adapted from Prime Intellect's
 [`oolong-rlm` environment](https://github.com/PrimeIntellect-ai/verifiers/tree/sebastian/experiment/rlm/environments/oolong),
-but uses rlmkit directly instead of `verifiers`.
+but uses rlmflow directly instead of `verifiers`.
 
 ## What It Runs
 
@@ -12,7 +12,7 @@ Three modes, matching the Prime Intellect environment:
 
 - `standard` — one LLM call with the full context in `<context>...</context>`;
   the answer is extracted from the last `\boxed{...}`.
-- `rlm` — rlmkit recursive scaffold. The long context is written to a
+- `rlm` — rlmflow recursive scaffold. The long context is written to a
   task-local file and the agent uses file tools plus delegation.
 - `rlm_tips` — same as `rlm`, plus the Prime Intellect `<env_tips>` chunking
   strategy block.
@@ -203,7 +203,7 @@ agent can aggregate provided labels instead of doing semantic classification.
 The runner supports two modes so you can quantify how much the
 recursive scaffold actually buys you:
 
-- **`--mode rlm`** (default) — the rlmkit recursive scaffold. Each task
+- **`--mode rlm`** (default) — the rlmflow recursive scaffold. Each task
   gets a branch `Workspace`: the workspace root is the runtime working
   tree, while node/message history lives under `session/`. The context is written
   to `task_XXXX.txt` at the workspace root. The runtime (`LocalRuntime`
@@ -242,14 +242,14 @@ the harness/brain (`RLM`), durable session/context, and sandbox/hands
 
 This is deliberately simple. For **paper-equivalent** numbers you need
 the [official harness](https://github.com/abertsch72/oolong) and its
-scorer; for **rlmkit scaffold** signal, this driver is enough.
+scorer; for **rlmflow scaffold** signal, this driver is enough.
 
 ## Metric
 
 We implement the scoring methodology from the OOLONG paper §2.3 and
 §3.2. See [`docs/internal/oolong_scoring.md`](../../docs/internal/oolong_scoring.md)
 for the derivation and sources. The scorer lives in
-[`scoring.py`](./scoring.py) as a standalone module with zero rlmkit
+[`scoring.py`](./scoring.py) as a standalone module with zero rlmflow
 dependencies, so other harnesses (e.g. a future lighteval task) can
 import `score_one`, `extract_answer`, `parse_gold` directly without
 pulling in the agent runtime.
@@ -309,7 +309,7 @@ Two independent dials, kept apart on purpose:
   thread so N tasks hit the LLM API concurrently. Network-bound; scale
   up until you saturate provider RPM/TPM. Default `1`.
 - `--max-concurrency K` controls **per-task delegation** — how many
-  child branches the rlmkit pool runs in parallel inside a single
+  child branches the rlmflow pool runs in parallel inside a single
   task. Default `1` (sequential children) so token usage and trace
   shape stay deterministic when you crank up `--workers`. Bump only
   if you actually want intra-agent fan-out.
@@ -322,7 +322,7 @@ output should remain enough for CI and batch runs.
 
 ```
 results/oolong/<run>/
-    manifest.json    # frozen config: argv, env, git SHA, rlmkit version,
+    manifest.json    # frozen config: argv, env, git SHA, rlmflow version,
                      #   dataset fingerprint, host, rlm_config
     results.jsonl    # one row per task
     summary.json     # aggregates (scores, token stats, latency,
@@ -371,7 +371,7 @@ scored.
 ### Final-answer recovery
 
 When the agent burns its `--max-iterations` budget without calling
-`done()`, `rlmkit` performs the official RLM final-answer recovery inside the
+`done()`, `rlmflow` performs the official RLM final-answer recovery inside the
 engine. The runner does not know the prompt text and does not special-case this
 path. The recovered answer becomes `state.result`, token usage is counted in
 the tree totals, and the trace contains the normal engine-produced messages for

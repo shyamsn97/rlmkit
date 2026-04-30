@@ -6,7 +6,7 @@ it writes and edits files in your workspace using delegation.
 Usage:
     python agent.py --workspace ./myproject
     python agent.py --workspace ./myproject --no-viz
-    python agent.py --workspace ./myproject --docker-image rlmkit:local
+    python agent.py --workspace ./myproject --docker-image rlmflow:local
 """
 
 from __future__ import annotations
@@ -14,14 +14,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from rlmkit.node import Node
-from rlmkit.llm import AnthropicClient, OpenAIClient
-from rlmkit.rlm import RLMConfig, RLMFlow
-from rlmkit.runtime.docker import DockerRuntime
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.tools import FILE_TOOLS
-from rlmkit.utils.trace import save_trace
-from rlmkit.workspace import Workspace
+from rlmflow.node import Node
+from rlmflow.llm import AnthropicClient, OpenAIClient
+from rlmflow.rlm import RLMConfig, RLMFlow
+from rlmflow.runtime.docker import DockerRuntime
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.tools import FILE_TOOLS
+from rlmflow.utils.trace import save_trace
+from rlmflow.workspace import Workspace
 
 
 def main():
@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--model", default="gpt-5")
     parser.add_argument("--fast-model", default="gpt-5-mini")
     parser.add_argument("--docker-image", default=None,
-                        help="If set, run agent code inside this Docker image (e.g. rlmkit:local).")
+                        help="If set, run agent code inside this Docker image (e.g. rlmflow:local).")
     parser.add_argument("--max-depth", type=int, default=3)
     parser.add_argument("--max-iterations", type=int, default=30)
     parser.add_argument("--no-viz", action="store_true")
@@ -99,7 +99,7 @@ def main():
                 state = agent.step(state)
                 trace.append(state)
         else:
-            from rlmkit.utils.viz import live
+            from rlmflow.utils.viz import live
             for s in live(agent, state):
                 state = s
                 trace.append(state)

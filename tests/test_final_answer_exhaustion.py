@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from rlmkit.llm import LLMClient, LLMUsage
-from rlmkit.prompts.messages import FINAL_ANSWER_ACTION
-from rlmkit.rlm import RLM, RLMConfig
-from rlmkit.runtime.local import LocalRuntime
+from rlmflow.llm import LLMClient, LLMUsage
+from rlmflow.prompts.messages import FINAL_ANSWER_ACTION
+from rlmflow.rlm import RLM, RLMConfig
+from rlmflow.runtime.local import LocalRuntime
 
 
 class StallingThenFinalLLM(LLMClient):
@@ -109,7 +109,7 @@ def test_terminate_is_recursive_over_unfinished_children():
     )
 
     # Hand-built tree: root SUPERVISING with two children, one finished.
-    from rlmkit.node import RLMNode, Status
+    from rlmflow.node import RLMNode, Status
 
     finished_child = RLMNode(
         agent_id="root.search_0",

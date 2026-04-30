@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from rlmkit.node import Node
-from rlmkit.rlm import RLMFlow
+from rlmflow.node import Node
+from rlmflow.rlm import RLMFlow
 
 
 def _node_label(state: Node):
@@ -132,7 +132,7 @@ def gantt(states: list[Node]) -> None:
     Console().print(table)
 
 
-def gantt_html(states: list[Node], *, title: str = "rlmkit gantt") -> str:
+def gantt_html(states: list[Node], *, title: str = "rlmflow gantt") -> str:
     agents, rows = gantt_matrix(states)
     n_steps = len(states)
     cells_html: list[str] = []

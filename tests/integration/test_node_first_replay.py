@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rlmkit import RLMConfig, RLMFlow, Workspace
-from rlmkit.llm import LLMClient
+from rlmflow import RLMConfig, RLMFlow, Workspace
+from rlmflow.llm import LLMClient
 
 
 class StaticLLM(LLMClient):

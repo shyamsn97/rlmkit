@@ -20,12 +20,12 @@ import argparse
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import LLMClient, LLMUsage
-from rlmkit.node import Node, ResultNode, SupervisingNode
-from rlmkit.rlm import RLMConfig, RLMFlow
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.tools import FILE_TOOLS
-from rlmkit.workspace import Workspace
+from rlmflow.llm import LLMClient, LLMUsage
+from rlmflow.node import Node, ResultNode, SupervisingNode
+from rlmflow.rlm import RLMConfig, RLMFlow
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.tools import FILE_TOOLS
+from rlmflow.workspace import Workspace
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -87,7 +87,7 @@ def run(agent: RLMFlow, state: Node, no_viz: bool) -> list[Node]:
             print(f"-- step {step} --")
             print(state.tree())
         return history
-    from rlmkit.utils.viz import live
+    from rlmflow.utils.viz import live
 
     return live(agent, state)
 

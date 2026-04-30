@@ -9,7 +9,7 @@ Covers the three smoke paths that regressed during the 0.1.0 cycle:
 Gated on ``RLMKIT_DOCKER_TEST=1`` plus a running docker daemon.  Build
 the image once before running:
 
-    docker build -t rlmkit:local .
+    docker build -t rlmflow:local .
     RLMKIT_DOCKER_TEST=1 pytest tests/integration/test_docker_runtime.py
 """
 
@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from rlmkit.runtime.docker import DockerRuntime
-from rlmkit.workspace import FileContext
-from rlmkit.node import ChildHandle, WaitRequest
+from rlmflow.runtime.docker import DockerRuntime
+from rlmflow.workspace import FileContext
+from rlmflow.node import ChildHandle, WaitRequest
 
 
 def _docker_available() -> bool:
@@ -45,7 +45,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-IMAGE = os.environ.get("RLMKIT_DOCKER_TEST_IMAGE", "rlmkit:local")
+IMAGE = os.environ.get("RLMKIT_DOCKER_TEST_IMAGE", "rlmflow:local")
 
 
 @pytest.fixture

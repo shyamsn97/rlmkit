@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rlmkit import (
+from rlmflow import (
     RLM,
     CodeExec,
     LLMClient,
@@ -24,8 +24,8 @@ from rlmkit import (
     RLMNode,
     StepEvent,
 )
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.utils.trace import Trace, load_trace, save_trace
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.utils.trace import Trace, load_trace, save_trace
 
 
 class DelegatingLLM(LLMClient):

@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "rlmkit"
+name = "rlmflow"
 version = "0.1.1"
-description = "A state-machine framework for recursive LLM agents in ~1,200 lines of Python."
+description = "Build Recursive Language Models as inspectable execution graphs."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
     { name = "Shyam Sudhakaran", email = "shyamsnair@protonmail.com" },
 ]
-keywords = ["llm", "agent", "recursive", "state-machine", "repl"]
+keywords = ["llm", "agent", "recursive", "graph", "repl"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -36,15 +36,15 @@ all = ["openai>=1.0", "anthropic>=0.20", "gradio>=4.29"]
 dev = ["pytest>=7.0", "ruff>=0.4"]
 
 [project.urls]
-Homepage = "https://github.com/ShyamSS-95/rlmkit"
-Repository = "https://github.com/ShyamSS-95/rlmkit"
-Issues = "https://github.com/ShyamSS-95/rlmkit/issues"
+Homepage = "https://github.com/ShyamSS-95/rlmflow"
+Repository = "https://github.com/ShyamSS-95/rlmflow"
+Issues = "https://github.com/ShyamSS-95/rlmflow/issues"
 
 [project.scripts]
-rlmkit = "rlmkit.cli:main"
+rlmflow = "rlmflow.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["rlmkit"]
+packages = ["rlmflow"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

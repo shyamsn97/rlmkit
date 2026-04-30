@@ -6,8 +6,8 @@ viewer UI.
     python examples/view_demo.py
 """
 
-from rlmkit.node import ActionNode, ErrorNode, QueryNode, ResultNode, SupervisingNode
-from rlmkit.utils.viewer import open_viewer
+from rlmflow.node import ActionNode, ErrorNode, QueryNode, ResultNode, SupervisingNode
+from rlmflow.utils.viewer import open_viewer
 
 QUERY = "Create a boids simulation in plain HTML + JS"
 CFG = {"model": "gpt-5", "max_depth": 3, "max_iterations": 8}

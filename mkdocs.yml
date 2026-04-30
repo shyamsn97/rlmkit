@@ -1,9 +1,9 @@
-# site_name: REPLACE_rlmkit
+# site_name: REPLACE_rlmflow
 # copyright: Copyright (c) 2023-present REPLACE_FULL_NAME <REPLACE_EMAIL>
 
 
 # mkdocs.yml
-site_name: rlmkit Docs
+site_name: rlmflow Docs
 
 theme:
   name: material

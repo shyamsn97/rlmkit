@@ -6,16 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from rlmkit import (
+from rlmflow import (
     RLM,
     LLMClient,
     LLMUsage,
     RLMConfig,
     RLMNode,
 )
-from rlmkit.cli import _load, main
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.utils.trace import save_trace
+from rlmflow.cli import _load, main
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.utils.trace import save_trace
 
 
 class DelegatingLLM(LLMClient):
@@ -158,7 +158,7 @@ def test_version(capsys: pytest.CaptureFixture):
     rc = main(["version"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "rlmkit" in out
+    assert "rlmflow" in out
     assert "python" in out
 
 
@@ -179,7 +179,7 @@ def test_view_dispatches_to_open_viewer(
         captured["n"] = len(states)
         captured["kwargs"] = kwargs
 
-    monkeypatch.setattr("rlmkit.utils.viewer.open_viewer", fake_open_viewer)
+    monkeypatch.setattr("rlmflow.utils.viewer.open_viewer", fake_open_viewer)
 
     rc = main(["view", str(trace_dir), "--port", "7861"])
     assert rc == 0

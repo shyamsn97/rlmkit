@@ -8,7 +8,7 @@ import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from rlmkit.node import Node, parse_node_json
+from rlmflow.node import Node, parse_node_json
 
 
 def _safe_name(value: str) -> str:

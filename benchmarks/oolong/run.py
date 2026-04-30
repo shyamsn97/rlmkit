@@ -1,11 +1,11 @@
-"""OOLONG runner — rlmkit port of Prime Intellect's ``oolong-rlm`` env.
+"""OOLONG runner — rlmflow port of Prime Intellect's ``oolong-rlm`` env.
 
 Mirrors the layout in
 [`PrimeIntellect-ai/verifiers`](https://github.com/PrimeIntellect-ai/verifiers/tree/sebastian/experiment/rlm/environments/oolong)
 so results can be compared head-to-head:
 
 - Three **modes**: ``standard`` (single-call baseline, ``\\boxed{}``
-  extraction), ``rlm`` (rlmkit recursive scaffold, file-backed context),
+  extraction), ``rlm`` (rlmflow recursive scaffold, file-backed context),
   ``rlm_tips`` (same scaffold + the verbatim ``<env_tips>`` strategy
   block PI uses for SFT data generation).
 - Three **subsets**: ``synth`` and ``synth_with_labels`` (from
@@ -71,14 +71,14 @@ from scoring import (  # noqa: E402
     template_from_question,
 )
 
-from rlmkit.llm import AnthropicClient, LLMClient, LLMUsage, OpenAIClient  # noqa: E402
-from rlmkit.node import Node  # noqa: E402
-from rlmkit.rlm import RLMConfig, RLMFlow  # noqa: E402
-from rlmkit.runtime.docker import DockerRuntime  # noqa: E402
-from rlmkit.runtime.local import LocalRuntime  # noqa: E402
-from rlmkit.tools import FILE_TOOLS  # noqa: E402
-from rlmkit.utils.trace import save_trace  # noqa: E402
-from rlmkit.workspace import Workspace  # noqa: E402
+from rlmflow.llm import AnthropicClient, LLMClient, LLMUsage, OpenAIClient  # noqa: E402
+from rlmflow.node import Node  # noqa: E402
+from rlmflow.rlm import RLMConfig, RLMFlow  # noqa: E402
+from rlmflow.runtime.docker import DockerRuntime  # noqa: E402
+from rlmflow.runtime.local import LocalRuntime  # noqa: E402
+from rlmflow.tools import FILE_TOOLS  # noqa: E402
+from rlmflow.utils.trace import save_trace  # noqa: E402
+from rlmflow.workspace import Workspace  # noqa: E402
 
 
 # ── Prompts (PI-aligned) ──────────────────────────────────────────────
@@ -98,7 +98,7 @@ Strategy for long-context information retrieval:
 # RLM prompt — the agent gets the question only; the long context is
 # durable on disk as ``task_NNNN.txt`` and reachable via file tools and
 # delegation. This matches the file-backed-context discipline from the
-# RLM paper (arXiv:2512.24601 §2) and the rlmkit harness doc
+# RLM paper (arXiv:2512.24601 §2) and the rlmflow harness doc
 # (`docs/internal/oolong_harness.md`).
 RLM_PROMPT_TEMPLATE = """You are answering an OOLONG long-context aggregation question over a passage
 stored in {context_file} ({tokens} approx tokens / {bytes} bytes).
@@ -481,13 +481,13 @@ def git_sha() -> str | None:
         return None
 
 
-def rlmkit_version() -> str | None:
+def rlmflow_version() -> str | None:
     try:
-        import rlmkit  # noqa: F401
+        import rlmflow  # noqa: F401
 
         from importlib.metadata import version
 
-        return version("rlmkit")
+        return version("rlmflow")
     except Exception:
         return None
 
@@ -515,7 +515,7 @@ def build_metadata(args, rows: list[dict[str, Any]]) -> dict[str, Any]:
         "host": socket.gethostname(),
         "platform": platform.platform(),
         "python": platform.python_version(),
-        "rlmkit_version": rlmkit_version(),
+        "rlmflow_version": rlmflow_version(),
         "git_sha": git_sha(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "dataset_fingerprint": dataset_fingerprint(rows),
@@ -603,7 +603,7 @@ def render_summary_md(summary: dict[str, Any]) -> str:
         f"- Subset / split: `{env['subset']}` / `{env['split']}`",
         f"- N: {summary['n_total']}  (ok={summary['n_ok']}, error={summary['n_error']})",
         f"- Incomplete: {summary['incomplete']}",
-        f"- Git: `{m.get('git_sha') or 'n/a'}`  ·  rlmkit `{m.get('rlmkit_version') or 'n/a'}`",
+        f"- Git: `{m.get('git_sha') or 'n/a'}`  ·  rlmflow `{m.get('rlmflow_version') or 'n/a'}`",
         f"- Dataset fingerprint: `{m['dataset_fingerprint']}`",
         "",
         "## Scores",
@@ -910,7 +910,7 @@ def run_one(
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "OOLONG benchmark runner — rlmkit port of Prime Intellect's "
+            "OOLONG benchmark runner — rlmflow port of Prime Intellect's "
             "oolong-rlm environment. Three modes (standard / rlm / rlm_tips) "
             "× three subsets (synth / synth_with_labels / real)."
         )
@@ -920,7 +920,7 @@ def main():
         "--mode",
         choices=("standard", "rlm", "rlm_tips"),
         default="rlm",
-        help="standard=single-call \\boxed{} baseline; rlm=rlmkit recursive scaffold; rlm_tips=rlm + verbatim PI <env_tips> block.",
+        help="standard=single-call \\boxed{} baseline; rlm=rlmflow recursive scaffold; rlm_tips=rlm + verbatim PI <env_tips> block.",
     )
     parser.add_argument(
         "--subset",

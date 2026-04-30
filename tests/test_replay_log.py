@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from rlmkit.workspace import ReplayEntry, ReplayLog
+from rlmflow.workspace import ReplayEntry, ReplayLog
 
 
 def _entry(branch: str, agent: str, it: int, reply: str = "") -> ReplayEntry:

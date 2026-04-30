@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from rlmkit.node import Node, parse_node_obj
+from rlmflow.node import Node, parse_node_obj
 
 
 def _as_node(value: Node | dict) -> Node:

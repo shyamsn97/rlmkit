@@ -1,5 +1,5 @@
-from rlmkit.pool import CallablePool, SequentialPool, ThreadPool
-from rlmkit.rlm import RLMConfig, create_pool
+from rlmflow.pool import CallablePool, SequentialPool, ThreadPool
+from rlmflow.rlm import RLMConfig, create_pool
 
 
 def test_create_pool_defaults_to_sequential():

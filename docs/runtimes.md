@@ -1,7 +1,7 @@
 # Runtimes
 
 A `Runtime` executes agent Python. The actual execution and generator
-suspension live in `rlmkit.runtime.repl.REPL`; a `Runtime` subclass
+suspension live in `rlmflow.runtime.repl.REPL`; a `Runtime` subclass
 only decides how to talk to one.
 
 ## Protocol
@@ -29,42 +29,43 @@ Responses: `output`, `suspended`, `proxy`, `value`, `error`.
 | Runtime | What it does |
 |---|---|
 | `LocalRuntime` | In-process. `send`/`recv` dispatch straight to an in-process `REPL`. |
-| `SubprocessRuntime(argv)` | Spawn any `argv` that runs `python -m rlmkit.runtime.repl` and talk to it over stdio. |
+| `SubprocessRuntime(argv)` | Spawn any `argv` that runs `python -m rlmflow.runtime.repl` and talk to it over stdio. |
 | `DockerRuntime(image, ...)` | `SubprocessRuntime` with an ergonomic `docker run` argv builder. |
 | `ModalRuntime` | Run the REPL inside a Modal container. |
 
 ## Subprocess examples
 
 ```python
-SubprocessRuntime(["python", "-m", "rlmkit.runtime.repl"])
+SubprocessRuntime(["python", "-m", "rlmflow.runtime.repl"])
 
 SubprocessRuntime(["docker", "exec", "-i", "ctr",
-                   "python", "-m", "rlmkit.runtime.repl"])
+                   "python", "-m", "rlmflow.runtime.repl"])
 
-SubprocessRuntime(["ssh", "box", "python", "-m", "rlmkit.runtime.repl"])
+SubprocessRuntime(["ssh", "box", "python", "-m", "rlmflow.runtime.repl"])
 
 SubprocessRuntime(["kubectl", "exec", "-i", "pod", "--",
-                   "python", "-m", "rlmkit.runtime.repl"])
+                   "python", "-m", "rlmflow.runtime.repl"])
 ```
 
 ## Docker
 
 ```bash
-docker build -t rlmkit:local .
+docker build -t rlmflow:local .
 ```
 
 ```python
-from rlmkit.runtime.docker import DockerRuntime
+from rlmflow import RLMFlow
+from rlmflow.runtime.docker import DockerRuntime
 
 rt = DockerRuntime(
-    image="rlmkit:local",
+    image="rlmflow:local",
     mounts={"./data": "/workspace"},
     env={"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]},
     network="none",
     cpus=1.0,
     memory="512m",
 )
-agent = RLM(llm_client=llm, runtime=rt, runtime_factory=rt.clone)
+agent = RLMFlow(llm_client=llm, runtime=rt, runtime_factory=rt.clone)
 ```
 
 ## Writing your own

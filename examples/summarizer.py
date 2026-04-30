@@ -14,7 +14,7 @@ Usage:
     python examples/summarizer.py
     python examples/summarizer.py --lines 5000
     python examples/summarizer.py --no-viz
-    python examples/summarizer.py --docker-image rlmkit:local
+    python examples/summarizer.py --docker-image rlmflow:local
 """
 
 from __future__ import annotations
@@ -24,13 +24,13 @@ import random
 import tempfile
 from pathlib import Path
 
-from rlmkit.llm import AnthropicClient, OpenAIClient
-from rlmkit.prompts import DEFAULT_BUILDER
-from rlmkit.prompts.default import ROLE_TEXT
-from rlmkit.rlm import RLMConfig, RLMFlow
-from rlmkit.runtime.docker import DockerRuntime
-from rlmkit.runtime.local import LocalRuntime
-from rlmkit.tools import FILE_TOOLS
+from rlmflow.llm import AnthropicClient, OpenAIClient
+from rlmflow.prompts import DEFAULT_BUILDER
+from rlmflow.prompts.default import ROLE_TEXT
+from rlmflow.rlm import RLMConfig, RLMFlow
+from rlmflow.runtime.docker import DockerRuntime
+from rlmflow.runtime.local import LocalRuntime
+from rlmflow.tools import FILE_TOOLS
 
 
 # ── Generate a long document ────────────────────────────────────────
@@ -161,7 +161,7 @@ def main():
     parser.add_argument("--model", default="claude-opus-4-6")
     parser.add_argument("--fast-model", default=None)
     parser.add_argument("--docker-image", default=None,
-                        help="If set, run agent code inside this Docker image (e.g. rlmkit:local).")
+                        help="If set, run agent code inside this Docker image (e.g. rlmflow:local).")
     parser.add_argument("--max-depth", type=int, default=3)
     parser.add_argument("--max-iterations", type=int, default=15)
     parser.add_argument("--no-viz", action="store_true")
@@ -229,7 +229,7 @@ def main():
                 trace.append(state)
                 print(state.tree())
         else:
-            from rlmkit.utils.viz import live
+            from rlmflow.utils.viz import live
             for s in live(agent, state):
                 state = s
                 trace.append(state)
@@ -238,7 +238,7 @@ def main():
         print(f"SUMMARY ({len((state.result or '').splitlines())} lines):\n")
         print(state.result or "(no result)")
 
-        from rlmkit.utils.trace import save_trace
+        from rlmflow.utils.trace import save_trace
         trace_dir = Path("traces/summarizer")
         save_trace(trace, trace_dir, metadata={"lines": actual_lines})
         print(f"\nTrace saved to {trace_dir}/")

@@ -6,7 +6,7 @@ setting the cwd on the runtime before registering them.
 
 Usage::
 
-    from rlmkit.tools import FILE_TOOLS
+    from rlmflow.tools import FILE_TOOLS
 
     runtime.register_tools(FILE_TOOLS)
 """
@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from rlmkit.tools import tool
+from rlmflow.tools import tool
 
 
 @tool("Read a file and return its contents.")

@@ -47,17 +47,17 @@ clean-test: ## remove test and coverage artifacts
 	rm -fr .pytest_cache
 
 lint: ## check style with flake8
-	isort --profile black rlmkit
-	black rlmkit
-	flake8 rlmkit
+	isort --profile black rlmflow
+	black rlmflow
+	flake8 rlmflow
 
 install: clean lint
 	python -m pip install . --upgrade
 
 doc:
 	rm -r docs/reference/
-	pdocs as_markdown rlmkit -o docs/reference
-	rm docs/reference/rlmkit/index.md
+	pdocs as_markdown rlmflow -o docs/reference
+	rm docs/reference/rlmflow/index.md
 	cp examples/*.ipynb docs/examples/
 	cp README.md docs/index.md
 
@@ -69,7 +69,7 @@ commit: install test doc
 	git commit -a
 
 test:
-	python -m pytest --cov=rlmkit/ --cov-report html:tests/cov-report tests/
+	python -m pytest --cov=rlmflow/ --cov-report html:tests/cov-report tests/
 
 test-html: test
 	$(BROWSER) tests/cov-report/index.html
@@ -82,7 +82,7 @@ OOLONG_MAX_DEPTH ?= 1
 OOLONG_MAX_ITERATIONS ?= 20
 
 build-docker-image:
-	docker build -t rlmkit:local .
+	docker build -t rlmflow:local .
 
 oolong-paper: ## Paper-style OOLONG RLM run: synth validation, depth 1, 20 iterations.
 	python benchmarks/oolong/run.py --mode rlm --subset synth \

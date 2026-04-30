@@ -1,14 +1,14 @@
-# Sandbox image for rlmkit's DockerRuntime.
+# Sandbox image for rlmflow's DockerRuntime.
 #
 # Build:
-#   docker build -t rlmkit:local .
+#   docker build -t rlmflow:local .
 #
 # Use:
-#   from rlmkit.runtime.docker import DockerRuntime
-#   runtime = DockerRuntime("rlmkit:local")
+#   from rlmflow.runtime.docker import DockerRuntime
+#   runtime = DockerRuntime("rlmflow:local")
 #
 # Or via any of the bundled examples:
-#   python examples/summarizer.py --runtime docker --docker-image rlmkit:local
+#   python examples/summarizer.py --runtime docker --docker-image rlmflow:local
 
 FROM python:3.12-slim
 
@@ -17,14 +17,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
-WORKDIR /opt/rlmkit
+WORKDIR /opt/rlmflow
 COPY pyproject.toml README.md ./
-COPY rlmkit ./rlmkit
+COPY rlmflow ./rlmflow
 RUN pip install ".[openai,anthropic]"
 
 # DockerRuntime bind-mounts the host workspace at /workspace.
 WORKDIR /workspace
 
-# DockerRuntime spawns: `docker run -i --rm <image> python -m rlmkit.runtime.repl`.
-# Setting it as CMD also makes `docker run -i rlmkit:local` work standalone.
-CMD ["python", "-m", "rlmkit.runtime.repl"]
+# DockerRuntime spawns: `docker run -i --rm <image> python -m rlmflow.runtime.repl`.
+# Setting it as CMD also makes `docker run -i rlmflow:local` work standalone.
+CMD ["python", "-m", "rlmflow.runtime.repl"]

@@ -1,7 +1,7 @@
-"""rlmkit: a small, hackable engine for recursive language-model flows."""
+"""rlmflow: a small, hackable engine for recursive language-model flows."""
 
-from rlmkit.llm import AnthropicClient, LLMClient, LLMUsage, OpenAIClient
-from rlmkit.node import (
+from rlmflow.llm import AnthropicClient, LLMClient, LLMUsage, OpenAIClient
+from rlmflow.node import (
     ActionNode,
     ChildHandle,
     ErrorNode,
@@ -15,9 +15,9 @@ from rlmkit.node import (
     WaitRequest,
     WorkspaceRef,
 )
-from rlmkit.rlm import NodeScheduler, RLMConfig, RLMFlow
-from rlmkit.runtime import Runtime
-from rlmkit.workspace import (
+from rlmflow.rlm import NodeScheduler, RLMConfig, RLMFlow
+from rlmflow.runtime import Runtime
+from rlmflow.workspace import (
     Context,
     ContextVariable,
     FileContext,

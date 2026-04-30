@@ -5,11 +5,11 @@ Requires ``modal`` to be installed (``pip install modal``).
 Usage::
 
     import modal
-    from rlmkit.runtime.modal import ModalRuntime
+    from rlmflow.runtime.modal import ModalRuntime
 
     runtime = ModalRuntime(
         app_name="my-rlm-app",
-        image=modal.Image.debian_slim().pip_install("rlmkit"),
+        image=modal.Image.debian_slim().pip_install("rlmflow"),
     )
     agent = RLMFlow(llm_client=llm, runtime=runtime, runtime_factory=runtime.clone)
 """
@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import json
 
-from rlmkit.runtime.runtime import Runtime
+from rlmflow.runtime.runtime import Runtime
 
 
 class ModalRuntime(Runtime):
     """Execute agent code inside a Modal Sandbox.
 
-    The Modal Sandbox runs ``python -m rlmkit.runtime.repl``; this class
+    The Modal Sandbox runs ``python -m rlmflow.runtime.repl``; this class
     just ships JSON messages to its stdin and reads responses from
     stdout.  All of the REPL protocol (proxy loop, inject, suspend /
     resume) is inherited from :class:`Runtime`.
@@ -34,7 +34,7 @@ class ModalRuntime(Runtime):
     app_name : str
         Modal app name (created if missing).
     image : modal.Image | None
-        Container image.  Defaults to ``debian_slim + rlmkit``.
+        Container image.  Defaults to ``debian_slim + rlmflow``.
     timeout : int
         Container lifetime in seconds (default 5 min).
     **container_kwargs
@@ -44,7 +44,7 @@ class ModalRuntime(Runtime):
 
     def __init__(
         self,
-        app_name: str = "rlmkit",
+        app_name: str = "rlmflow",
         *,
         image=None,
         timeout: int = 300,
@@ -63,14 +63,14 @@ class ModalRuntime(Runtime):
             import modal
 
             app = modal.App.lookup(self.app_name, create_if_missing=True)
-            image = self.image or modal.Image.debian_slim().pip_install("rlmkit")
+            image = self.image or modal.Image.debian_slim().pip_install("rlmflow")
             self.container = modal.Sandbox.create(
                 app=app,
                 image=image,
                 timeout=self.timeout,
                 **self.container_kwargs,
             )
-            self.process = self.container.exec("python", "-m", "rlmkit.runtime.repl")
+            self.process = self.container.exec("python", "-m", "rlmflow.runtime.repl")
         self.process.stdin.write((json.dumps(msg) + "\n").encode())
         self.process.stdin.write_eof()
         self.process.stdin.drain()

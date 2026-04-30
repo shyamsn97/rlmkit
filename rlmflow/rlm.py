@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from rlmkit.llm import LLMClient, LLMUsage
-from rlmkit.node import (
+from rlmflow.llm import LLMClient, LLMUsage
+from rlmflow.node import (
     ActionNode,
     ChildHandle,
     ErrorNode,
@@ -21,9 +21,9 @@ from rlmkit.node import (
     SupervisingNode,
     WaitRequest,
 )
-from rlmkit.pool import CallablePool, Pool, SequentialPool, ThreadPool
-from rlmkit.prompts.default import DEFAULT_BUILDER
-from rlmkit.prompts.messages import (
+from rlmflow.pool import CallablePool, Pool, SequentialPool, ThreadPool
+from rlmflow.prompts.default import DEFAULT_BUILDER
+from rlmflow.prompts.messages import (
     CONTINUE_ACTION,
     DEFAULT_QUERY,
     EXECUTION_OUTPUT,
@@ -37,10 +37,10 @@ from rlmkit.prompts.messages import (
     TRUNCATION_SESSION_HINT,
     TRUNCATION_SUMMARY,
 )
-from rlmkit.runtime import Runtime
-from rlmkit.tools import tool
-from rlmkit.utils import OrphanedDelegatesError, check_yield_errors, find_code_blocks
-from rlmkit.workspace import (
+from rlmflow.runtime import Runtime
+from rlmflow.tools import tool
+from rlmflow.utils import OrphanedDelegatesError, check_yield_errors, find_code_blocks
+from rlmflow.workspace import (
     Context,
     ContextVariable,
     InMemoryContext,

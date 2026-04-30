@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from rlmkit.node import Node
+from rlmflow.node import Node
 
 
 def _sanitize(node_id: str) -> str:
@@ -56,7 +56,7 @@ _NODE_COLOR = {
 
 def to_dot(state: Node, *, include_results: bool = True) -> str:
     lines = [
-        "digraph rlmkit {",
+        "digraph rlmflow {",
         "    rankdir=TB;",
         '    node [shape=box, style="rounded,filled", fontname="Helvetica"];',
         '    edge [fontname="Helvetica", fontsize=10];',

@@ -17,7 +17,7 @@ isolated runtime:
 
 ```python
 DockerRuntime(
-    image="rlmkit:local",
+    image="rlmflow:local",
     network="none",           # no outbound traffic
     cpus=1.0,                 # CPU quota
     memory="512m",            # OOM cap

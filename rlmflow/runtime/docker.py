@@ -1,17 +1,17 @@
 """Docker runtime — run agent code inside a fresh container each session.
 
 Each :class:`DockerRuntime` instance spawns one ``docker run -i --rm ...``
-subprocess; the container must have ``rlmkit`` installed so it can run
-``python -m rlmkit.runtime.repl``.  All REPL I/O happens over stdin/stdout
+subprocess; the container must have ``rlmflow`` installed so it can run
+``python -m rlmflow.runtime.repl``.  All REPL I/O happens over stdin/stdout
 of the container, so this is just :class:`SubprocessRuntime` with an
 ergonomic argv builder on top.
 
 Example::
 
-    from rlmkit.runtime.docker import DockerRuntime
+    from rlmflow.runtime.docker import DockerRuntime
 
     runtime = DockerRuntime(
-        image="myorg/rlmkit-sandbox:latest",
+        image="myorg/rlmflow-sandbox:latest",
         mounts={"./data": "/workspace"},
         env={"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]},
         network="none",       # air-gap the container
@@ -23,16 +23,16 @@ Example::
 Prerequisites:
 
 1. ``docker`` is on ``PATH``.
-2. The image has Python + ``rlmkit`` installed.  The repo ships a ready
+2. The image has Python + ``rlmflow`` installed.  The repo ships a ready
    ``Dockerfile`` at its root — build it once with::
 
-       docker build -t rlmkit:local .
+       docker build -t rlmflow:local .
 
-   and pass ``image="rlmkit:local"``.  Any image whose ``CMD`` (or your
-   ``entrypoint_argv``) runs ``python -m rlmkit.runtime.repl`` works.
+   and pass ``image="rlmflow:local"``.  Any image whose ``CMD`` (or your
+   ``entrypoint_argv``) runs ``python -m rlmflow.runtime.repl`` works.
 
 If you need to run the server under a different interpreter or path, set
-``entrypoint_argv`` (defaults to ``["python", "-m", "rlmkit.runtime.repl"]``).
+``entrypoint_argv`` (defaults to ``["python", "-m", "rlmflow.runtime.repl"]``).
 """
 
 from __future__ import annotations
@@ -40,8 +40,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from rlmkit.runtime.runtime import workspace_path
-from rlmkit.runtime.subprocess import SubprocessRuntime
+from rlmflow.runtime.runtime import workspace_path
+from rlmflow.runtime.subprocess import SubprocessRuntime
 
 
 class DockerRuntime(SubprocessRuntime):
@@ -50,7 +50,7 @@ class DockerRuntime(SubprocessRuntime):
     Parameters
     ----------
     image : str
-        Docker image to run.  Must have ``rlmkit`` installed.
+        Docker image to run.  Must have ``rlmflow`` installed.
     workspace : str
         Host-side workspace path (affects the engine's CWD handling, not
         the container's).  The container's CWD is controlled by the
@@ -78,7 +78,7 @@ class DockerRuntime(SubprocessRuntime):
         point at ``podman``, ``nerdctl``, or a full path.
     entrypoint_argv : list[str] | None
         Command to run inside the container.  Defaults to
-        ``["python", "-m", "rlmkit.runtime.repl"]``.
+        ``["python", "-m", "rlmflow.runtime.repl"]``.
     """
 
     def __init__(
@@ -163,5 +163,5 @@ def build_argv(
         argv += ["--workdir", workdir]
     argv += list(extra_args or [])
     argv += [image]
-    argv += list(entrypoint_argv or ["python", "-m", "rlmkit.runtime.repl"])
+    argv += list(entrypoint_argv or ["python", "-m", "rlmflow.runtime.repl"])
     return argv

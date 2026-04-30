@@ -1,13 +1,13 @@
 """Branch-local workspace, session, and context subsystem."""
 
-from rlmkit.workspace.context import (
+from rlmflow.workspace.context import (
     Context,
     ContextVariable,
     FileContext,
     InMemoryContext,
 )
-from rlmkit.workspace.session import FileSession, InMemorySession, Session
-from rlmkit.workspace.workspace import Workspace
+from rlmflow.workspace.session import FileSession, InMemorySession, Session
+from rlmflow.workspace.workspace import Workspace
 
 __all__ = [
     "Context",

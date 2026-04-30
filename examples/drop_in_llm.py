@@ -21,8 +21,8 @@ Run with:
 
 from __future__ import annotations
 
-from rlmkit import LLMClient, OpenAIClient, RLMConfig, RLMFlow
-from rlmkit.runtime.local import LocalRuntime
+from rlmflow import LLMClient, OpenAIClient, RLMConfig, RLMFlow
+from rlmflow.runtime.local import LocalRuntime
 
 
 def ask(llm: LLMClient, question: str) -> str:

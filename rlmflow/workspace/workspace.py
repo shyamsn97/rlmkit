@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rlmkit.workspace.context import Context, FileContext
-from rlmkit.workspace.session import FileSession, Session
+from rlmflow.workspace.context import Context, FileContext
+from rlmflow.workspace.session import FileSession, Session
 
 if TYPE_CHECKING:
-    from rlmkit.node import WorkspaceRef
-    from rlmkit.runtime.runtime import Runtime
+    from rlmflow.node import WorkspaceRef
+    from rlmflow.runtime.runtime import Runtime
 
 
 @dataclass
@@ -59,12 +59,12 @@ class Workspace:
         return cls.create(ref.root, branch_id=ref.branch_id)
 
     def ref(self) -> WorkspaceRef:
-        from rlmkit.node import WorkspaceRef
+        from rlmflow.node import WorkspaceRef
 
         return WorkspaceRef(root=str(self.root), branch_id=self.branch_id)
 
     def materialize_runtime(self) -> Runtime:
-        from rlmkit.runtime.local import LocalRuntime
+        from rlmflow.runtime.local import LocalRuntime
 
         return LocalRuntime(workspace=self)
 

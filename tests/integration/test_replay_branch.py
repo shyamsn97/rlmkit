@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rlmkit import RLM, RLMConfig, ReplayLog, Workspace
-from rlmkit.llm import LLMClient, LLMUsage
+from rlmflow import RLM, RLMConfig, ReplayLog, Workspace
+from rlmflow.llm import LLMClient, LLMUsage
 
 
 def _run_node(engine: RLM, node):

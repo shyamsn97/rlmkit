@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from rlmkit.node import Node, parse_node_obj
+from rlmflow.node import Node, parse_node_obj
 
 
 class Trace(NamedTuple):

@@ -4,10 +4,10 @@
 #   git tag v0.1.0 && git push origin v0.1.0
 #
 # One-time setup:
-#   1. PyPI → Your projects → rlmkit → Publishing → Add a new pending
+#   1. PyPI → Your projects → rlmflow → Publishing → Add a new pending
 #      publisher with:
 #         owner:       <your-github-user>
-#         repository:  rlmkit
+#         repository:  rlmflow
 #         workflow:    release.yml
 #         environment: release
 #   2. GitHub → Settings → Environments → New environment "release"
@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/rlmkit
+  IMAGE: ghcr.io/${{ github.repository_owner }}/rlmflow
   PYTHON_DEFAULT: "3.12"
 
 jobs:
@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: release
-      url: https://pypi.org/p/rlmkit
+      url: https://pypi.org/p/rlmflow
     permissions:
       id-token: write
     steps:
@@ -103,7 +103,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          # Produces: ghcr.io/OWNER/rlmkit:0.1.0, :0.1, :latest
+          # Produces: ghcr.io/OWNER/rlmflow:0.1.0, :0.1, :latest
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

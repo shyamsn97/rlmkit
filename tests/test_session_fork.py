@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from rlmkit import QueryNode, RLMConfig, RLMFlow, Workspace
-from rlmkit.llm import LLMClient
-from rlmkit.workspace import ContextVariable, FileContext, FileSession
+from rlmflow import QueryNode, RLMConfig, RLMFlow, Workspace
+from rlmflow.llm import LLMClient
+from rlmflow.workspace import ContextVariable, FileContext, FileSession
 
 
 class DummyLLM(LLMClient):

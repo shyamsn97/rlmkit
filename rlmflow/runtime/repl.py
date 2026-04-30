@@ -3,7 +3,7 @@
 Handles stdout capture, generator wrapping, the yield/resume protocol,
 and the JSON-over-stdio bridge used by remote runtimes.
 
-Container entrypoint: ``python -m rlmkit.runtime.repl [--workdir DIR]``.
+Container entrypoint: ``python -m rlmflow.runtime.repl [--workdir DIR]``.
 Reads JSON commands from stdin, writes JSON responses to stdout.
 
 Commands:
@@ -30,7 +30,7 @@ import types
 from contextlib import contextmanager
 from typing import Any, TextIO
 
-from rlmkit.node import ChildHandle, WaitRequest
+from rlmflow.node import ChildHandle, WaitRequest
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -91,7 +91,7 @@ class _StdoutProxy:
 
 
 def serialize(val: Any) -> Any:
-    """Convert rlmkit objects to JSON-safe structures. Recurses into lists/dicts."""
+    """Convert rlmflow objects to JSON-safe structures. Recurses into lists/dicts."""
     if isinstance(val, (ChildHandle, WaitRequest)):
         return val.to_dict()
     if isinstance(val, (list, tuple)):
@@ -102,7 +102,7 @@ def serialize(val: Any) -> Any:
 
 
 def deserialize(val: Any) -> Any:
-    """Reconstruct rlmkit objects from JSON structures. Recurses into lists/dicts."""
+    """Reconstruct rlmflow objects from JSON structures. Recurses into lists/dicts."""
     if isinstance(val, list):
         return [deserialize(v) for v in val]
     if isinstance(val, dict):
@@ -310,7 +310,7 @@ class REPL:
 def main():
     import os
 
-    parser = argparse.ArgumentParser(description="rlmkit repl")
+    parser = argparse.ArgumentParser(description="rlmflow repl")
     parser.add_argument("--workdir", help="chdir before starting")
     args = parser.parse_args()
     if args.workdir:

@@ -1,23 +1,23 @@
 """Generic subprocess runtime — spawn any argv that runs the REPL server.
 
 The command on the other end just needs to be
-``python -m rlmkit.runtime.repl`` (possibly inside a sandbox, container,
+``python -m rlmflow.runtime.repl`` (possibly inside a sandbox, container,
 or SSH session).  This covers the vast majority of "run agent code
 somewhere else" use cases with a single line of config::
 
-    SubprocessRuntime(["python", "-m", "rlmkit.runtime.repl"])
+    SubprocessRuntime(["python", "-m", "rlmflow.runtime.repl"])
 
     SubprocessRuntime([
         "docker", "exec", "-i", "my-container",
-        "python", "-m", "rlmkit.runtime.repl",
+        "python", "-m", "rlmflow.runtime.repl",
     ])
 
     SubprocessRuntime([
         "kubectl", "exec", "-i", "my-pod", "--",
-        "python", "-m", "rlmkit.runtime.repl",
+        "python", "-m", "rlmflow.runtime.repl",
     ])
 
-    SubprocessRuntime(["ssh", "prod-box", "python", "-m", "rlmkit.runtime.repl"])
+    SubprocessRuntime(["ssh", "prod-box", "python", "-m", "rlmflow.runtime.repl"])
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import subprocess as sp
 from pathlib import Path
 from typing import Any
 
-from rlmkit.runtime.runtime import Runtime
+from rlmflow.runtime.runtime import Runtime
 
 
 class SubprocessRuntime(Runtime):
@@ -71,7 +71,7 @@ class SubprocessRuntime(Runtime):
     def close(self) -> None:
         """Tear down the REPL subprocess and release its pipe FDs.
 
-        Closes ``stdin`` first — the ``serve()`` loop in ``rlmkit.runtime.repl``
+        Closes ``stdin`` first — the ``serve()`` loop in ``rlmflow.runtime.repl``
         reads until EOF, so that's enough for a graceful shutdown in the
         common case (the REPL exits, the container's ``--rm`` flag wipes
         it). We only escalate to ``terminate()``/``kill()`` if the child

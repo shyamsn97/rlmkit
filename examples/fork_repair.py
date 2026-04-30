@@ -14,8 +14,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from rlmkit import LLMClient, LLMUsage, RLMConfig, RLMFlow, Workspace
-from rlmkit.tools import FILE_TOOLS
+from rlmflow import LLMClient, LLMUsage, RLMConfig, RLMFlow, Workspace
+from rlmflow.tools import FILE_TOOLS
 
 TASK = "Implement slugify(text) in slugify.py so tests/test_slugify.py passes."
 

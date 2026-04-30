@@ -2,7 +2,7 @@
 # Run the OOLONG ablation matrix — port of Prime Intellect's
 # `run_ablations.sh` from
 # https://github.com/PrimeIntellect-ai/verifiers/tree/sebastian/experiment/rlm/environments/oolong
-# adapted to the rlmkit runner.
+# adapted to the rlmflow runner.
 #
 # Sweeps:
 # - 3 modes: standard, rlm, rlm_tips
