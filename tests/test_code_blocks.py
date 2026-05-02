@@ -1,6 +1,6 @@
 """Test find_code_blocks and replace_code_block edge cases."""
 
-from rlmflow.utils.code import find_code_blocks, replace_code_block
+from rlmflow.utils.code import check_yield_errors, find_code_blocks, replace_code_block
 
 
 def test_standard_fence():
@@ -83,6 +83,41 @@ def test_replace_no_block():
     print("  replace no block: OK")
 
 
+def test_yield_check_accepts_direct_call():
+    assert check_yield_errors("x = yield wait(h)") is None
+    assert check_yield_errors("yield wait(*handles)") is None
+    print("  yield direct call: OK")
+
+
+def test_yield_check_accepts_conditional():
+    """`yield wait(...) if cond else other` parses as `yield (IfExp)` — still yielded."""
+    code = "results = yield wait(*handles) if handles else []"
+    assert check_yield_errors(code) is None
+    code = "x = yield other if cond else wait(h)"
+    assert check_yield_errors(code) is None
+    print("  yield ternary: OK")
+
+
+def test_yield_check_accepts_tuple():
+    code = "results = yield (wait(h1), wait(h2))"
+    assert check_yield_errors(code) is None
+    print("  yield tuple: OK")
+
+
+def test_yield_check_rejects_naked_wait():
+    err = check_yield_errors("results = wait(h)")
+    assert err is not None and "must be prefixed with `yield`" in err
+    err = check_yield_errors("results = wait(*handles) if handles else []")
+    assert err is not None
+    print("  naked wait rejected: OK")
+
+
+def test_yield_check_rejects_wait_in_comprehension():
+    err = check_yield_errors("[wait(h) for h in handles]")
+    assert err is not None
+    print("  comprehension wait rejected: OK")
+
+
 if __name__ == "__main__":
     print("test_code_blocks:")
     test_standard_fence()
@@ -94,4 +129,9 @@ if __name__ == "__main__":
     test_replace_standard()
     test_replace_glued()
     test_replace_no_block()
+    test_yield_check_accepts_direct_call()
+    test_yield_check_accepts_conditional()
+    test_yield_check_accepts_tuple()
+    test_yield_check_rejects_naked_wait()
+    test_yield_check_rejects_wait_in_comprehension()
     print("\nAll tests passed.")

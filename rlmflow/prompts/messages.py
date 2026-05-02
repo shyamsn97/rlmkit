@@ -11,15 +11,10 @@ DEFAULT_QUERY = (
 FIRST_ACTION = (
     "Query: {query}\n\n"
     "Your response MUST contain exactly one ```repl``` code block. "
-    "Write Python that makes progress on the query. "
-    "If the task has separable parts, delegate them in this first program; "
-    "if it is trivial, do it directly."
 )
 
 CONTINUE_ACTION = (
-    "Continue working on: {query}\n\n"
-    "Respond with a ```repl``` code block. "
-    "Use delegation for separable remaining work; do direct code for small, coupled work."
+    "Continue working on: {query}\n\n" "Respond with a ```repl``` code block. "
 )
 
 FINAL_ANSWER_ACTION = (

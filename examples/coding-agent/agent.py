@@ -99,10 +99,13 @@ def main():
                 state = agent.step(state)
                 trace.append(state)
         else:
-            from rlmflow.utils.viz import live
-            for s in live(agent, state):
-                state = s
-                trace.append(state)
+            from rlmflow.utils.viz import live_view
+            with live_view() as view:
+                view(state)
+                while not state.finished:
+                    state = agent.step(state)
+                    trace.append(state)
+                    view(state)
 
         print(f"\n{state.result or '(no result)'}\n")
         state.save(ckpt)

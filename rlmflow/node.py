@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, NamedTuple, Union
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+
+_MISSING = object()
+
+
+class NodeDiff(NamedTuple):
+    """Difference between two graph snapshots, indexed by node id."""
+
+    added: list["Node"]
+    removed: list["Node"]
 
 
 def new_id() -> str:
@@ -175,6 +185,71 @@ class Node(BaseModel):
                 return found
         return None
 
+    def leaves(self) -> list["Node"]:
+        """Every node in the subtree with no materialized children."""
+        children = self.child_nodes()
+        if not children:
+            return [self]
+        out: list[Node] = []
+        for child in children:
+            out.extend(child.leaves())
+        return out
+
+    def errors(self) -> list["Node"]:
+        """Every `ErrorNode` in the subtree."""
+        return [n for n in self.walk() if n.type == "error"]
+
+    def results(self) -> list["Node"]:
+        """Every `ResultNode` in the subtree."""
+        return [n for n in self.walk() if n.type == "result"]
+
+    def where(
+        self,
+        predicate: Callable[["Node"], bool] | None = None,
+        /,
+        **filters: Any,
+    ) -> list["Node"]:
+        """Subtree search by predicate, attribute kwargs, or both.
+
+        ``state.where(type="error")`` returns every error node.
+        ``state.where(lambda n: n.depth > 2)`` returns deep nodes.
+        Kwargs match attributes by equality; missing attributes never match.
+        """
+
+        def matches(node: "Node") -> bool:
+            if predicate is not None and not predicate(node):
+                return False
+            for key, expected in filters.items():
+                if getattr(node, key, _MISSING) != expected:
+                    return False
+            return True
+
+        return [n for n in self.walk() if matches(n)]
+
+    def path_to(self, node_id: str) -> list["Node"]:
+        """Ancestor chain from this node to ``node_id`` (inclusive). Empty if not found."""
+        if self.id == node_id or self.agent_id == node_id:
+            return [self]
+        for child in self.child_nodes():
+            path = child.path_to(node_id)
+            if path:
+                return [self, *path]
+        return []
+
+    def diff(self, other: "Node") -> NodeDiff:
+        """Compare two snapshots by node id. Returns added/removed nodes.
+
+        ``other`` is the *prior* snapshot. ``added`` is what exists in
+        ``self`` but not ``other``; ``removed`` is the inverse. Nodes are
+        compared by id, so node-content changes are not part of the diff
+        (every step produces a new node id, so they show up as additions).
+        """
+        self_by_id = {n.id: n for n in self.walk()}
+        other_by_id = {n.id: n for n in other.walk()}
+        added = [n for nid, n in self_by_id.items() if nid not in other_by_id]
+        removed = [n for nid, n in other_by_id.items() if nid not in self_by_id]
+        return NodeDiff(added=added, removed=removed)
+
     def replace_many(self, updates: dict[str, "Node"]) -> "Node":
         replacement = updates.get(self.id) or updates.get(self.agent_id)
         if replacement is not None:
@@ -184,6 +259,28 @@ class Node(BaseModel):
             for child in self.children
         ]
         return self.update(children=new_children)
+
+    def _repr_html_(self) -> str:
+        """Inline HTML render for Jupyter notebooks."""
+        from html import escape
+
+        return (
+            '<pre style="font-family: ui-monospace, SFMono-Regular, monospace; '
+            "background: #0d1117; color: #c9d1d9; padding: 12px; "
+            'border-radius: 6px; overflow-x: auto;">'
+            f"{escape(self.tree())}"
+            "</pre>"
+        )
+
+    def _repr_mimebundle_(self, include=None, exclude=None) -> dict:
+        """Mime bundle: HTML + Mermaid + plain text for rich Jupyter rendering."""
+        from rlmflow.utils.export import to_mermaid
+
+        return {
+            "text/plain": self.tree(),
+            "text/html": self._repr_html_(),
+            "text/x-mermaid": to_mermaid(self),
+        }
 
     def to_dict(self) -> dict:
         return self.model_dump(mode="json")
@@ -263,8 +360,7 @@ NodeUnion = Annotated[
 ]
 
 
-class _NodeParser(BaseModel):
-    node: NodeUnion
+NODE_ADAPTER: TypeAdapter[Node] = TypeAdapter(NodeUnion)
 
 
 def parse_node_obj(data: dict) -> Node:
@@ -280,7 +376,7 @@ def parse_node_obj(data: dict) -> Node:
                 for child in data["children"]
             ],
         }
-    return _NodeParser.model_validate({"node": data}).node
+    return NODE_ADAPTER.validate_python(data)
 
 
 def parse_node_json(data: str) -> Node:
@@ -291,7 +387,9 @@ __all__ = [
     "ActionNode",
     "ChildHandle",
     "ErrorNode",
+    "NODE_ADAPTER",
     "Node",
+    "NodeDiff",
     "ObservationNode",
     "QueryNode",
     "ResultNode",

@@ -57,16 +57,32 @@ def replace_code_block(text: str, new_code: str) -> str:
 
 
 def check_yield_errors(code: str) -> str | None:
-    """Return an error string if any ``wait()`` calls lack ``yield``, else None."""
+    """Return an error string if any ``wait()`` calls lack ``yield``, else None.
+
+    A ``wait(...)`` call is considered yielded if it appears anywhere inside the
+    expression tree of a ``Yield`` node. This permits idiomatic forms like::
+
+        results = yield wait(*handles) if handles else []
+        results = yield (wait(h1), wait(h2))
+
+    where the syntactic value of the ``Yield`` is an ``IfExp`` / ``Tuple`` /
+    parenthesized expression rather than a bare ``Call``.
+    """
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return None
 
-    yielded = set()
+    yielded: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Yield) and isinstance(node.value, ast.Call):
-            yielded.add(id(node.value))
+        if isinstance(node, ast.Yield) and node.value is not None:
+            for sub in ast.walk(node.value):
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Name)
+                    and sub.func.id == "wait"
+                ):
+                    yielded.add(id(sub))
 
     errors = []
     for node in ast.walk(tree):

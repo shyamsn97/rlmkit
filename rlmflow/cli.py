@@ -67,22 +67,55 @@ def cmd_view(args: argparse.Namespace) -> int:
 
 
 def cmd_render(args: argparse.Namespace) -> int:
-    from rlmflow.utils.export import to_dot, to_mermaid
-    from rlmflow.utils.viz import gantt_html
+    from rlmflow.utils.export import (
+        to_d2,
+        to_dot,
+        to_mermaid,
+        to_mermaid_flowchart,
+        to_mermaid_sequence,
+    )
+    from rlmflow.utils.viz import (
+        ascii_boxes,
+        code_log,
+        error_summary,
+        gantt_html,
+        report_md,
+        token_sparkline,
+    )
 
     states = _load(Path(args.path))
-    final = states[-1]
+    # For topology: pick the snapshot with the richest visible graph.
+    # The literal last state can be a stripped ResultNode whose children
+    # were collapsed; the richest state shows the actual structure.
+    topo = max(states, key=lambda s: len(s.walk()))
 
-    if args.format == "mermaid":
-        out = to_mermaid(final)
-    elif args.format == "dot":
-        out = to_dot(final)
-    elif args.format == "tree":
-        out = final.tree(color=False)
-    elif args.format == "gantt-html":
+    fmt = args.format
+    if fmt == "mermaid":
+        out = to_mermaid(topo)
+    elif fmt == "mermaid-flowchart":
+        out = to_mermaid_flowchart(topo)
+    elif fmt == "mermaid-sequence":
+        out = to_mermaid_sequence(topo)
+    elif fmt == "dot":
+        out = to_dot(topo)
+    elif fmt == "d2":
+        out = to_d2(topo)
+    elif fmt == "tree":
+        out = topo.tree(color=False)
+    elif fmt == "ascii-boxes":
+        out = ascii_boxes(topo)
+    elif fmt == "gantt-html":
         out = gantt_html(states)
+    elif fmt == "report-md":
+        out = report_md(states)
+    elif fmt == "code-log":
+        out = code_log(states)
+    elif fmt == "error-summary":
+        out = error_summary(topo)
+    elif fmt == "tokens":
+        out = token_sparkline(states)
     else:
-        raise SystemExit(f"rlmflow: unknown format {args.format!r}")
+        raise SystemExit(f"rlmflow: unknown format {fmt!r}")
 
     if args.out:
         Path(args.out).write_text(out)
@@ -142,14 +175,27 @@ def _build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser(
         "render",
-        help="render a trace or state as mermaid / dot / tree / gantt-html",
+        help="render a trace or state in any of several formats",
     )
     r.add_argument("path", help="trace directory, trace.json, or checkpoint")
     r.add_argument(
         "--format",
         "-f",
         required=True,
-        choices=["mermaid", "dot", "tree", "gantt-html"],
+        choices=[
+            "mermaid",
+            "mermaid-flowchart",
+            "mermaid-sequence",
+            "dot",
+            "d2",
+            "tree",
+            "ascii-boxes",
+            "gantt-html",
+            "report-md",
+            "code-log",
+            "error-summary",
+            "tokens",
+        ],
         help="output format",
     )
     r.add_argument(
