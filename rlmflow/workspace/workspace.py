@@ -47,7 +47,6 @@ class Workspace:
     ) -> Workspace:
         root = Path(dir).resolve()
         root.mkdir(parents=True, exist_ok=True)
-        (root / "trace").mkdir(parents=True, exist_ok=True)
         if session is None:
             session = FileSession(root / "session")
         if context is None:
@@ -78,7 +77,6 @@ class Workspace:
         if new_root.exists():
             shutil.rmtree(new_root)
         new_root.mkdir(parents=True, exist_ok=True)
-        (new_root / "trace").mkdir(parents=True, exist_ok=True)
 
         reserved = {"session", "context", "trace", "checkpoint.json"}
         for item in self.root.iterdir():

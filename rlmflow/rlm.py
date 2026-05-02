@@ -22,7 +22,7 @@ from rlmflow.node import (
     WaitRequest,
 )
 from rlmflow.pool import CallablePool, Pool, SequentialPool, ThreadPool
-from rlmflow.prompts.default import DEFAULT_BUILDER
+from rlmflow.prompts.default import BASELINE_BUILDER, DEFAULT_BUILDER
 from rlmflow.prompts.messages import (
     CONTINUE_ACTION,
     DEFAULT_QUERY,
@@ -170,7 +170,12 @@ class RLMFlow(LLMClient):
         self.context: Context = workspace.context if workspace else InMemoryContext()
         self.config = config or RLMConfig()
         self.runtime_factory = runtime_factory
-        self.prompt_builder = prompt_builder or DEFAULT_BUILDER
+        # When max_depth == 0 the agent can't delegate, so swap in a baseline
+        # prompt that has zero delegation content. Caller-supplied builders win.
+        default_builder = (
+            BASELINE_BUILDER if self.config.max_depth == 0 else DEFAULT_BUILDER
+        )
+        self.prompt_builder = prompt_builder or default_builder
         self.pool = create_pool(self.config, pool)
         self.node_scheduler = node_scheduler or NodeScheduler()
 
@@ -635,11 +640,15 @@ class RLMFlow(LLMClient):
         )
 
     def build_tools_section(self) -> str:
+        baseline = self.config.max_depth == 0
+        tool_defs = self.runtime.get_tool_defs()
+        if baseline:
+            tool_defs = [t for t in tool_defs if t.name not in ("delegate", "wait")]
         lines = [
             f"- `{tool_def.name}{tool_def.signature}`: {tool_def.description}"
-            for tool_def in self.runtime.get_tool_defs()
+            for tool_def in tool_defs
         ]
-        if len(self.llm_clients) > 1:
+        if len(self.llm_clients) > 1 and not baseline:
             lines.append("\nAvailable models for `delegate(model=...)`:")
             for key in sorted(self.llm_clients):
                 desc = self.model_descriptions.get(key)
@@ -651,8 +660,10 @@ class RLMFlow(LLMClient):
 
     def build_status_section(self, node: Node) -> str:
         max_depth = node.config.get("max_depth", self.config.max_depth)
+        if max_depth == 0:
+            return "Baseline mode: no sub-agents available. Do all work directly in this REPL."
         note = f"You are at recursion depth **{node.depth}** of max **{max_depth}**."
-        if node.depth == 0 and max_depth > 0:
+        if node.depth == 0:
             note += STATUS_DEPTH_ROOT
         elif node.depth >= max_depth - 1:
             note += STATUS_DEPTH_NEAR_MAX

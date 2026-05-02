@@ -76,11 +76,13 @@ workspace/
     agents/root.child.json
   context/
     context.txt
-  trace/
 ```
 
 `Workspace.session` persists the node/message graph. `Workspace.context`
-persists optional payload data exposed in the REPL as `CONTEXT`.
+persists optional payload data exposed in the REPL as `CONTEXT`. Traces are
+not part of the workspace layout — `save_trace(states, path)` writes wherever
+you point it (`workspace.trace_dir` is just a convention path, not an
+engine-managed directory).
 
 Messages are derived from `Session.chain_to(node)`, not stored as a second
 source of truth.

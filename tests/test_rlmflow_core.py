@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from rlmflow import (
     ActionNode,
+    ErrorNode,
     QueryNode,
     RLMConfig,
     RLMFlow,
@@ -98,6 +99,116 @@ def test_tree_displays_model_labels():
 
     assert "root [query] {default}" in tree
     assert "root.fast_worker [action] {fast:gpt-5-mini}" in tree
+
+
+def _sample_tree() -> QueryNode:
+    """root supervising 3 children: one result, one error, one nested supervisor."""
+    leaf_ok = ResultNode(agent_id="root.search.hit", depth=2, result="found it")
+    leaf_err = ErrorNode(agent_id="root.search.miss", depth=2, error="no_code_block")
+    nested = SupervisingNode(
+        agent_id="root.search",
+        depth=1,
+        code="...",
+        children=[leaf_ok, leaf_err],
+    )
+    sibling = ResultNode(agent_id="root.verify", depth=1, result="ok")
+    return QueryNode(agent_id="root", depth=0, children=[nested, sibling])
+
+
+def test_leaves_returns_every_node_with_no_children():
+    root = _sample_tree()
+    leaves = root.leaves()
+    assert {n.agent_id for n in leaves} == {
+        "root.search.hit",
+        "root.search.miss",
+        "root.verify",
+    }
+
+
+def test_leaves_on_solo_node_returns_self():
+    solo = ResultNode(agent_id="root", result="ok")
+    assert solo.leaves() == [solo]
+
+
+def test_errors_finds_only_error_nodes():
+    root = _sample_tree()
+    errors = root.errors()
+    assert [n.agent_id for n in errors] == ["root.search.miss"]
+    assert all(n.type == "error" for n in errors)
+
+
+def test_results_finds_only_result_nodes():
+    root = _sample_tree()
+    results = root.results()
+    assert {n.agent_id for n in results} == {"root.search.hit", "root.verify"}
+    assert all(n.type == "result" for n in results)
+
+
+def test_where_filters_by_kwargs():
+    root = _sample_tree()
+    matches = root.where(type="result", depth=1)
+    assert [n.agent_id for n in matches] == ["root.verify"]
+
+
+def test_where_filters_by_predicate():
+    root = _sample_tree()
+    deep = root.where(lambda n: n.depth >= 2)
+    assert {n.agent_id for n in deep} == {"root.search.hit", "root.search.miss"}
+
+
+def test_where_combines_predicate_and_kwargs():
+    root = _sample_tree()
+    matches = root.where(lambda n: n.depth >= 1, type="result")
+    assert {n.agent_id for n in matches} == {"root.search.hit", "root.verify"}
+
+
+def test_where_kwargs_skip_nodes_missing_the_attribute():
+    root = _sample_tree()
+    by_error_kind = root.where(error="no_code_block")
+    assert [n.agent_id for n in by_error_kind] == ["root.search.miss"]
+
+
+def test_path_to_returns_root_to_node_chain():
+    root = _sample_tree()
+    path = root.path_to("root.search.hit")
+    assert [n.agent_id for n in path] == ["root", "root.search", "root.search.hit"]
+
+
+def test_path_to_returns_empty_when_not_found():
+    root = _sample_tree()
+    assert root.path_to("nope") == []
+
+
+def test_diff_finds_added_and_removed_nodes():
+    from rlmflow import ErrorNode, QueryNode, ResultNode
+
+    a = QueryNode(
+        agent_id="root",
+        children=[ResultNode(agent_id="root.x", result="ok")],
+    )
+    b = QueryNode(
+        agent_id="root",
+        id=a.id,
+        children=[
+            *a.child_nodes(),
+            ErrorNode(agent_id="root.y", error="boom"),
+        ],
+    )
+    diff = b.diff(a)
+    assert [n.agent_id for n in diff.added] == ["root.y"]
+    assert diff.removed == []
+
+    inverse = a.diff(b)
+    assert [n.agent_id for n in inverse.removed] == ["root.y"]
+    assert inverse.added == []
+
+
+def test_repr_html_wraps_tree_in_pre():
+    root = _sample_tree()
+    html = root._repr_html_()
+    assert "<pre" in html and "</pre>" in html
+    assert "root" in html
+    assert "&lt;" not in html or "[query]" in html
 
 
 def test_child_scope_lives_on_node_not_child_flow():

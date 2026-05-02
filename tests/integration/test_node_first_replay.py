@@ -23,6 +23,7 @@ def test_workspace_fork_carries_flat_runtime_tree(tmp_path: Path):
     source_workspace.path("nested").mkdir()
     source_workspace.path("nested", "data.txt").write_text("nested")
     source_workspace.context.write("context", "payload stays in context store")
+    source_workspace.trace_dir.mkdir(parents=True, exist_ok=True)
     source_workspace.trace_dir.joinpath("trace.json").write_text("{}")
 
     fork_workspace = source_workspace.fork(new_branch_id="b2", new_dir=tmp_path / "b2")

@@ -1,0 +1,28 @@
+/* styles.css — make the canvas fill the viewport on a black background */
+
+/* Base reset: no margins, no scrollbars, full-height */
+html, body {
+  height: 100%;
+  margin: 0;
+  background: #000; /* black background per contract */
+  overflow: hidden; /* no scrollbars */
+}
+
+/* Ensure the canvas is the only visible element and fills the viewport */
+#boids {
+  display: block;         /* remove inline gap behavior */
+  width: 100vw;           /* fill viewport width */
+  height: 100vh;          /* fill viewport height */
+  max-width: 100%;
+  max-height: 100%;
+  background: transparent; /* drawing will be handled by canvas; keep body black */
+  touch-action: none;     /* avoid touch scrolling on mobile */
+  -webkit-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: rgba(0,0,0,0);
+  image-rendering: optimizeSpeed;
+}
+
+/* Ensure the page can't be scrolled with focus outlines, etc. */
+:focus { outline: none; }
