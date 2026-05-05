@@ -304,12 +304,16 @@ def message_stream(agent_id: str, session: Any) -> str:
     agent, in execution order. ``session`` is any object with
     ``chain_to(node)`` and ``load()`` (i.e., a `Session`).
     """
+    from rlmflow.workspace.session import _NODE_TERMINALITY
+
     nodes = list(session.load().values())
     nodes = [n for n in nodes if n.agent_id == agent_id]
     if not nodes:
         return f"(no nodes for agent {agent_id!r})"
 
-    leaf = max(nodes, key=lambda n: len(getattr(n, "id", "")))
+    # Terminal-first: prefer a result/error/observation node so the chain
+    # walk reaches the full conversation rather than stopping at the query.
+    leaf = min(nodes, key=lambda n: _NODE_TERMINALITY.get(n.type, 99))
     chain = session.chain_to(leaf)
 
     parts: list[str] = []

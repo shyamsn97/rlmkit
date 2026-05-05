@@ -214,18 +214,22 @@ simulation in plain HTML and JavaScript, split each component into
 separate files`) settles to:
 
 ```text
-root [result] {default:gpt-5} -> Boids simulation created in output/boids-simulation with split files and trails.
-  root.index.html [result] {fast:gpt-5-mini} -> ok
-  root.styles.css [result] {fast:gpt-5-mini} -> ok
-  root.main.js    [result] {fast:gpt-5-mini} -> ok
-  root.flock.js   [result] {fast:gpt-5-mini} -> ok
-  root.boid.js    [result] {fast:gpt-5-mini} -> ok
-  root.utils.js   [result] {fast:gpt-5-mini} -> ok
+root [result] {default:gpt-5} -> Boids simulation written to output/boids-simulation with modular JS (boid, simulation, renderer) and index.html entrypoint.
+  root.index_html    [result] {fast:gpt-5-mini} -> ok
+  root.styles_css    [result] {fast:gpt-5-mini} -> ok
+  root.boid_js       [result] {fast:gpt-5-mini} -> ok
+  root.simulation_js [result] {fast:gpt-5-mini} -> ok
+  root.renderer_js   [result] {fast:gpt-5-mini} -> ok
+  root.main_js       [result] {fast:gpt-5-mini} -> ok
 ```
 
 The same render is available offline as `state.tree()` on any node.
+Filename-flavored agent ids (`index.html` → `index_html`) are sanitized
+because `.` is the parent/child delimiter in the agent tree.
 
 ### Gradio viewer
+
+![](docs/static/gradio_ui.png)
 
 `open_viewer(states)` launches a small browser app for stepping through a
 saved trace — tree, summary, and raw node JSON side by side:
@@ -271,24 +275,24 @@ stateDiagram-v2
     state "root (result)" as root
     [*] --> root
     root --> html
-    state "root.index.html (result)" as html
+    state "root.index_html (result)" as html
     html --> [*] : "ok"
     root --> css
-    state "root.styles.css (result)" as css
+    state "root.styles_css (result)" as css
     css --> [*] : "ok"
-    root --> main
-    state "root.main.js (result)" as main
-    main --> [*] : "ok"
-    root --> flock
-    state "root.flock.js (result)" as flock
-    flock --> [*] : "ok"
     root --> boid
-    state "root.boid.js (result)" as boid
+    state "root.boid_js (result)" as boid
     boid --> [*] : "ok"
-    root --> utils
-    state "root.utils.js (result)" as utils
-    utils --> [*] : "ok"
-    root --> [*] : "Boids simulation created in output/boids-simulation..."
+    root --> sim
+    state "root.simulation_js (result)" as sim
+    sim --> [*] : "ok"
+    root --> rend
+    state "root.renderer_js (result)" as rend
+    rend --> [*] : "ok"
+    root --> main
+    state "root.main_js (result)" as main
+    main --> [*] : "ok"
+    root --> [*] : "Boids simulation written to output/boids-simulation..."
 ```
 
 ### Programmatic helpers
@@ -298,16 +302,18 @@ Everything the CLI does is one function call away:
 ```python
 from rlmflow.utils.export import to_mermaid, to_mermaid_flowchart, to_mermaid_sequence, to_dot, to_d2
 from rlmflow.utils.viz import (
-    code_log, error_summary, message_stream, diff_system_prompts,
-    token_sparkline, budget_burndown, bench_table, report_md, tee,
-    slack_webhook, discord_webhook,
+    ascii_boxes, code_log, error_summary, message_stream, diff_system_prompts,
+    gantt, gantt_html, token_sparkline, budget_burndown, bench_table,
+    report_md, live, tee, slack_webhook, discord_webhook,
 )
 from rlmflow.utils.tracing import json_logs
 
-print(token_sparkline(states))         # ▁▂▅█▂   15820 tok over 7 steps
-print(error_summary(state))            # ErrorNode counts grouped by kind
-print(report_md(states, title="run")) # full Markdown report
-json_logs(states, "run.jsonl")         # one node per line
+print(token_sparkline(states))          # ▁▂▅█▂   15820 tok over 7 steps
+print(error_summary(state))             # ErrorNode counts grouped by kind
+print(message_stream("root.boid_js", session))   # rendered transcript for one agent
+print(report_md(states, title="run"))   # full Markdown report
+gantt_html(states, "run.html")          # standalone HTML swimlane
+json_logs(states, "run.jsonl")          # one node per line
 ```
 
 ## Examples
@@ -323,8 +329,9 @@ All examples share flags like `--no-viz`, `--docker-image rlmflow:local`,
 | [`needle_haystack.py`](examples/needle_haystack.py) | Needle-in-a-haystack across 500 files with custom tools and `runtime_factory`. |
 | [`summarizer.py`](examples/summarizer.py) | Recursive map-reduce over a long document. |
 | [`view_demo.py`](examples/view_demo.py) | Launch the Gradio viewer on a saved trace. |
-| [`notebooks/viz_walkthrough.ipynb`](examples/notebooks/viz_walkthrough.ipynb) | Visualization walkthrough — every render and export against the saved boids trace, including the interactive `open_viewer` inspector. |
-| [`notebooks/node_basics.ipynb`](examples/notebooks/node_basics.ipynb) | `Node` API tour — walk, find, filter, diff, session access, event streaming. |
+| [`notebooks/coding_agent.ipynb`](examples/notebooks/coding_agent.ipynb) | Build the agent, run the boids task end-to-end, open the interactive viewer. **Source of `examples/data/notebook-coding-agent/`** — every other notebook reads from here. |
+| [`notebooks/viz_walkthrough.ipynb`](examples/notebooks/viz_walkthrough.ipynb) | All 9 visualizations against the saved boids trace: inline tree, interactive viewer, topology renders (mermaid/dot/d2/sequence), step-indexed timeline, per-node detail (`message_stream`, `diff_system_prompts`), cost & reports, run-vs-run comparison, CLI equivalents. |
+| [`notebooks/node_basics.ipynb`](examples/notebooks/node_basics.ipynb) | `Node` API tour — walk, find, path_to, filter (`leaves`/`results`/`errors`/`where`), diff snapshots, session access (`FileSession.load`, `chain_to`), event streaming with `tee` / `json_logs`. |
 
 ## CLI
 
@@ -336,7 +343,10 @@ rlmflow version
 ```
 
 `view` and `render` accept a trace directory, `trace.json`, or checkpoint.
-Formats: `mermaid`, `dot`, `tree`, `gantt-html`.
+`render -f` accepts: `mermaid`, `mermaid-flowchart`, `mermaid-sequence`,
+`dot`, `d2`, `tree`, `ascii-boxes`, `gantt-html`, `report-md`, `code-log`,
+`error-summary`, `tokens` — see the [Static renders](#static-renders)
+table above for what each produces.
 
 ## Docs
 - [Positioning](docs/positioning.md): when to use rlmflow vs rlm-minimal,

@@ -6,7 +6,12 @@ from rlmflow.workspace.context import (
     FileContext,
     InMemoryContext,
 )
-from rlmflow.workspace.session import FileSession, InMemorySession, Session
+from rlmflow.workspace.session import (
+    FileSession,
+    InMemorySession,
+    Session,
+    SessionVariable,
+)
 from rlmflow.workspace.workspace import Workspace
 
 __all__ = [
@@ -17,5 +22,6 @@ __all__ = [
     "InMemoryContext",
     "InMemorySession",
     "Session",
+    "SessionVariable",
     "Workspace",
 ]

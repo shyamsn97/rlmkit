@@ -14,7 +14,7 @@ from rlmflow.utils.trace import Trace, load_trace, save_trace
 class DelegatingLLM(LLMClient):
     ROOT = (
         "```repl\n"
-        "h = delegate('child', 'do the thing')\n"
+        "h = delegate('child', 'do the thing', '')\n"
         "results = yield wait(h)\n"
         "done(results[0])\n"
         "```"

@@ -10,12 +10,21 @@ DEFAULT_QUERY = (
 
 FIRST_ACTION = (
     "Query: {query}\n\n"
-    "Your response MUST contain exactly one ```repl``` code block. "
+    "{context_hint}"
+    "Respond with exactly one ```repl``` code block."
 )
 
 CONTINUE_ACTION = (
-    "Continue working on: {query}\n\n" "Respond with a ```repl``` code block. "
+    "Continue working on: {query}\n\n"
+    "{context_hint}"
+    "Respond with one ```repl``` code block."
 )
+
+CONTEXT_HINT_PRESENT = (
+    "Relevant data is available as the `CONTEXT` REPL variable — "
+    "use `CONTEXT.read/lines/grep` to navigate it.\n\n"
+)
+CONTEXT_HINT_ABSENT = ""
 
 FINAL_ANSWER_ACTION = (
     "You have used the full iteration budget without calling done().\n\n"

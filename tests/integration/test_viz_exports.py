@@ -28,7 +28,7 @@ from rlmflow.utils.viz import (
 class DelegatingLLM(LLMClient):
     ROOT = (
         "```repl\n"
-        "h = delegate('child', 'do the thing')\n"
+        "h = delegate('child', 'do the thing', '')\n"
         "results = yield wait(h)\n"
         "done('root:' + results[0])\n"
         "```"
@@ -160,7 +160,7 @@ def test_error_summary_no_errors():
 def test_code_log_contains_action_and_observation():
     states = _run(_agent(), "code-test")
     log = code_log(states)
-    assert "delegate('child', 'do the thing')" in log
+    assert "delegate('child', 'do the thing', '')" in log
     assert "[root]" in log
 
 

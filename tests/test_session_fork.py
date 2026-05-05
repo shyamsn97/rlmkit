@@ -102,6 +102,26 @@ def test_context_falls_back_to_root_for_child_agents(tmp_path: Path):
     assert context.read(0, 6) == "shared"
 
 
+def test_context_variable_fork_returns_full_snapshot(tmp_path: Path):
+    """``CONTEXT.fork()`` is the explicit hand-off-to-child API.
+
+    It snapshots the parent's payload as a string for use as
+    ``delegate(name, query, CONTEXT.fork())``. It must return the same
+    bytes ``read()`` would, irrespective of the parent's later mutations.
+    """
+    store = FileContext(tmp_path / "context")
+    store.write("context", "parent payload")
+
+    parent = ContextVariable(store, agent_id="root")
+    snapshot = parent.fork()
+
+    assert snapshot == "parent payload"
+    assert snapshot == parent.read()
+
+    store.write("context", "parent mutated", agent_id="root")
+    assert snapshot == "parent payload", "fork() result must be a snapshot"
+
+
 def test_fork_copies_contexts(tmp_path: Path):
     src = FileContext(tmp_path / "b1")
     src.write("context", "shared context")
@@ -126,4 +146,5 @@ def test_rlm_start_seeds_context_and_injects_context_variable(tmp_path: Path):
 
     assert workspace.context.list_contexts(agent_id="root") == ["context"]
     assert "CONTEXT" in engine.runtime.repl.namespace
-    assert engine.runtime.repl.namespace["CONTEXT"].lines(1, 2).strip() == "two"
+    text = engine.runtime.repl.namespace["CONTEXT"].read()
+    assert text == "one\ntwo\nthree\n"

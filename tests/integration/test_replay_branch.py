@@ -37,13 +37,12 @@ def test_workspace_session_records_nodes_for_branch(tmp_path: Path):
 def test_workspace_fork_copies_user_files_session_and_context(tmp_path: Path):
     source = Workspace.create(tmp_path / "b1", branch_id="b1")
     source.path("marker.txt").write_text("copied")
-    source.context.write("context", "payload")
     engine = RLMFlow(
         llm_client=StaticLLM(),
         workspace=source,
         config=RLMConfig(max_iterations=2),
     )
-    _run(engine, engine.start("test query"))
+    _run(engine, engine.start("test query", context="payload"))
 
     forked = source.fork(new_branch_id="b2", new_dir=tmp_path / "b2")
 

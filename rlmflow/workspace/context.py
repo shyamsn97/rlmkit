@@ -11,15 +11,20 @@ from typing import Any
 
 CONTEXT_VARIABLE_PROMPT = """
 **Context variable:**
-- `CONTEXT.info()` — metadata about the current task/data payload.
-- `CONTEXT.read(start=0, end=None)` — read a character slice.
-- `CONTEXT.lines(start=0, end=None)` — read line range `start:end`.
-- `CONTEXT.line_count()` — count lines.
-- `CONTEXT.grep(pattern, max_results=50)` — search by regex.
 
-Use `CONTEXT` for long task input. Do not print the whole context; inspect
-samples, split it into chunks, delegate chunk work, and aggregate structured
-results.
+`CONTEXT` is the read-only data slot for *this* agent — always present, possibly empty.
+The query lives in your messages, not here. `CONTEXT` is just the data to operate on.
+**Size it up first**: `CONTEXT.info()["chars"] == 0` means no payload — work from the query.
+
+API:
+- `CONTEXT.info()` / `CONTEXT.line_count()` — measure.
+- `CONTEXT.read(start=0, end=None)` — char slice.
+- `CONTEXT.lines(start=0, end=None)` — line slice.
+- `CONTEXT.grep(pattern, max_results=50)` — regex; returns `lineno:line` rows.
+- `CONTEXT.fork()` — snapshot for handing to a child (isolated copy of your view).
+
+For long `CONTEXT`, don't `print` it whole (output is truncated). Sample, chunk,
+delegate one sub-agent per chunk with a structured reply, aggregate in the parent.
 """
 
 
@@ -70,6 +75,19 @@ class ContextVariable:
                     break
         return "\n".join(matches)
 
+    def fork(self) -> str:
+        """Snapshot this ``CONTEXT`` for handoff to a child agent.
+
+        Use as ``delegate(name, query, CONTEXT.fork())`` — the child
+        receives an isolated copy of the parent's payload. Equivalent
+        to :meth:`read` with no args; the name conveys intent
+        ("inherit my view, own your own slot"). Reach for it only
+        when the child genuinely needs the same data the parent saw
+        (reviewers, auditors, retry-after-failure). Default delegation
+        should pass a fresh slice or ``""``.
+        """
+        return self.store.read(self.key, agent_id=self.agent_id)
+
 
 class Context(ABC):
     """Store task/data payloads exposed to the REPL as ``context``."""
@@ -109,17 +127,6 @@ class Context(ABC):
             "approx_tokens": len(text) // 4,
             "lines": len(text.splitlines()),
         }
-
-    def context_prompt_hint(self, *, agent_id: str | None = None) -> str:
-        contexts = self.list_contexts(agent_id=agent_id)
-        if not contexts:
-            return ""
-        context_list = "\n".join(f"- `{key}`" for key in contexts)
-        return (
-            CONTEXT_VARIABLE_PROMPT.strip()
-            + "\n\nAvailable context payload keys:\n"
-            + context_list
-        )
 
 
 class FileContext(Context):
@@ -220,4 +227,10 @@ class InMemoryContext(Context):
         return out
 
 
-__all__ = ["Context", "ContextVariable", "FileContext", "InMemoryContext"]
+__all__ = [
+    "CONTEXT_VARIABLE_PROMPT",
+    "Context",
+    "ContextVariable",
+    "FileContext",
+    "InMemoryContext",
+]

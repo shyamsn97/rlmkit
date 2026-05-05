@@ -25,7 +25,7 @@ class DoneLLM(LLMClient):
 
 class DelegatingLLM(LLMClient):
     ROOT_REPLY = '''```repl
-h = delegate("child", "do the thing")
+h = delegate("child", "do the thing", "")
 results = yield wait(h)
 done(results[0])
 ```'''

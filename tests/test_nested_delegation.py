@@ -17,7 +17,7 @@ class RecursiveLLM(LLMClient):
         if depth < max_depth and depth < self.max_child_depth:
             return (
                 "```repl\n"
-                'h = delegate("child", "go deeper")\n'
+                'h = delegate("child", "go deeper", "")\n'
                 "results = yield wait(h)\n"
                 'done(AGENT_ID + "->" + results[0])\n'
                 "```"
@@ -119,7 +119,7 @@ def test_model_routing_is_stored_on_child_nodes():
         def chat(self, messages, *args, **kwargs):
             return (
                 "```repl\n"
-                'h = delegate("worker", "use fast", model="fast")\n'
+                'h = delegate("worker", "use fast", "", model="fast")\n'
                 "results = yield wait(h)\n"
                 "done(results[0])\n"
                 "```"

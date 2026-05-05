@@ -47,7 +47,7 @@ def test_delegation_resumes_parent():
                 return '```repl\ndone("child-result")\n```'
             return (
                 "```repl\n"
-                'h = delegate("child", "child task")\n'
+                'h = delegate("child", "child task", "")\n'
                 "results = yield wait(h)\n"
                 'done("parent:" + results[0])\n'
                 "```"
@@ -223,7 +223,7 @@ def test_child_scope_lives_on_node_not_child_flow():
                 return '```repl\nprint(AGENT_ID, DEPTH)\ndone("child")\n```'
             return (
                 "```repl\n"
-                'h = delegate("child", "child task")\n'
+                'h = delegate("child", "child task", "")\n'
                 "results = yield wait(h)\n"
                 'done(results[0])\n'
                 "```"
@@ -258,7 +258,7 @@ def test_delegate_can_pass_child_context_payload(tmp_path):
                 return '```repl\ndone(CONTEXT.read())\n```'
             return (
                 "```repl\n"
-                'h = delegate("child", "child task", context="child payload")\n'
+                'h = delegate("child", "child task", "child payload")\n'
                 "results = yield wait(h)\n"
                 'done(results[0])\n'
                 "```"
@@ -277,4 +277,7 @@ def test_delegate_can_pass_child_context_payload(tmp_path):
 
     assert isinstance(node, ResultNode)
     assert node.result == "child payload"
-    assert workspace.context.read("context", agent_id="root.child") == "child payload"
+    assert (
+        workspace.context.read("context", agent_id="root.child")
+        == "child payload"
+    )
