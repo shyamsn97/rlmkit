@@ -56,14 +56,24 @@ privileges. Keep that surface small and validate arguments.
 
 ## Overrides for approval gates
 
+`step_action(node)` is the hook between an `ActionNode` (LLM reply +
+extracted code) and the resulting `ObservationNode` / `ResultNode` /
+`SupervisingNode`. Override it to gate, classify, or rewrite code
+before it touches the runtime:
+
 ```python
-class ReviewingRLM(RLM):
-    def step_exec(self, state):
-        code = state.event.code if state.event else ""
-        if "rm -rf" in code and not input(f"run? {code}\n> ") == "y":
-            return state.update(status=Status.FINISHED, result="rejected")
-        return super().step_exec(state)
+from rlmflow import RLMFlow
+from rlmflow.node import ActionNode, ResultNode
+
+class ReviewingRLM(RLMFlow):
+    def step_action(self, node: ActionNode):
+        if "rm -rf" in node.code and input(f"run? {node.code}\n> ") != "y":
+            return self.record_successor(
+                node, node.successor(ResultNode, result="rejected")
+            )
+        return super().step_action(node)
 ```
 
-Or override `execute_code` to route code through a classifier, a diff
-tool, or a manual approval step before it reaches the runtime.
+Or override `execute_code(node, code) -> str` to route code through a
+classifier, a diff tool, or a manual approval step before it reaches
+the runtime.

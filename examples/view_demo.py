@@ -25,9 +25,9 @@ root_action = s0.successor(
     ActionNode,
     reply="I'll split this into files and delegate each part.",
     code=(
-        'h1 = delegate("index_html", "Write index.html")\n'
-        'h2 = delegate("style_css", "Write style.css")\n'
-        'h3 = delegate("script_js", "Write script.js with boids logic")\n'
+        'h1 = delegate("index_html", "Write index.html", "")\n'
+        'h2 = delegate("style_css", "Write style.css", "")\n'
+        'h3 = delegate("script_js", "Write script.js with boids logic", "")\n'
         "results = yield wait(h1, h2, h3)\n"
         'done("\\n".join(results))'
     ),

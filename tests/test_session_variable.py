@@ -6,7 +6,6 @@ from pathlib import Path
 
 from rlmflow.node import (
     ActionNode,
-    ErrorNode,
     ObservationNode,
     QueryNode,
     ResultNode,

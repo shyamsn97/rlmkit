@@ -114,17 +114,57 @@ chain = workspace.session.chain_to(node)
 ```
 
 `Workspace.context` stores optional payloads exposed inside the REPL as
-`CONTEXT`:
+`CONTEXT`. The root agent's payload is keyword-only and optional:
 
 ```python
 node = agent.start("answer from the payload", context=large_text)
 ```
 
-Inside the REPL:
+Inside the REPL, agents see `CONTEXT` (read-only payload), `SESSION`
+(read-only view of every other agent in the run), and the standard
+filesystem tools. Sample, slice, or fork:
 
 ```python
-sample = CONTEXT.read(0, 2000)
+CONTEXT.info()                  # {"chars": int, "lines": int}
+sample  = CONTEXT.read(0, 2000) # char slice
+window  = CONTEXT.lines(0, 50)  # line slice
+hits    = CONTEXT.grep(r"TODO") # lineno:line rows
+snap    = CONTEXT.fork()        # snapshot for handoff to a child
 ```
 
-See [`showcase.py`](../examples/showcase.py) for a runnable walkthrough
-of everything above.
+## Delegation
+
+Children are spawned with a positional, mandatory `context`:
+
+```python
+delegate(name, query, context, *, model=None)
+```
+
+- Pass `""` when the child works from the query alone (the most common
+  case for code-only tasks).
+- Pass a `CONTEXT.lines(...)` / `CONTEXT.read(...)` slice when each
+  child reasons over a different chunk of the parent's payload
+  (chunk-and-aggregate).
+- Pass `CONTEXT.fork()` only when the child genuinely needs the
+  parent's full view (reviewers, auditors, deterministic retry).
+
+The default prompt biases toward **inline first**: if you (the parent)
+already know how to produce the answer end-to-end — a known multi-file
+artifact, a familiar algorithm, a self-contained transform — write it
+yourself with `write_file` / direct compute. Reserve `delegate(...)`
+for work that is both parallel **and** requires distinct reasoning per
+child (different data slices, different sources, separate verification).
+Cross-file schema drift between siblings is the #1 multi-file failure
+mode; inlining sidesteps it entirely.
+
+## Walkthroughs
+
+- [`examples/showcase.py`](../examples/showcase.py) — runnable
+  walkthrough of stepping, checkpointing, intervention, and rewind.
+- [`examples/notebooks/coding_agent.ipynb`](../examples/notebooks/coding_agent.ipynb)
+  — generates the canonical trace under
+  `examples/data/notebook-coding-agent/`.
+- [`examples/notebooks/node_basics.ipynb`](../examples/notebooks/node_basics.ipynb)
+  — querying that trace via the typed node API.
+- [`examples/notebooks/viz_walkthrough.ipynb`](../examples/notebooks/viz_walkthrough.ipynb)
+  — every visualization helper against the same trace.

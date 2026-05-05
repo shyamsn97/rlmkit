@@ -14,11 +14,10 @@ authors = [
 ]
 keywords = ["llm", "agent", "recursive", "graph", "repl"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -31,10 +30,10 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["openai>=1.0"]
 anthropic = ["anthropic>=0.20"]
-viewer = ["gradio>=4.29"]
-viz = ["plotly>=5.0"]
+# Gradio viewer pulls plotly transitively (used by the interactive timeline).
+viewer = ["gradio>=4.29", "plotly>=5.0"]
 all = ["openai>=1.0", "anthropic>=0.20", "gradio>=4.29", "plotly>=5.0"]
-dev = ["pytest>=7.0", "ruff>=0.4"]
+dev = ["pytest>=7.0", "pytest-cov>=5.0", "ruff>=0.4"]
 
 [project.urls]
 Homepage = "https://github.com/shyamsn97/rlmflow"
@@ -49,7 +48,21 @@ packages = ["rlmflow"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.coverage.run]
+source = ["rlmflow"]
+omit = ["*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 100
+extend-exclude = ["examples/notebooks", "examples/data"]

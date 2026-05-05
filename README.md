@@ -206,6 +206,24 @@ that graph. The coding agent example
 already exercises every option below — its saved trace under
 `examples/data/notebook-coding-agent/` is the source for the renders here.
 
+
+### Gradio viewer
+
+![](docs/static/gradio_ui.png)
+
+`open_viewer(states)` launches a small browser app for stepping through a
+saved trace — tree, summary, and raw node JSON side by side:
+
+```python
+from rlmflow.utils.trace import load_trace
+from rlmflow.utils.viewer import open_viewer
+
+trace = load_trace("examples/data/notebook-coding-agent/trace")
+open_viewer(trace.states)
+```
+
+Or from a checkpoint via the CLI: `rlmflow view examples/data/notebook-coding-agent/trace`.
+
 ### Live terminal tree
 
 `rlmflow.utils.viz.live(agent, state)` drives the step loop and renders a
@@ -226,23 +244,6 @@ root [result] {default:gpt-5} -> Boids simulation written to output/boids-simula
 The same render is available offline as `state.tree()` on any node.
 Filename-flavored agent ids (`index.html` → `index_html`) are sanitized
 because `.` is the parent/child delimiter in the agent tree.
-
-### Gradio viewer
-
-![](docs/static/gradio_ui.png)
-
-`open_viewer(states)` launches a small browser app for stepping through a
-saved trace — tree, summary, and raw node JSON side by side:
-
-```python
-from rlmflow.utils.trace import load_trace
-from rlmflow.utils.viewer import open_viewer
-
-trace = load_trace("examples/data/notebook-coding-agent/trace")
-open_viewer(trace.states)
-```
-
-Or from a checkpoint via the CLI: `rlmflow view examples/data/notebook-coding-agent/trace`.
 
 ### Static renders
 
@@ -333,6 +334,24 @@ All examples share flags like `--no-viz`, `--docker-image rlmflow:local`,
 | [`notebooks/viz_walkthrough.ipynb`](examples/notebooks/viz_walkthrough.ipynb) | All 9 visualizations against the saved boids trace: inline tree, interactive viewer, topology renders (mermaid/dot/d2/sequence), step-indexed timeline, per-node detail (`message_stream`, `diff_system_prompts`), cost & reports, run-vs-run comparison, CLI equivalents. |
 | [`notebooks/node_basics.ipynb`](examples/notebooks/node_basics.ipynb) | `Node` API tour — walk, find, path_to, filter (`leaves`/`results`/`errors`/`where`), diff snapshots, session access (`FileSession.load`, `chain_to`), event streaming with `tee` / `json_logs`. |
 
+## Benchmarks
+
+A runnable RLM-vs-flat harness for **OOLONG** (long-context aggregation,
+~250k tokens) lives under [`benchmarks/oolong/`](benchmarks/oolong/).
+It mirrors Prime Intellect's reference environment but talks directly
+to `rlmflow` instead of `verifiers`. Three modes — `standard` (one big
+flat call), `rlm` (recursive scaffold), `rlm_tips` (recursive +
+chunking hints) — across `synth`, `synth_with_labels`, and `real`
+subsets, scored deterministically against the published gold answers.
+
+```bash
+python benchmarks/oolong/run.py --mode rlm --subset synth --limit 50
+python benchmarks/oolong/aggregate.py --runs runs/oolong-*
+```
+
+See [`benchmarks/oolong/README.md`](benchmarks/oolong/README.md) for
+flags, scoring details, and ablation scripts.
+
 ## CLI
 
 ```
@@ -356,11 +375,14 @@ table above for what each produces.
   traces, session/context layout, live tree, gantt, topology exports,
   Gradio viewer, CLI.
 - [Control](docs/control.md): step loop, checkpoint, rewind, fork
-  (`Workspace.fork`), intervention, custom prompts, runtimes, and tools.
+  (`Workspace.fork`, `CONTEXT.fork()`), `delegate(name, query, context)`,
+  inline-first strategy, intervention, custom prompts, runtimes, tools.
 - [Runtimes](docs/runtimes.md): `Runtime` protocol, shipped runtimes
   (Local / Subprocess / Docker / Modal), writing your own.
 - [Security](docs/security.md): trust model, Docker isolation knobs,
   engine-level caps, proxied tools, approval gates.
+- [Changelog](CHANGELOG.md): release-by-release changes, including the
+  upcoming `delegate(...)` mandatory-`context` break.
 
 ## References
 
