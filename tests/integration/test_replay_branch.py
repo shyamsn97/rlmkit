@@ -29,7 +29,7 @@ def test_workspace_session_records_nodes_for_branch(tmp_path: Path):
     final = _run(engine, engine.start("test query"))
     nodes = workspace.session.load()
 
-    assert final.result == "ok"
+    assert final.current().result == "ok"
     assert len(nodes) == 3
     assert {node.branch_id for node in nodes.values()} == {"b1"}
 

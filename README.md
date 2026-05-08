@@ -269,31 +269,21 @@ rlmflow render examples/data/notebook-coding-agent/trace -f report-md  -o run.md
 rlmflow render examples/data/notebook-coding-agent/trace -f tokens
 ```
 
-GitHub renders mermaid inline, so the output drops straight into a doc:
+GitHub renders mermaid inline, so the output drops straight into a doc.
+The example below is the `to_mermaid_flowchart(state)` projection of the
+boids run; it renders reliably across the GitHub-supported mermaid
+versions:
 
 ```mermaid
-stateDiagram-v2
-    state "root (result)" as root
-    [*] --> root
-    root --> html
-    state "root.index_html (result)" as html
-    html --> [*] : "ok"
-    root --> css
-    state "root.styles_css (result)" as css
-    css --> [*] : "ok"
-    root --> boid
-    state "root.boid_js (result)" as boid
-    boid --> [*] : "ok"
-    root --> sim
-    state "root.simulation_js (result)" as sim
-    sim --> [*] : "ok"
-    root --> rend
-    state "root.renderer_js (result)" as rend
-    rend --> [*] : "ok"
-    root --> main
-    state "root.main_js (result)" as main
-    main --> [*] : "ok"
-    root --> [*] : "Boids simulation written to output/boids-simulation..."
+flowchart TD
+    root["root<br/><i>result</i><br/>Boids simulation written to output/boids-simulation..."]:::result
+    root --> html["root.index_html<br/><i>result</i><br/>ok"]:::result
+    root --> css["root.styles_css<br/><i>result</i><br/>ok"]:::result
+    root --> boid["root.boid_js<br/><i>result</i><br/>ok"]:::result
+    root --> sim["root.simulation_js<br/><i>result</i><br/>ok"]:::result
+    root --> rend["root.renderer_js<br/><i>result</i><br/>ok"]:::result
+    root --> main["root.main_js<br/><i>result</i><br/>ok"]:::result
+    classDef result fill:#3fb95022,stroke:#3fb950,color:#c9d1d9;
 ```
 
 ### Programmatic helpers
@@ -366,6 +356,9 @@ rlmflow version
 `dot`, `d2`, `tree`, `ascii-boxes`, `gantt-html`, `report-md`, `code-log`,
 `error-summary`, `tokens` — see the [Static renders](#static-renders)
 table above for what each produces.
+
+## Todo
+
 
 ## Docs
 - [Positioning](docs/positioning.md): when to use rlmflow vs rlm-minimal,

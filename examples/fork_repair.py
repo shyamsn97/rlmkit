@@ -137,7 +137,7 @@ def main() -> None:
     for name, implementation, label in branches:
         workspace, node, passed, output = run_branch(root, name, implementation, label)
         results.append((passed, workspace, node, output))
-        print(f"{name}: tests={'PASS' if passed else 'FAIL'} result={node.result!r}")
+        print(f"{name}: tests={'PASS' if passed else 'FAIL'} result={node.get_result()!r}")
         print("  " + brief_test_output(output).replace("\n", "\n  "))
 
     winner = next((item for item in results if item[0]), results[0])

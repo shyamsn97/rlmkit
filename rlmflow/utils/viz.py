@@ -6,9 +6,12 @@ import difflib
 import json
 from collections import Counter
 from collections.abc import Iterable, Iterator
-from typing import Any, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Literal
 
-from rlmflow.node import Node
+from rlmflow.node import Node, parse_node_json
+from rlmflow.workspace.session import FileSession, Session
 
 
 def _node_label(state: Node):
@@ -59,7 +62,7 @@ class LiveView:
         self._console = console or Console()
         self._live: Any = None
 
-    def __enter__(self) -> "LiveView":
+    def __enter__(self) -> LiveView:
         from rich.live import Live
 
         # auto_refresh=False keeps rich.Live from publishing background frames in
@@ -422,7 +425,8 @@ def report_md(
     parts.append(f"**Tokens:** {inp + out:,} ({inp:,} in, {out:,} out)")
     if max_budget is not None:
         parts.append(f"**Budget:** {budget_burndown(states, max_budget)}")
-    parts.append(f"**Outcome:** {final.type}")
+    current = final.current()
+    parts.append(f"**Outcome:** {current.type}")
     if final.errors():
         parts.append(f"**Errors:** {len(final.errors())}")
 
@@ -435,7 +439,7 @@ def report_md(
     if final.errors():
         parts.extend(["", "## Errors", "", "```", error_summary(final), "```"])
 
-    result = getattr(final, "result", None)
+    result = getattr(current, "result", None)
     if result:
         parts.extend(["", "## Result", "", "```", str(result), "```"])
 
@@ -582,3 +586,277 @@ def ascii_boxes(state: Node) -> str:
     con = Console(record=True, width=120)
     con.print(build(state))
     return con.export_text()
+
+
+GraphMode = Literal["events", "snapshot"]
+EdgeKind = Literal["next", "spawn", "contains"]
+
+
+@dataclass(frozen=True)
+class VizNode:
+    id: str
+    type: str
+    agent_id: str
+    depth: int
+    label: str
+    current: bool
+    payload: Node
+
+
+@dataclass(frozen=True)
+class VizEdge:
+    source: str
+    target: str
+    kind: EdgeKind
+
+
+@dataclass(frozen=True)
+class VizGraph:
+    nodes: list[VizNode]
+    edges: list[VizEdge]
+    mode: GraphMode
+    step: int | None = None
+
+    @property
+    def payloads(self) -> list[Node]:
+        return [node.payload for node in self.nodes]
+
+    @property
+    def nodes_by_id(self) -> dict[str, Node]:
+        return {node.id: node.payload for node in self.nodes}
+
+
+def session_events(session: Session | str | Path | None) -> list[Node]:
+    """Return persisted node events in append order when available."""
+    if session is None:
+        return []
+    if isinstance(session, (str, Path)):
+        session = FileSession(session)
+    nodes_path = getattr(session, "nodes_path", None)
+    if nodes_path is not None:
+        path = Path(nodes_path)
+        if not path.exists():
+            return []
+        return [
+            parse_node_json(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    return list(session.load().values())
+
+
+def trace_events(path: str | Path) -> list[Node]:
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return [parse_node_json(json.dumps(event)) for event in data.get("events", [])]
+
+
+def build_viz_graph(
+    *,
+    states: list[Node] | None = None,
+    session: Session | str | Path | None = None,
+    events: list[Node] | None = None,
+    step: int | None = None,
+    mode: GraphMode = "events",
+) -> VizGraph:
+    """Build the step-local graph that all visualization surfaces should share."""
+    if mode == "snapshot":
+        state = _state_for_step(states, step)
+        nodes = (
+            list(state.walk()) if state is not None else _latest_unique(events or [])
+        )
+        return _graph_from_nodes(nodes, mode="snapshot", step=step)
+
+    event_nodes = list(events or session_events(session))
+    if not event_nodes:
+        raise ValueError("mode='events' requires `events=` or a persisted `session=`.")
+
+    visible = _events_visible_at_step(event_nodes, states, step)
+    return _graph_from_nodes(visible, mode="events", step=step)
+
+
+def node_tree(graph: VizGraph) -> str:
+    """Render a node-event tree from a VizGraph."""
+    by_id = graph.nodes_by_id
+    children: dict[str, list[tuple[str, EdgeKind]]] = {
+        node.id: [] for node in graph.nodes
+    }
+    parented: set[str] = set()
+    for edge in graph.edges:
+        if edge.source not in by_id or edge.target not in by_id:
+            continue
+        children.setdefault(edge.source, []).append((edge.target, edge.kind))
+        parented.add(edge.target)
+
+    roots = [node.id for node in graph.nodes if node.id not in parented]
+    roots.sort(key=lambda node_id: _viz_node_sort_key(by_id[node_id]))
+
+    lines: list[str] = []
+
+    def label(node: Node) -> str:
+        suffix = _agent_suffix(node.agent_id)
+        result = getattr(node, "result", "")
+        preview = f" -> {str(result).strip()[:80]}" if result else ""
+        return f"{suffix} [{node.type}] {{{node.model_label}}}{preview}"
+
+    def walk(
+        node_id: str, prefix: str, is_last: bool, edge_kind: EdgeKind | None
+    ) -> None:
+        node = by_id[node_id]
+        connector = (
+            "" if not prefix and edge_kind is None else ("└── " if is_last else "├── ")
+        )
+        edge_label = f"{edge_kind}: " if edge_kind else ""
+        lines.append(f"{prefix}{connector}{edge_label}{label(node)}")
+        next_prefix = prefix + ("    " if is_last else "│   ") if connector else ""
+        kids = children.get(node_id, [])
+        kids.sort(
+            key=lambda item: (item[1] != "next", _viz_node_sort_key(by_id[item[0]]))
+        )
+        for idx, (child_id, kind) in enumerate(kids):
+            walk(child_id, next_prefix, idx == len(kids) - 1, kind)
+
+    for idx, root in enumerate(roots):
+        walk(root, "", idx == len(roots) - 1, None)
+    return "\n".join(lines)
+
+
+def _state_for_step(states: list[Node] | None, step: int | None) -> Node | None:
+    if not states:
+        return None
+    idx = len(states) - 1 if step is None else max(0, min(int(step), len(states) - 1))
+    return states[idx]
+
+
+def _events_visible_at_step(
+    events: list[Node], states: list[Node] | None, step: int | None
+) -> list[Node]:
+    if not states:
+        if step is None:
+            cutoff = len(events) - 1
+        else:
+            cutoff = max(0, min(int(step), len(events) - 1))
+        return _latest_unique(events[: cutoff + 1])
+
+    state = _state_for_step(states, step)
+    if state is None:
+        return []
+
+    visible_ids = {node.id for node in state.walk()}
+    cutoff = max(
+        (
+            _event_position(events, node)
+            for node in state.walk()
+            if node.id in visible_ids
+        ),
+        default=-1,
+    )
+    if cutoff < 0:
+        return list(state.walk())
+    return _latest_unique(events[: cutoff + 1])
+
+
+def _latest_unique(events: list[Node]) -> list[Node]:
+    latest: dict[str, Node] = {}
+    order: list[str] = []
+    for event in events:
+        if event.id not in latest:
+            order.append(event.id)
+        latest[event.id] = event
+    return [latest[node_id] for node_id in order]
+
+
+def _event_position(events: list[Node], target: Node) -> int:
+    target_sig = _node_signature(target)
+    fallback = -1
+    for idx, event in enumerate(events):
+        if event.id != target.id:
+            continue
+        if fallback < 0:
+            fallback = idx
+        if _node_signature(event) == target_sig:
+            return idx
+    return fallback
+
+
+def _node_signature(node: Node) -> tuple[str, str, tuple[str, ...]]:
+    return (node.id, node.type, tuple(_child_ids(node)))
+
+
+def _graph_from_nodes(
+    nodes: list[Node], *, mode: GraphMode, step: int | None = None
+) -> VizGraph:
+    by_id = {node.id: node for node in nodes}
+    edges: list[VizEdge] = []
+    seen_edges: set[tuple[str, str, EdgeKind]] = set()
+
+    def add_edge(source: str, target: str, kind: EdgeKind) -> None:
+        if source == target or source not in by_id or target not in by_id:
+            return
+        key = (source, target, kind)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        edges.append(VizEdge(source=source, target=target, kind=kind))
+
+    first_by_agent: dict[str, Node] = {}
+    latest_by_agent: dict[str, Node] = {}
+    for node in nodes:
+        first_by_agent.setdefault(node.agent_id, node)
+        latest_by_agent[node.agent_id] = node
+
+    agent_of_id = {node.id: node.agent_id for node in nodes}
+    for node in nodes:
+        for child_id in _child_ids(node):
+            child_agent = agent_of_id.get(child_id)
+            if child_agent is None:
+                continue
+            if child_agent == node.agent_id:
+                add_edge(node.id, child_id, "next")
+            else:
+                first = first_by_agent.get(child_agent)
+                if first is not None:
+                    add_edge(node.id, first.id, "spawn")
+
+    viz_nodes = [
+        VizNode(
+            id=node.id,
+            type=node.type,
+            agent_id=node.agent_id,
+            depth=node.depth or 0,
+            label=_viz_node_label(node),
+            current=latest_by_agent.get(node.agent_id) is node,
+            payload=node,
+        )
+        for node in nodes
+    ]
+    return VizGraph(nodes=viz_nodes, edges=edges, mode=mode, step=step)
+
+
+def _child_ids(node: Node) -> list[str]:
+    return [
+        child.id if isinstance(child, Node) else str(child) for child in node.children
+    ]
+
+
+def _agent_suffix(agent_id: str) -> str:
+    if not agent_id or agent_id == "root":
+        return "root"
+    return agent_id.rsplit(".", 1)[-1]
+
+
+def _viz_node_label(node: Node) -> str:
+    suffix = _agent_suffix(node.agent_id)
+    return f"{suffix}:{node.type}"
+
+
+def _viz_node_sort_key(node: Node) -> tuple[int, int, str]:
+    type_order = {
+        "query": 0,
+        "action": 1,
+        "supervising": 2,
+        "observation": 3,
+        "resume": 4,
+        "result": 5,
+        "error": 6,
+    }
+    return (node.depth or 0, type_order.get(node.type, 99), node.id)

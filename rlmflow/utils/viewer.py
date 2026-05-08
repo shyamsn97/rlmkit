@@ -22,6 +22,13 @@ from pathlib import Path
 from typing import Any
 
 from rlmflow.node import Node, parse_node_obj
+from rlmflow.utils.viz import (
+    GraphMode,
+    VizEdge,
+    build_viz_graph,
+    node_tree,
+    session_events,
+)
 from rlmflow.workspace.session import FileSession, Session
 
 # Imported at module top so annotations on nested handlers (e.g. `evt:
@@ -145,6 +152,103 @@ def _agent_result_preview(chain: list[Node], limit: int = 64) -> str:
         body = f"<in {last.type}>"
     body = body.replace("\n", " ")
     return body[:limit] + ("…" if len(body) > limit else "")
+
+
+def node_session(node: Node, *, include_system: bool = False) -> str:
+    """Render every message in this graph subtree, across all agents, in graph order.
+
+    Each message line is prefixed with the agent it came from, so
+    cross-agent flows read top-to-bottom like a chat log. When
+    ``include_system`` is true, an agent's system prompt is emitted the
+    first time that agent appears.
+    """
+    parts: list[str] = []
+    seen_systems: set[str] = set()
+    for item in node.walk():
+        agent = item.agent_id or "root"
+        if include_system and agent not in seen_systems and item.system_prompt:
+            seen_systems.add(agent)
+            parts.append(f"--- [{agent}] system ---\n{item.system_prompt.strip()}")
+
+        if item.type == "query":
+            parts.append(f"--- [{agent}] query ---\n{(item.query or '').strip()}")
+        elif item.type == "action":
+            parts.append(
+                f"--- [{agent}] assistant ---\n{(getattr(item, 'reply', '') or '').strip()}"
+            )
+        elif item.type == "observation":
+            parts.append(
+                f"--- [{agent}] observation ---\n{(getattr(item, 'content', '') or '').strip()}"
+            )
+        elif item.type == "supervising":
+            wait_on = ", ".join(getattr(item, "waiting_on", []) or [])
+            parts.append(f"--- [{agent}] supervising ---\nwaiting on: {wait_on}")
+        elif item.type == "resume":
+            parts.append(
+                f"--- [{agent}] resume ---\n{(getattr(item, 'content', '') or '').strip()}"
+            )
+        elif item.type == "error":
+            parts.append(
+                f"--- [{agent}] error ({getattr(item, 'error', '')}) ---\n"
+                f"{(getattr(item, 'content', '') or '').strip()}"
+            )
+        elif item.type == "result":
+            parts.append(
+                f"--- [{agent}] result ---\n{(getattr(item, 'result', '') or '').strip()}"
+            )
+    return "\n\n".join(parts)
+
+
+def node_transcript(
+    node: Node,
+    agent_id: str | None = None,
+    *,
+    session: Session | str | Path | None = None,
+    include_system: bool = True,
+) -> str:
+    """Render a clean transcript for one agent in a node snapshot.
+
+    By default this only uses the subtree visible from ``node``. Pass a
+    session if you want to reconstruct from the persisted event log.
+    """
+    agent_id = agent_id or node.agent_id
+    sess = _resolve_session([node], session)
+    nodes = _all_nodes([node], sess) if sess is not None else list(node.walk())
+    chain = _agent_chain(agent_id, nodes)
+    if not chain:
+        return f"(no nodes for agent {agent_id!r})"
+
+    parts: list[str] = []
+    if include_system and chain[0].system_prompt:
+        parts.append(f"--- system ---\n{chain[0].system_prompt.strip()}")
+    for item in chain:
+        if item.type == "query":
+            parts.append(f"--- query ---\n{(item.query or '').strip()}")
+        elif item.type == "action":
+            parts.append(
+                f"--- assistant ---\n{(getattr(item, 'reply', '') or '').strip()}"
+            )
+        elif item.type == "observation":
+            parts.append(
+                f"--- observation ---\n{(getattr(item, 'content', '') or '').strip()}"
+            )
+        elif item.type == "supervising":
+            wait_on = ", ".join(getattr(item, "waiting_on", []) or [])
+            parts.append(f"--- supervising ---\nwaiting on: {wait_on}")
+        elif item.type == "resume":
+            parts.append(
+                f"--- resume ---\n{(getattr(item, 'content', '') or '').strip()}"
+            )
+        elif item.type == "error":
+            parts.append(
+                f"--- error ({getattr(item, 'error', '')}) ---\n"
+                f"{(getattr(item, 'content', '') or '').strip()}"
+            )
+        elif item.type == "result":
+            parts.append(
+                f"--- result ---\n{(getattr(item, 'result', '') or '').strip()}"
+            )
+    return "\n\n".join(parts)
 
 
 def _normalize_reply(reply: str, code: str) -> str:
@@ -284,6 +388,25 @@ def _node_hover_text(node: Node) -> str:
     return "<br>".join(rows)
 
 
+def _node_display_label(
+    node: Node,
+    *,
+    repeated_agent: bool = False,
+    is_agent_entry: bool = False,
+    limit: int = 22,
+) -> str:
+    label = node.agent_id or node.id[:8]
+    if label.startswith("root."):
+        label = label[len("root.") :]
+    if (node.depth or 0) >= 2 and "." in label:
+        label = label.rsplit(".", 1)[-1]
+    if repeated_agent and not is_agent_entry:
+        label = node.type
+    if len(label) > limit:
+        label = label[: limit - 1] + "…"
+    return label
+
+
 def _node_children_ids(node: Node) -> list[str]:
     out: list[str] = []
     for child in node.children:
@@ -297,6 +420,7 @@ def _build_graph_figure(
     height: int = 360,
     title: str = "execution graph",
     id_to_agent: dict[str, str] | None = None,
+    edges: list[VizEdge] | None = None,
 ):
     """Plotly figure showing every node, colored by type, edges = children.
 
@@ -325,51 +449,54 @@ def _build_graph_figure(
         for k, v in id_to_agent.items():
             agent_of_id.setdefault(k, v)
 
-    # Pass 1 — intra-agent edges. The agent's chain (query → action → ...
-    # → result) is the *real* parent chain. We do this first so the chain
-    # claims its nodes before any cross-agent embed (e.g. supervising
-    # listing each child agent's `result` in its `children`) tries to.
-    for n in nodes:
-        for cid in _node_children_ids(n):
-            if cid not in by_id or cid == n.id:
+    if edges is not None:
+        for edge in edges:
+            if edge.source not in by_id or edge.target not in by_id:
                 continue
-            child = by_id[cid]
-            if child.agent_id != n.agent_id:
+            if edge.target in parent_of:
                 continue
-            if cid in parent_of:
-                continue
-            parent_of[cid] = n.id
-            children_of[n.id].append(cid)
+            parent_of[edge.target] = edge.source
+            children_of[edge.source].append(edge.target)
+    else:
+        # Pass 1 — intra-agent edges. The agent's chain (query → action → ...
+        # → result) is the *real* parent chain. We do this first so the chain
+        # claims its nodes before any cross-agent embed (e.g. supervising
+        # listing each child agent's `result` in its `children`) tries to.
+        for n in nodes:
+            for cid in _node_children_ids(n):
+                if cid not in by_id or cid == n.id:
+                    continue
+                child = by_id[cid]
+                if child.agent_id != n.agent_id:
+                    continue
+                if cid in parent_of:
+                    continue
+                parent_of[cid] = n.id
+                children_of[n.id].append(cid)
 
-    # Pass 2 — cross-agent / delegation edges. For each agent that still
-    # has no parent for its first chain node, find the spawning node in
-    # the parent agent (any node from another agent that references —
-    # directly or by future id — a node belonging to this agent) and
-    # connect spawn → child.query. The cross-agent reference might be
-    # to a future id (e.g. supervising lists child results that don't
-    # exist yet), so we resolve via `agent_of_id` not just by_id.
-    by_agent: dict[str, list[Node]] = {}
-    for n in nodes:
-        by_agent.setdefault(n.agent_id, []).append(n)
-    for agent_id in by_agent:
-        chain = _agent_chain(agent_id, nodes)
-        if not chain:
-            continue
-        first = chain[0]
-        if first.id in parent_of:
-            continue
-        attached = False
-        for other in nodes:
-            if other.agent_id == agent_id:
+        # Pass 2 — cross-agent / delegation edges.
+        by_agent: dict[str, list[Node]] = {}
+        for n in nodes:
+            by_agent.setdefault(n.agent_id, []).append(n)
+        for agent_id in by_agent:
+            chain = _agent_chain(agent_id, nodes)
+            if not chain:
                 continue
-            for cid in _node_children_ids(other):
-                if agent_of_id.get(cid) == agent_id:
-                    parent_of[first.id] = other.id
-                    children_of[other.id].append(first.id)
-                    attached = True
+            first = chain[0]
+            if first.id in parent_of:
+                continue
+            attached = False
+            for other in nodes:
+                if other.agent_id == agent_id:
+                    continue
+                for cid in _node_children_ids(other):
+                    if agent_of_id.get(cid) == agent_id:
+                        parent_of[first.id] = other.id
+                        children_of[other.id].append(first.id)
+                        attached = True
+                        break
+                if attached:
                     break
-            if attached:
-                break
 
     # Roots = nodes without a known parent.
     roots = [nid for nid in by_id if nid not in parent_of]
@@ -442,7 +569,20 @@ def _build_graph_figure(
     ordered = [by_id[nid] for nid in pos]
     node_x = [pos[n.id][0] for n in ordered]
     node_y = [pos[n.id][1] for n in ordered]
-    labels = [n.agent_id or n.id[:8] for n in ordered]
+    agent_counts: dict[str, int] = {}
+    for node in ordered:
+        agent_counts[node.agent_id] = agent_counts.get(node.agent_id, 0) + 1
+    agent_first_id: dict[str, str] = {}
+    for node in ordered:
+        agent_first_id.setdefault(node.agent_id, node.id)
+    labels = [
+        _node_display_label(
+            n,
+            repeated_agent=agent_counts.get(n.agent_id, 0) > 1,
+            is_agent_entry=agent_first_id.get(n.agent_id) == n.id,
+        )
+        for n in ordered
+    ]
     colors = [_GRAPH_NODE_COLORS.get(n.type, "#8b949e") for n in ordered]
     symbols = [_GRAPH_NODE_SYMBOLS.get(n.type, "circle") for n in ordered]
     sizes = [
@@ -455,11 +595,26 @@ def _build_graph_figure(
     ]
     hover = [_node_hover_text(n) for n in ordered]
 
+    def text_position(node: Node) -> str:
+        parent = parent_of.get(node.id)
+        siblings = children_of.get(parent, []) if parent is not None else []
+        if len(siblings) > 1 and node.id in siblings and not children_of.get(node.id):
+            midpoint = (len(siblings) - 1) / 2
+            idx = siblings.index(node.id)
+            return "bottom left" if idx < midpoint else "bottom right"
+        return "top center" if (node.depth or 0) % 2 else "bottom center"
+
     node_trace = go.Scatter(
         x=node_x,
         y=node_y,
-        mode="markers",
+        mode="markers+text",
         text=labels,
+        textposition=[text_position(n) for n in ordered],
+        textfont={
+            "color": "#c9d1d9",
+            "family": "ui-monospace, SFMono-Regular, Menlo, monospace",
+            "size": 10,
+        },
         hovertext=hover,
         hoverinfo="text",
         customdata=[n.id for n in ordered],
@@ -469,6 +624,7 @@ def _build_graph_figure(
             "size": sizes,
             "line": {"color": "#0d1117", "width": 1.5},
         },
+        cliponaxis=False,
         showlegend=False,
     )
 
@@ -492,6 +648,18 @@ def _build_graph_figure(
         )
 
     n_edges = sum(1 for e in edge_x if e is None)
+    if node_x:
+        x_span = max(node_x) - min(node_x)
+        x_pad = max(1.0, x_span * 0.18)
+        x_range = [min(node_x) - x_pad, max(node_x) + x_pad]
+    else:
+        x_range = [-1.0, 1.0]
+    if node_y:
+        y_span = max(node_y) - min(node_y)
+        y_pad = max(0.75, y_span * 0.16)
+        y_range = [min(node_y) - y_pad, max(node_y) + y_pad]
+    else:
+        y_range = [-1.0, 1.0]
     fig.update_layout(
         title={
             "text": f"<b>{title}</b> · {len(ordered)} nodes · {n_edges} edges",
@@ -513,15 +681,15 @@ def _build_graph_figure(
             },
             "align": "left",
         },
-        xaxis={"visible": False},
-        yaxis={"visible": False},
-        margin={"l": 16, "r": 16, "t": 36, "b": 16},
+        xaxis={"visible": False, "range": x_range},
+        yaxis={"visible": False, "range": y_range},
+        margin={"l": 44, "r": 44, "t": 48, "b": 92},
         legend={
             "orientation": "h",
-            "yanchor": "top",
-            "y": 1.02,
-            "xanchor": "right",
-            "x": 1.0,
+            "yanchor": "bottom",
+            "y": -0.22,
+            "xanchor": "center",
+            "x": 0.5,
             "font": {"color": "#8b949e", "size": 10},
             "bgcolor": "rgba(0,0,0,0)",
         },
@@ -529,10 +697,172 @@ def _build_graph_figure(
     return fig
 
 
+def node_plot(
+    node: Node,
+    kind: str = "graph",
+    *,
+    states: list[Node] | None = None,
+    events: list[Node] | None = None,
+    step: int | None = None,
+    mode: GraphMode = "snapshot",
+    height: int = 420,
+    title: str | None = None,
+    session: Session | str | Path | None = None,
+    include_results: bool = True,
+):
+    """Render ``node`` in one of several formats.
+
+    ``kind`` may be:
+    - ``"graph"`` / ``"plotly"``: Plotly figure matching the Gradio viewer.
+    - ``"mermaid"`` / ``"state"``: Mermaid state diagram string.
+    - ``"flowchart"``: Mermaid flowchart string.
+    - ``"sequence"``: Mermaid sequence diagram string.
+    - ``"dot"`` / ``"d2"``: static graph language strings.
+    - ``"tree"``: plain text tree.
+    - ``"gantt"``: HTML swimlane. Pass ``states=[...]`` for a full run.
+    """
+    fmt = kind.lower().replace("-", "_")
+    if fmt in {"mermaid", "state", "state_diagram"}:
+        from rlmflow.utils.export import to_mermaid
+
+        return to_mermaid(node, include_results=include_results)
+    if fmt in {"flow", "flowchart", "mermaid_flowchart"}:
+        from rlmflow.utils.export import (
+            to_mermaid_flowchart,
+            viz_graph_to_mermaid_flowchart,
+        )
+
+        if mode == "events":
+            graph = build_viz_graph(
+                states=states or [node],
+                events=events,
+                session=session,
+                step=step,
+                mode=mode,
+            )
+            return viz_graph_to_mermaid_flowchart(
+                graph, include_results=include_results
+            )
+        return to_mermaid_flowchart(node, include_results=include_results)
+    if fmt in {"sequence", "sequence_diagram"}:
+        from rlmflow.utils.export import to_mermaid_sequence
+
+        return to_mermaid_sequence(node)
+    if fmt == "dot":
+        from rlmflow.utils.export import to_dot, viz_graph_to_dot
+
+        if mode == "events":
+            graph = build_viz_graph(
+                states=states or [node],
+                events=events,
+                session=session,
+                step=step,
+                mode=mode,
+            )
+            return viz_graph_to_dot(graph, include_results=include_results)
+        return to_dot(node, include_results=include_results)
+    if fmt == "d2":
+        from rlmflow.utils.export import to_d2, viz_graph_to_d2
+
+        if mode == "events":
+            graph = build_viz_graph(
+                states=states or [node],
+                events=events,
+                session=session,
+                step=step,
+                mode=mode,
+            )
+            return viz_graph_to_d2(graph, include_results=include_results)
+        return to_d2(node, include_results=include_results)
+    if fmt in {"tree", "ascii"}:
+        return node.tree()
+    if fmt in {"node_tree", "nodes_tree", "event_tree"}:
+        graph = build_viz_graph(
+            states=states or [node],
+            events=events,
+            session=session,
+            step=step,
+            mode=mode,
+        )
+        return node_tree(graph)
+    if fmt in {"gantt", "swimlane", "swimlanes"}:
+        from rlmflow.utils.viz import gantt_html
+
+        return gantt_html(states or [node], title=title or "rlmflow gantt")
+    if fmt not in {"graph", "plotly", "viewer"}:
+        supported = (
+            "graph, mermaid, flowchart, sequence, dot, d2, tree, node_tree, gantt"
+        )
+        raise ValueError(f"Unknown plot kind {kind!r}. Supported: {supported}.")
+
+    graph = build_viz_graph(
+        states=states or [node],
+        events=events,
+        session=session,
+        step=step,
+        mode=mode,
+    )
+    visible_nodes = graph.payloads
+    id_to_agent = {item.id: item.agent_id for item in visible_nodes}
+    fig = _build_graph_figure(
+        visible_nodes,
+        height=height,
+        title=title or f"{node.agent_id} · {node.type}",
+        id_to_agent=id_to_agent,
+        edges=graph.edges,
+    )
+    if fig is None:
+        raise ImportError(
+            "Node.plot() requires the viewer extra: `pip install rlmflow[viewer]`."
+        )
+    return fig
+
+
+def node_plot_html(
+    node: Node,
+    kind: str = "graph",
+    *,
+    states: list[Node] | None = None,
+    events: list[Node] | None = None,
+    step: int | None = None,
+    mode: GraphMode = "snapshot",
+    height: int = 420,
+    title: str | None = None,
+    session: Session | str | Path | None = None,
+    include_results: bool = True,
+    include_plotlyjs: str | bool = "cdn",
+) -> str:
+    """Return an HTML fragment for ``node.plot(kind)``."""
+    rendered = node_plot(
+        node,
+        kind,
+        states=states,
+        events=events,
+        step=step,
+        mode=mode,
+        height=height,
+        title=title,
+        session=session,
+        include_results=include_results,
+    )
+    if hasattr(rendered, "to_html"):
+        return rendered.to_html(include_plotlyjs=include_plotlyjs, full_html=False)
+    if kind.lower().replace("-", "_") in {"gantt", "swimlane", "swimlanes"}:
+        return str(rendered)
+    from html import escape
+
+    return (
+        '<pre style="background:#0d1117;color:#c9d1d9;padding:12px;'
+        'border-radius:6px;overflow:auto;">'
+        f"{escape(str(rendered))}</pre>"
+    )
+
+
 def open_viewer(
     states: list[Node] | list[dict] | None = None,
     *,
     session: Session | str | Path | None = None,
+    mode: GraphMode | None = None,
     **launch_kwargs: Any,
 ):
     import gradio as gr
@@ -543,83 +873,70 @@ def open_viewer(
 
     sess = _resolve_session(norm_states, session)
     nodes = _all_nodes(norm_states, sess)
+    events = session_events(sess)
     if not nodes:
         raise ValueError(
             "open_viewer needs either `states` (a list of snapshots) "
             "or `session=` (a Session / path to a session/ dir)."
         )
 
-    # Per-step node lists.
-    #
-    # When `states` is provided, the slider has exactly len(states) stops
-    # — one per agent.step() iteration. For each state[k] we still pull
-    # the FULL flat list of session events that existed by that point,
-    # so child-agent query/action nodes (which the parent's snapshot
-    # tree never embeds) still show up at the correct step.
-    #
-    # When only a session is available, each tick is one jsonl event.
-    steps_nodes: list[list[Node]] = []
-    if norm_states and sess is not None:
-        # Map each session event to its line index.
-        session_pos = {n.id: i for i, n in enumerate(nodes)}
-        for s in norm_states:
-            visible_ids = {n.id for n in s.walk()}
-            cutoff = max(
-                (session_pos.get(nid, -1) for nid in visible_ids),
-                default=-1,
-            )
-            running: dict[str, Node] = {}
-            for i in range(cutoff + 1):
-                running[nodes[i].id] = nodes[i]
-            # Always include any node from `state.walk()` even if it
-            # wasn't matched above (e.g. states-only with no session).
-            for n in s.walk():
-                running.setdefault(n.id, n)
-            steps_nodes.append(list(running.values()))
-    elif norm_states:
-        for s in norm_states:
-            steps_nodes.append(list(s.walk()))
-    elif sess is not None:
-        running = {}
-        for n in nodes:
-            running[n.id] = n
-            steps_nodes.append(list(running.values()))
-    if not steps_nodes:
-        steps_nodes = [list(nodes)]
-    n_steps = len(steps_nodes)
+    resolved_mode: GraphMode = mode or ("events" if events else "snapshot")
+    if resolved_mode == "events" and not events:
+        raise ValueError("open_viewer(mode='events') requires a persisted session log.")
+    n_steps = len(norm_states) if norm_states else max(1, len(events))
+    step_graphs = [
+        build_viz_graph(
+            states=norm_states,
+            events=events,
+            session=sess,
+            step=i,
+            mode=resolved_mode,
+        )
+        for i in range(n_steps)
+    ]
+    nodes_by_id_global = {n.id: n for graph in step_graphs for n in graph.payloads}
 
-    nodes_by_id_global = {n.id: n for n in nodes}
-    id_to_agent_global = {n.id: n.agent_id for n in nodes}
+    def _coerce_step(value: Any) -> int:
+        # Gradio's server-function bridge sometimes hands the JS arg list in
+        # as a single positional, so unwrap one-element list/tuple wrappers.
+        while isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+        return max(0, min(int(value), n_steps - 1))
 
     def _fig_json_for_step(step: int) -> str:
-        step = max(0, min(int(step), n_steps - 1))
-        snapshot = steps_nodes[step]
+        step = _coerce_step(step)
+        graph = step_graphs[step]
         fig = _build_graph_figure(
-            snapshot,
+            graph.payloads,
             height=420,
             title=f"step {step + 1} / {n_steps}",
-            id_to_agent=id_to_agent_global,
+            id_to_agent={node.id: node.agent_id for node in graph.payloads},
+            edges=graph.edges,
         )
         return fig.to_json() if fig is not None else "{}"
 
-    def _resolve_clicked_node(node_id: str) -> Node | None:
-        # The graph stores the LATEST version of each id in the snapshot.
-        # That same id may exist multiple times in the global flat list
-        # (because the session log writes a new line every time the node
-        # is updated). Pick the richest (most-children, latest) version.
-        candidates = [n for n in nodes if n.id == node_id]
-        if not candidates:
-            return nodes_by_id_global.get(node_id)
-        return max(candidates, key=lambda n: (len(n.children), id(n)))
+    def get_step_fig(*args: Any) -> str:
+        # Accept ``(step,)`` or ``([step, ...],)`` – the JS bridge is loose.
+        step_arg = args[0] if len(args) == 1 else args
+        if isinstance(step_arg, (list, tuple)) and len(step_arg) >= 1:
+            step_arg = step_arg[0]
+        return _fig_json_for_step(step_arg)
 
-    def get_step_fig(step: int) -> str:
-        return _fig_json_for_step(step)
-
-    def get_node_detail(node_id: str) -> str:
-        node = _resolve_clicked_node(node_id)
+    def get_node_detail(*args: Any) -> str:
+        if len(args) == 1 and isinstance(args[0], (list, tuple)):
+            payload = args[0]
+        else:
+            payload = args
+        if len(payload) < 2:
+            return "<i style='color:#8b949e'>(missing node id)</i>"
+        step_arg, node_id = payload[0], payload[1]
+        step = _coerce_step(step_arg)
+        graph = step_graphs[step]
+        nodes_by_id = graph.nodes_by_id
+        node = nodes_by_id.get(node_id)
         if node is None:
-            return "<i style='color:#8b949e'>(unknown node)</i>"
-        return _node_detail_html(node, nodes)
+            return "<i style='color:#8b949e'>(node not visible at this step)</i>"
+        return _node_detail_html(node, graph.payloads)
 
     initial_fig_json = _fig_json_for_step(n_steps - 1)
     initial_detail = (
@@ -631,9 +948,9 @@ def open_viewer(
     with gr.Blocks(title="RLMFlow Viewer", fill_height=True) as demo:
         gr.Markdown(
             f"### RLMFlow Viewer · {n_steps} steps · "
-            f"{len(nodes_by_id_global)} unique nodes\n"
+            f"{len(nodes_by_id_global)} unique nodes · {resolved_mode} mode\n"
             "Drag the slider to scrub the graph through time. "
-            "Click any node to see its full code, output, and the agent's full conversation."
+            "Click any node to see its step-local code, output, and conversation."
         )
 
         slider = gr.Slider(
@@ -653,6 +970,7 @@ def open_viewer(
             server_functions=[get_step_fig, get_node_detail],
             initial_fig_json=initial_fig_json,
             initial_detail=initial_detail,
+            initial_step=n_steps - 1,
             min_height=720,
         )
 
@@ -675,7 +993,7 @@ def open_viewer(
 # ── HTML template, CSS, and JS for the interactive graph + detail card
 
 _GRAPH_HTML_TEMPLATE = """
-<div class="rlmflow-shell">
+<div class="rlmflow-shell" data-initial-step="${initial_step}">
   <div class="rlmflow-plot"></div>
   <div class="rlmflow-detail">${initial_detail}</div>
   <script type="application/json" class="rlmflow-bootstrap">${initial_fig_json}</script>
@@ -841,6 +1159,8 @@ _GRAPH_JS_ON_LOAD = r"""
     const plot = element.querySelector('.rlmflow-plot');
     const detail = element.querySelector('.rlmflow-detail');
     const bootstrap = element.querySelector('.rlmflow-bootstrap');
+    const shell = element.querySelector('.rlmflow-shell');
+    let currentStep = parseInt(shell?.dataset.initialStep || '0', 10) || 0;
 
     async function ensurePlotly() {
         if (typeof window.Plotly !== 'undefined') return;
@@ -874,7 +1194,7 @@ _GRAPH_JS_ON_LOAD = r"""
                 if (!nid) return;
                 detail.innerHTML = '<i style="color:#8b949e">loading…</i>';
                 try {
-                    detail.innerHTML = await server.get_node_detail(nid);
+                    detail.innerHTML = await server.get_node_detail(currentStep, nid);
                 } catch (err) {
                     detail.innerHTML =
                         '<span style="color:#f85149">error: ' + err.message + '</span>';
@@ -891,6 +1211,7 @@ _GRAPH_JS_ON_LOAD = r"""
         const step = parseInt(ev.detail, 10);
         if (Number.isNaN(step)) return;
         try {
+            currentStep = step;
             const figJson = await server.get_step_fig(step);
             await drawFig(figJson, true);
         } catch (err) {
@@ -1164,4 +1485,4 @@ def _render_md_to_html(text: str) -> str:
     return "".join(out)
 
 
-__all__ = ["open_viewer"]
+__all__ = ["node_plot", "node_plot_html", "node_transcript", "open_viewer"]

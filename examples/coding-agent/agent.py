@@ -107,7 +107,7 @@ def main():
                     trace.append(state)
                     view(state)
 
-        print(f"\n{state.result or '(no result)'}\n")
+        print(f"\n{state.get_result() or '(no result)'}\n")
         state.save(ckpt)
         save_trace(trace, trace_dir)
         print(f"Saved checkpoint → {ckpt}  |  trace → {trace_dir}/")

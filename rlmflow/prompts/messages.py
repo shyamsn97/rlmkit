@@ -42,26 +42,9 @@ NO_CODE_BLOCK = (
 
 EXECUTION_OUTPUT = "REPL output:\n{output}"
 
-STUCK_WARNING = (
-    "\n\nWARNING: Your code produced no output and did not call done(). "
-    "This is the {n}th consecutive empty execution. Your current approach is "
-    "NOT working. Do NOT repeat the same code. Either:\n"
-    "  1. Fix the root cause (e.g. the variable/data you need doesn't exist)\n"
-    "  2. Try a completely different approach\n"
-    "  3. Call done() with an error message explaining what went wrong"
-)
-
 ORPHANED_DELEGATES = (
     "You delegated [{names}] but never called `yield wait(...)`. "
     "You must use `yield wait(*handles)` to collect results."
-)
-
-RESUME_MESSAGE = (
-    "## Resuming Previous Session\n\n"
-    "**Query:** {query}\n\n"
-    "**Agent tree at save time:**\n```\n{tree}\n```\n\n"
-    "**Recent history:**\n{recent}\n\n"
-    "Pick up where you left off."
 )
 
 STATUS_DEPTH_ROOT = (

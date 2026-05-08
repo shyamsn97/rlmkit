@@ -111,7 +111,7 @@ def main() -> None:
         state = agent.start("Create hello.py and goodbye.py. Delegate each file.")
         history = run(agent, state, args.no_viz)
         final = history[-1]
-        print(f"\n{GREEN}Result:{RESET} {final.result}")
+        print(f"\n{GREEN}Result:{RESET} {final.get_result()}")
 
         banner("2. Checkpoint round-trip")
         ckpt = workspace.checkpoint_path

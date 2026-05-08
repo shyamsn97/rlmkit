@@ -45,6 +45,6 @@ def test_rlmflow_workspace_ref_points_at_workspace_root(tmp_path: Path):
 
     result = _run(engine, engine.start("test query"))
 
-    assert result.result == "ok"
+    assert result.current().result == "ok"
     assert result.workspace is not None
     assert Path(result.workspace.root) == workspace.root

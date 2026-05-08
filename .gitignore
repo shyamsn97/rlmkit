@@ -61,3 +61,4 @@ mlruns/*
 examples/*_log.md
 examples/**/workspace/*
 .DS_Store
+*/**/needle_trace_images/*

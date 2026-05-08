@@ -51,7 +51,7 @@ This is now baked into `RLM`: if a node hits `max_iterations` before calling
 `done()`, the engine performs one private final-answer turn and records it in
 the normal trace. The benchmark does not inspect or import that action prompt;
 it just runs `while not state.finished: state = agent.step(state)` and scores
-`state.result`.
+`state.get_result()`.
 
 `incomplete: true` means the agent still did not call `done()` even after the
 engine's recovery turn, or the task errored.
@@ -233,7 +233,7 @@ surface:
    big it is (approx. tokens + bytes), and that it can `read_file`,
    chunk with Python, and delegate chunk work.
 5. Run the agent with `max_depth` / `max_iterations` from the CLI.
-6. Compare `state.result` to the gold `answer`.
+6. Compare `state.get_result()` to the gold `answer`.
 
 This follows the same interface split Anthropic describes in
 [Managed Agents](https://www.anthropic.com/engineering/managed-agents):
@@ -373,7 +373,7 @@ scored.
 When the agent burns its `--max-iterations` budget without calling
 `done()`, `rlmflow` performs the official RLM final-answer recovery inside the
 engine. The runner does not know the prompt text and does not special-case this
-path. The recovered answer becomes `state.result`, token usage is counted in
+path. The recovered answer becomes `state.get_result()`, token usage is counted in
 the tree totals, and the trace contains the normal engine-produced messages for
 debugging.
 

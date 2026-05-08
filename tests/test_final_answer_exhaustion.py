@@ -39,9 +39,9 @@ def test_exhaustion_marks_terminate_requested_and_runs_one_more_repl_turn():
 
     node, _states = run_to_completion(agent)
 
-    assert isinstance(node, ResultNode)
-    assert node.result == "final answer"
-    assert node.terminate_requested
+    assert isinstance(node.current(), ResultNode)
+    assert node.current().result == "final answer"
+    assert node.current().terminate_requested
     assert llm.calls == 2
     assert any(
         message.get("content") == FINAL_ANSWER_ACTION
@@ -82,8 +82,8 @@ def test_explicit_terminate_on_query_node_drives_one_final_turn():
     while not node.finished:
         node = agent.step(node)
 
-    assert node.result == "final answer"
-    assert node.terminate_requested
+    assert node.current().result == "final answer"
+    assert node.current().terminate_requested
     assert llm.calls == 1
 
 

@@ -11,7 +11,7 @@ while not node.finished:
     node = agent.step(node)
 ```
 
-`agent.run(query)` does the same thing and returns `node.result`.
+`agent.run(query)` does the same thing and returns `node.get_result()`.
 `agent.chat(messages)` is the `LLMClient` interface — same loop, last
 user message becomes the query.
 

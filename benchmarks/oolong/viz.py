@@ -51,9 +51,11 @@ def render_node(state: RLMNode):
     if inp or out:
         info.append(f"  in={inp} out={out}", style="dim")
 
-    if state.finished and state.result:
-        preview = state.result.replace("\n", " ⏎ ")[:60]
-        info.append(f"  → {preview}", style="dim green")
+    if state.finished:
+        result_text = state.get_result()
+        if result_text:
+            preview = result_text.replace("\n", " ⏎ ")[:60]
+            info.append(f"  → {preview}", style="dim green")
 
     return info
 

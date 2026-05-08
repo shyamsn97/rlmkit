@@ -97,19 +97,29 @@ class NodeScheduler:
         runnable: list[Node] = []
 
         def visit(node: Node) -> None:
+            latest = node.current()
+            if latest is not node:
+                visit(latest)
+                return
             if node.terminal:
                 return
             if isinstance(node, SupervisingNode):
-                if all(child.terminal for child in node.children):
+                child_nodes = [
+                    child.current()
+                    for child in node.children
+                    if isinstance(child, Node)
+                ]
+                if all(child.terminal for child in child_nodes):
                     runnable.append(node)
                     return
-                for child in node.children:
+                for child in child_nodes:
                     visit(child)
                 return
             runnable.append(node)
 
         for child in root.children:
-            visit(child)
+            if isinstance(child, Node):
+                visit(child)
         return runnable
 
     def rebuild(
@@ -121,11 +131,19 @@ class NodeScheduler:
                 return updated
             if isinstance(node, SupervisingNode):
                 return node.update(
-                    children=[replace_node(child) for child in node.children]
+                    children=[
+                        replace_node(child) if isinstance(child, Node) else child
+                        for child in node.children
+                    ]
                 )
             return node
 
-        return root.update(children=[replace_node(child) for child in root.children])
+        return root.update(
+            children=[
+                replace_node(child) if isinstance(child, Node) else child
+                for child in root.children
+            ]
+        )
 
     def step_runnable_nodes(
         self,
@@ -192,6 +210,7 @@ class RLMFlow(LLMClient):
             self.llm_clients["default"] = self.llm_client
 
         self._runtime_sessions: dict[str, Runtime] = {ROOT_RUNTIME_ID: runtime}
+        self._step_update_stack: list[dict[str, Node]] = []
         self.register_tools(runtime)
 
     # ── lifecycle ────────────────────────────────────────────────────
@@ -236,9 +255,10 @@ class RLMFlow(LLMClient):
 
     def run(self, query: str | None = None, **kwargs) -> str:
         node = self.start(query, **kwargs)
-        while not node.terminal:
+        while not node.finished:
             node = self.step(node)
-        return node.result if isinstance(node, ResultNode) else ""
+        current = node.current()
+        return current.result if isinstance(current, ResultNode) else ""
 
     def chat(self, messages: list[dict[str, str]], *args, **kwargs) -> str:
         query = next(
@@ -252,6 +272,21 @@ class RLMFlow(LLMClient):
         return self.run(query)
 
     def step(self, node: Node, *, use_cache: bool = True) -> Node:
+        current = node.current()
+        if current is not node:
+            if current.terminal:
+                return node
+        updates: dict[str, Node] = {}
+        self._step_update_stack.append(updates)
+        try:
+            self._step_one_node(current, use_cache=use_cache)
+        finally:
+            self._step_update_stack.pop()
+        return (
+            node.replace_many(self._materialize_updates(updates)) if updates else node
+        )
+
+    def _step_one_node(self, node: Node, *, use_cache: bool = True) -> Node:
         if node.terminal:
             return node
         if isinstance(node, SupervisingNode):
@@ -263,7 +298,7 @@ class RLMFlow(LLMClient):
         raise TypeError(f"Unknown node type: {type(node).__name__}")
 
     def step_local(self, node: Node) -> Node:
-        return self.step(node)
+        return self._step_one_node(node)
 
     def terminate(self, node: Node) -> Node:
         if node.terminal:
@@ -366,13 +401,12 @@ class RLMFlow(LLMClient):
                 node.successor(
                     ResultNode,
                     result=step.done_result.strip(),
-                    children=list(node.children),
                 ),
             )
 
         if suspended:
             request, pre_output = raw
-            children = [
+            new_children = [
                 step.delegated[aid]
                 for aid in request.agent_ids
                 if aid in step.delegated
@@ -384,7 +418,7 @@ class RLMFlow(LLMClient):
                     code=node.code,
                     output=pre_output,
                     waiting_on=request.agent_ids,
-                    children=children,
+                    children=[*node.children, *new_children],
                 ),
             )
 
@@ -407,7 +441,11 @@ class RLMFlow(LLMClient):
         return self.node_scheduler.step_runnable_nodes(node, self)
 
     def resume_supervisor(self, node: SupervisingNode) -> Node:
-        by_id = {child.agent_id: child for child in node.children}
+        by_id = {
+            child.agent_id: child.current()
+            for child in node.children
+            if isinstance(child, Node)
+        }
         results = [
             (
                 by_id[agent_id].result
@@ -426,13 +464,12 @@ class RLMFlow(LLMClient):
                 node.successor(
                     ResultNode,
                     result=step.done_result.strip(),
-                    children=list(node.children),
                 ),
             )
 
         if suspended:
             request, pre_output = raw
-            children = [
+            new_children = [
                 step.delegated[aid]
                 for aid in request.agent_ids
                 if aid in step.delegated
@@ -443,7 +480,7 @@ class RLMFlow(LLMClient):
                     SupervisingNode,
                     output=pre_output,
                     waiting_on=request.agent_ids,
-                    children=children,
+                    children=[*node.children, *new_children],
                 ),
             )
 
@@ -463,7 +500,6 @@ class RLMFlow(LLMClient):
                 output=output,
                 content=content,
                 resumed_from=list(node.waiting_on),
-                children=[child.id for child in node.children],
             ),
         )
 
@@ -475,7 +511,45 @@ class RLMFlow(LLMClient):
 
     def record_successor(self, prev: Node, node: Node) -> Node:
         self.record(prev.update(children=[*prev.children, node.id]))
+        if self._step_update_stack:
+            self._step_update_stack[-1][prev.id] = prev.update(
+                children=[*prev.children, node]
+            )
+            self._step_update_stack[-1][node.id] = node
         return self.record(node)
+
+    def _materialize_updates(self, updates: dict[str, Node]) -> dict[str, Node]:
+        materialized: dict[str, Node] = {}
+
+        def hydrate(item: Node, seen: set[str] | None = None) -> Node:
+            seen = set(seen or ())
+            if item.id in seen:
+                return item
+            seen.add(item.id)
+            source = updates.get(item.id, item)
+            children: list[Any] = []
+            child_ids: set[str] = set()
+            changed = source is not item
+            for child in source.children:
+                child_id = child.id if isinstance(child, Node) else str(child)
+                if child_id in child_ids:
+                    changed = True
+                    continue
+                child_ids.add(child_id)
+                if isinstance(child, Node):
+                    hydrated = hydrate(updates.get(child.id, child), seen)
+                    children.append(hydrated)
+                    changed = changed or hydrated is not child
+                elif child in updates:
+                    children.append(hydrate(updates[str(child)], seen))
+                    changed = True
+                else:
+                    children.append(child)
+            return source.update(children=children) if changed else source
+
+        for node_id, node in updates.items():
+            materialized[node_id] = hydrate(node)
+        return materialized
 
     def chain_to_root(self, node: Node) -> list[Node]:
         return self.session.chain_to(node)
@@ -492,7 +566,11 @@ class RLMFlow(LLMClient):
     def can_resume(self, node: SupervisingNode) -> bool:
         if not node.waiting_on:
             return False
-        by_id = {child.agent_id: child for child in node.children}
+        by_id = {
+            child.agent_id: child.current()
+            for child in node.children
+            if isinstance(child, Node)
+        }
         return all(
             isinstance(by_id.get(agent_id), ResultNode) for agent_id in node.waiting_on
         )
@@ -837,18 +915,6 @@ class RLMFlow(LLMClient):
         while f"{base}_{i}" in delegated:
             i += 1
         return f"{base}_{i}"
-
-    def _pack_llm_clients(self, default: LLMClient | None = None) -> dict[str, dict]:
-        out = {
-            key: {"model": model, "description": self.model_descriptions.get(key, "")}
-            for key, model in self.llm_clients.items()
-        }
-        if default is not None:
-            out["default"] = {
-                "model": default,
-                "description": self.model_descriptions.get("default", ""),
-            }
-        return out
 
 
 __all__ = ["NodeScheduler", "RLMConfig", "RLMFlow"]

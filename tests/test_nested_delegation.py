@@ -54,10 +54,10 @@ def test_root_can_delegate_to_child_at_depth_one():
 
     _steps, final = _run(agent, agent.start("test"))
 
-    assert isinstance(final, ResultNode)
-    assert final.result == "root->leaf:root.child"
-    assert final.children[0].agent_id == "root.child"
-    assert final.children[0].depth == 1
+    assert isinstance(final.current(), ResultNode)
+    assert final.current().result == "root->leaf:root.child"
+    child = next(n for n in final.walk() if n.agent_id == "root.child")
+    assert child.depth == 1
 
 
 def test_nested_delegation_reaches_grandchild_at_depth_two():
@@ -69,13 +69,39 @@ def test_nested_delegation_reaches_grandchild_at_depth_two():
 
     _steps, final = _run(agent, agent.start("test"))
 
-    assert isinstance(final, ResultNode)
-    child = final.children[0]
-    grandchild = child.children[0]
+    assert isinstance(final.current(), ResultNode)
+    child = next(n for n in final.walk() if n.agent_id == "root.child")
+    grandchild = next(n for n in final.walk() if n.agent_id == "root.child.child")
     assert child.agent_id == "root.child"
     assert grandchild.agent_id == "root.child.child"
     assert grandchild.depth == 2
-    assert final.result == "root->root.child->leaf:root.child.child"
+    assert final.current().result == "root->root.child->leaf:root.child.child"
+
+
+def test_deep_supervising_chain_completes_at_depth_four():
+    """Regression: state.current() / state.get_result() work when every
+    ancestor is a SupervisingNode waiting on a deeper agent (depth >= 4)."""
+    agent = RLMFlow(
+        llm_client=RecursiveLLM(max_child_depth=4),
+        runtime=LocalRuntime(),
+        config=RLMConfig(max_depth=4),
+    )
+
+    _steps, final = _run(agent, agent.start("test"))
+
+    assert final.finished
+    assert isinstance(final.current(), ResultNode)
+    expected = (
+        "root->root.child->root.child.child->root.child.child.child->"
+        "leaf:root.child.child.child.child"
+    )
+    assert final.get_result() == expected
+    assert final.current().result == expected
+    deepest = next(
+        n for n in final.walk() if n.agent_id == "root.child.child.child.child"
+    )
+    assert deepest.depth == 4
+    assert isinstance(deepest.current(), ResultNode)
 
 
 def test_max_depth_turns_delegate_into_direct_llm_work():
@@ -87,9 +113,9 @@ def test_max_depth_turns_delegate_into_direct_llm_work():
 
     _steps, final = _run(agent, agent.start("test"))
 
-    assert isinstance(final, ResultNode)
-    assert final.children == []
-    assert final.result == "leaf:root"
+    assert isinstance(final.current(), ResultNode)
+    assert final.current().children == []
+    assert final.current().result == "leaf:root"
 
 
 def test_each_step_advances_existing_leaf_batch_once():
@@ -100,16 +126,18 @@ def test_each_step_advances_existing_leaf_batch_once():
     )
 
     node = agent.step(agent.start("test"))
-    assert isinstance(node, SupervisingNode)
-    assert node.children[0].type == "query"
+    assert isinstance(node.current(), SupervisingNode)
+    assert node.current().children[0].type == "query"
 
     node = agent.step(node)
-    assert isinstance(node, SupervisingNode)
-    assert node.children[0].type == "supervising"
-    assert node.children[0].children[0].type == "query"
+    assert isinstance(node.current(), SupervisingNode)
+    child = node.current().children[0]
+    assert child.current().type == "supervising"
+    assert child.current().children[0].type == "query"
 
     node = agent.step(node)
-    assert isinstance(node.children[0].children[0], ResultNode)
+    grandchild = next(n for n in node.walk() if n.agent_id == "root.child.child")
+    assert isinstance(grandchild.current(), ResultNode)
 
 
 def test_model_routing_is_stored_on_child_nodes():
@@ -139,11 +167,12 @@ def test_model_routing_is_stored_on_child_nodes():
     )
 
     node = agent.step(agent.start("test"))
-    assert isinstance(node, SupervisingNode)
-    assert node.children[0].config["model"] == "fast"
+    assert isinstance(node.current(), SupervisingNode)
+    assert node.current().children[0].config["model"] == "fast"
 
     node = agent.step(node)
     final = agent.step(node)
 
-    assert final.result == "fast-result"
-    assert final.children[0].model_label == "fast:fast-model"
+    assert final.current().result == "fast-result"
+    worker = next(n for n in final.walk() if n.agent_id == "root.worker")
+    assert worker.current().model_label == "fast:fast-model"

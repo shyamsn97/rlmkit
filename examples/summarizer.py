@@ -235,8 +235,9 @@ def main():
                 trace.append(state)
 
         print(f"\n{'=' * 60}")
-        print(f"SUMMARY ({len((state.result or '').splitlines())} lines):\n")
-        print(state.result or "(no result)")
+        result_text = state.get_result()
+        print(f"SUMMARY ({len(result_text.splitlines())} lines):\n")
+        print(result_text or "(no result)")
 
         from rlmflow.utils.trace import save_trace
         trace_dir = Path("traces/summarizer")

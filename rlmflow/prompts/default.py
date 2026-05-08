@@ -33,24 +33,26 @@ REPL_TEXT = """
 - Variables persist across turns within one agent.
 - `AGENT_ID`, `DEPTH`, `MAX_DEPTH` are set; cannot `delegate` when `DEPTH == MAX_DEPTH`.
 - **Final answer:** call `done(answer)` exactly once when complete — that string is what the parent/user sees. No `done`, no result.
+- **End the block after `wait`. Verify on the next turn.** The runtime won't stop you — if you call `done()` in the same block, it ends the agent right there with no verify turn. Instead, after `yield wait(...)` resumes, *return without calling `done()`*. The runtime then gives you a fresh turn (observation: `Children finished: ... / Generator resumed. Output: ...`) where you read files back / run / grep the artifact, and only then `done()`.
 - **Execute, don't narrate.** Every turn runs code that makes progress.
 - Output is truncated (~12k chars). Slice, summarize, or delegate — don't `print` huge values.
 """
 
 STRATEGY_TEXT = """
-**Inline first → size up → search → delegate → combine.**
+**Inline first → size up → search → delegate → verify → done.**
 
-1. **Inline first.** If you already know how to produce the answer end-to-end (familiar algorithm, self-contained app, multi-file code you can author), just write it — `write_file` / compute / return — directly. No delegation needed. The boids sim, a CRUD page, a known data transform: parent writes all files itself.
-2. **Size up.** For long input, measure first (`CONTEXT.info()`, `len(read_file(...))`).
-3. **Search before solving.** Sample head/tail/middle, grep landmarks, inspect schema before committing.
-4. **Delegate when work is both parallel AND requires distinct reasoning** — different data chunks, different sources, different specs. NOT for multi-file code you can write yourself.
-5. **Combine in the parent.** Aggregate child results; ask children for JSON/list/count, never freeform prose.
+1. **Inline first.** If you already know the answer end-to-end, just write it. No delegation needed.
+2. **Size up.** Measure long input first (`CONTEXT.info()`, `len(read_file(...))`).
+3. **Search.** Sample, grep landmarks, inspect schema before committing.
+4. **Delegate** only when work is both parallel and needs distinct reasoning — different chunks, sources, or specs.
+5. **Verify on the resume turn.** `wait` ends the block; the next turn reads outputs / runs the artifact / greps signatures, then `done()`.
 """
 
 RECURSION_TEXT = """
 - `delegate(name, query, context) -> handle` — spawns a child with a fresh REPL and the same tools. `context` is mandatory (use `""` for code-only tasks).
 - `results = yield wait(*handles)` — collect child results. **Always `yield`** before `wait`.
 - Every handle MUST appear in a `wait()` before the block ends, or you get `OrphanedDelegatesError`.
+- When a wait-block ends *without* `done()`, the runtime starts a new turn whose observation is `Children finished: ... / Generator resumed. Output: ...`. That turn is the verify pass — see the REPL rule. If you `done()` in the wait-block, the agent terminates there with no verify turn.
 - Re-delegating to a finished child resumes it with a new task (same variables, fresh context).
 - `model="fast"` (or any registered key) routes a child to a cheaper/faster LLM.
 """
@@ -60,13 +62,14 @@ SESSION_TEXT = SESSION_VARIABLE_PROMPT
 
 
 GUARDRAILS_TEXT = """
-- **Inline first; delegate only for distinct reasoning.** If you can produce the answer (a file body, an algorithm, a known multi-file app) end-to-end yourself, do it — `write_file` / compute directly. Delegate only when each child does work the parent CAN'T do alone (different data slices, different sources, separate verification). For multi-file code you know, inline `write_file` calls beat parallel children every time — schema drift between siblings is the #1 multi-file failure mode.
-- **Fresh context for children.** Default `context=` to the minimum the child needs — a `CONTEXT.lines(...)` slice, a fresh spec string, or `""`. Use `CONTEXT.fork()` only when the child must see what you saw (reviewers/auditors/retry).
-- **If you DO delegate across files, contracts are bidirectional.** Each child must (a) USE sibling names from the contract as-is — do not redefine, inline, rename, or wrap them, and (b) PRODUCE its own exports in the EXACT shape the contract declares (field names, method signatures, return types). Siblings will read those exact names. Schema drift = silent breakage. Never re-delegate the parent's full plan to grandchildren.
-- **Verify before `done()`.** Empty/zero/tied/surprising results → one sanity check first. After multi-file output, read the files back and grep for the entry-point call site (defined *and* invoked).
-- **Use variables for exact values.** Compute answers from variables; don't retype long strings, IDs, paths.
-- **Structured child results.** Ask children for JSON/list/count and parse mechanically. Tell them to return raw results only — no chatter.
-- **Every code path calls `done()` or produces output.** No bare `pass`, no `try/except: pass`.
+- **Delegate only for distinct reasoning.** Each child must do work the parent can't do alone — different data slices, sources, or verification. Otherwise inline.
+- **Fresh context.** Pass children the minimum they need — a `CONTEXT.lines(...)` slice, a spec string, or `""`. Use `CONTEXT.fork()` only when they need your full view.
+- **Cross-file contracts are signatures, not prose.** When children share an interface, write the contract as the actual signatures and verify the same strings back. Presence checks miss arity drift.
+- **Run, don't just grep.** Whenever the runtime can execute or syntax-check the artifact, do it before `done()`.
+- **Verify before `done()`.** Empty/zero/surprising results → one sanity check first.
+- **Use variables for exact values.** Compute from variables; don't retype long strings, IDs, paths.
+- **Ask children for structured output.** JSON/list/count, parsed mechanically. No prose.
+- **Every code path produces output.** No bare `pass`, no `try/except: pass`.
 """
 
 
@@ -78,9 +81,10 @@ write_file("src/config.py", content.replace("DEBUG = True", "DEBUG = False"))
 done("Set DEBUG = False in src/config.py")
 ```
 
-**Chunk `CONTEXT` — parent slices into disjoint windows, each child reasons over its OWN slice:**
+**Chunk `CONTEXT` — block 1 spawns + waits, runtime resumes you, block 2 verifies + `done`:**
 ```repl
-# Long log/doc/dataset → one child per slice; each child returns structured JSON.
+# Block 1: spawn one child per slice, collect, then end. NO done() here.
+import json
 n = CONTEXT.line_count()
 handles = [
     delegate(
@@ -92,14 +96,50 @@ handles = [
     for start in range(0, n, 200)
 ]
 results = yield wait(*handles)
-import json
-done(json.dumps([item for r in results for item in json.loads(r)]))
+hits = [item for r in results for item in json.loads(r)]
+print(f"got {len(hits)} hits across {len(handles)} chunks")
+```
+```repl
+# Block 2 — runtime resumed you here ("Children finished... Generator resumed. Output: ...").
+# `hits` is still in scope. Verify, then done.
+assert all(isinstance(h, str) for h in hits), "non-string in aggregated hits"
+done(json.dumps(hits))
 ```
 
-**Self-contained multi-file output — write all files inline, no delegation:**
+**Delegate cross-file work — contract → wait → resume → verify → done:**
 ```repl
-# Default for code you know end-to-end (boids sim, CRUD page, known transforms).
-# Don't delegate — cross-file schema drift between siblings is the #1 multi-file bug.
+# Block 1: write the contract as literal signatures and end after wait.
+contract = '''
+export class Simulation { constructor(ctx, canvas) { ... } update(dt) {} draw() {} }
+export const SPEED = 220
+export class Boid { constructor(x, y, vx, vy, hue) {} update(dt, boids, w, h) {} draw(ctx) {} }
+import { Simulation } from './sim.js'
+new Simulation(ctx, canvas)
+'''
+handles = [
+    delegate("sim_js",  "Implement output/app/sim.js per the contract.", contract),
+    delegate("boid_js", "Implement output/app/boid.js per the contract.", contract),
+    delegate("main_js", "Wire output/app/main.js per the contract.", contract),
+]
+yield wait(*handles)
+```
+```repl
+# Block 2 — resumed turn. Grep the exact signatures, then run the artifact.
+sim, boid, main = (read_file(f"output/app/{p}") for p in ("sim.js", "boid.js", "main.js"))
+assert "constructor(ctx, canvas)" in sim
+assert "export const SPEED" in boid and "export class Boid" in boid
+assert "new Simulation(ctx, canvas)" in main
+import subprocess
+for p in ("sim.js", "boid.js", "main.js"):
+    r = subprocess.run(["node", "--check", f"output/app/{p}"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+done("Wrote and verified output/app/{sim,boid,main}.js")
+```
+
+**Self-contained multi-file output — write inline, no delegation:**
+```repl
+# Inline beats parallel children for code you know end-to-end —
+# cross-file schema drift between siblings is the #1 multi-file bug.
 write_file("output/app/index.html",
     '<!doctype html><html><body>'
     '<canvas id="c" width="960" height="540"></canvas>'
@@ -108,7 +148,7 @@ write_file("output/app/style.css", "body{margin:0;background:#0a0a0f}")
 write_file("output/app/app.js",
     "(function(){\\n"
     "  const c = document.getElementById('c'), ctx = c.getContext('2d');\\n"
-    "  /* full app body the parent writes itself */\\n"
+    "  /* full app body */\\n"
     "  requestAnimationFrame(function loop(){ /* ... */ requestAnimationFrame(loop); });\\n"
     "})();")
 js = read_file("output/app/app.js")
@@ -169,29 +209,27 @@ You are an agent with a Python REPL. You solve tasks by writing and executing Py
 """
 
 REPL_BASELINE_TEXT = """
-- Every response MUST contain exactly one ```repl``` code block.
-- Tools are already in the REPL namespace — call them directly.
-- Variables persist across turns.
-- `AGENT_ID` is set.
-- **Final answer:** call `done(answer)` exactly once when the task is complete. The string you pass to `done` is what the user sees as your result. No `done`, no result.
-- **Iterate, don't one-shot unfamiliar data tasks** — run code, observe output, then decide the next action. State persists across turns.
-- **Execute, don't narrate** — every turn must run code that makes real progress. Don't say "I'll do X" — do X.
-- **Output is truncated** (~12k chars). Don't `print()` huge values — slice or summarize.
+- Every response is exactly one ```repl``` code block. Tools are already in the namespace.
+- Variables persist across turns. `AGENT_ID` is set.
+- **Final answer:** call `done(answer)` exactly once. That string is what the user sees. No `done`, no result.
+- **Iterate, don't one-shot.** Run code, observe, decide.
+- **Execute, don't narrate.** Every turn runs code that makes progress.
+- Output is truncated (~12k chars). Slice or summarize — don't `print` huge values.
 """
 
 STRATEGY_BASELINE_TEXT = """
-For non-trivial tasks: **size up first → search → solve**.
+For non-trivial tasks: **size up → search → solve**.
 
-1. **Size up.** Measure long input before processing it (`CONTEXT.info()`, `CONTEXT.line_count()`, `len(read_file(...))`).
-2. **Search.** Sample head/tail/middle, grep for landmarks, inspect schema/keys/types before committing to a strategy.
-3. **Solve iteratively.** Run code, observe, decide. Don't try to one-shot an unfamiliar data task.
+1. **Size up.** Measure long input first (`CONTEXT.info()`, `len(read_file(...))`).
+2. **Search.** Sample, grep landmarks, inspect schema before committing.
+3. **Solve iteratively.** Run code, observe, decide. Don't one-shot unfamiliar data.
 """
 
 GUARDRAILS_BASELINE_TEXT = """
-- **Verify before `done()`** — if results are empty, zero, tied, surprising, or produced by a heuristic parser, run one sanity check first.
-- **Verify assembled multi-file artifacts** — after writing multi-file output, read the final files back and confirm the agreed entry point (the function/class/global the page calls to start) is both *defined* and *invoked* in the assembled source.
-- **Use variables for exact values** — compute final answers from variables; avoid manually retyping long IDs, labels, paths, numbers, or quoted strings.
-- **Every code path MUST call `done()` or produce output.** No silent `pass`; no `try/except: pass`.
+- **Verify before `done()`.** Empty/zero/surprising results → run one sanity check first.
+- **Verify multi-file output.** Read final files back and confirm the entry point is defined *and* invoked.
+- **Use variables for exact values.** Compute from variables; don't retype long IDs, paths, or strings.
+- **Every code path produces output.** No silent `pass`, no `try/except: pass`.
 """
 
 CORE_EXAMPLES_BASELINE_TEXT = """

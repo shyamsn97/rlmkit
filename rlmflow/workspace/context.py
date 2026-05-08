@@ -110,7 +110,7 @@ class Context(ABC):
         return []
 
     @abstractmethod
-    def fork(self, new_location: object) -> "Context":
+    def fork(self, new_location: object) -> Context:
         """Return a deep copy of this context payload store."""
 
     def info(

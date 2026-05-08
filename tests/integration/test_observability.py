@@ -78,7 +78,7 @@ def test_tree_usage_sums_children_into_root():
 def test_steps_are_typed_nodes():
     states = _run_to_completion(_agent(), "obs-nodes")
 
-    assert {state.type for state in states} >= {"query", "supervising", "result"}
+    assert {state.current().type for state in states} >= {"query", "supervising", "result"}
     assert all(isinstance(state, BaseNode) for state in states)
 
 
@@ -94,8 +94,8 @@ def test_trace_save_and_load_round_trip(tmp_path: Path):
     assert len(loaded.states) == len(states)
     assert loaded.states[0].agent_id == "root"
     assert loaded.states[0].query == "obs-trace"
-    assert isinstance(loaded.states[-1], ResultNode)
-    assert any(child.agent_id == "root.child" for child in loaded.states[-1].children)
+    assert isinstance(loaded.states[-1].current(), ResultNode)
+    assert any(child.agent_id == "root.child" for child in loaded.states[-1].walk())
     assert loaded.states[-1].tree(color=False) == states[-1].tree(color=False)
 
 
@@ -109,4 +109,4 @@ def test_state_save_load_round_trip(tmp_path: Path):
     assert restored.tree(color=False) == final.tree(color=False)
     assert restored.tree_usage() == final.tree_usage()
     payload = json.loads(ckpt.read_text())
-    assert payload["children"][0]["agent_id"] == "root.child"
+    assert payload["children"][0]["agent_id"] == "root"

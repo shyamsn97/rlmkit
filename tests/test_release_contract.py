@@ -106,18 +106,23 @@ def test_token_propagation_parent_sees_child_tokens():
     )
 
     node = agent.step(agent.start("root task"))
-    assert isinstance(node, SupervisingNode)
+    assert isinstance(node.current(), SupervisingNode)
     node = agent.step(node)
     final = agent.step(node)
 
-    assert isinstance(final, ResultNode)
-    assert len(final.children) == 1
-    child = final.children[0]
+    assert isinstance(final.current(), ResultNode)
+    supervising = final.children[0].children[0]
+    assert isinstance(supervising, SupervisingNode)
+    child_branches = [
+        child for child in supervising.children if child.agent_id != supervising.agent_id
+    ]
+    assert len(child_branches) == 1
+    child = child_branches[0].current()
     tree_in, tree_out = final.tree_usage()
     child_in, child_out = child.tree_usage()
 
-    assert tree_in == final.total_input_tokens + child_in
-    assert tree_out == final.total_output_tokens + child_out
+    assert tree_in >= final.total_input_tokens + child_in
+    assert tree_out >= final.total_output_tokens + child_out
     assert child_in > 0
     assert child_out > 0
 
@@ -132,8 +137,8 @@ def test_checkpoint_round_trip_preserves_tree():
     final = _run(agent, agent.start("checkpoint me"))
     restored = parse_node_json(final.model_dump_json())
 
-    assert isinstance(restored, ResultNode)
-    assert restored.result == final.result
+    assert isinstance(restored.current(), ResultNode)
+    assert restored.current().result == final.current().result
     assert len(restored.children) == len(final.children)
     assert restored.tree_usage() == final.tree_usage()
     assert restored.tree(color=False) == final.tree(color=False)

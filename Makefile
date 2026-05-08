@@ -1,4 +1,4 @@
-.PHONY: clean clean-build clean-pyc clean-test coverage dist docs help install lint lint/flake8 oolong-paper oolong-rlm oolong-rlm-tips oolong-standard oolong-real oolong-ablations oolong-aggregate animation animation-preview animation-mp4 animation-gif animation-gif-small animation-clean
+.PHONY: clean clean-build clean-pyc clean-test coverage dist docs help install lint lint/flake8 format-md lint-md oolong-paper oolong-rlm oolong-rlm-tips oolong-standard oolong-real oolong-ablations oolong-aggregate animation animation-preview animation-mp4 animation-gif animation-gif-small animation-clean
 	{%- if cookiecutter.use_black == 'y' %} lint/black{% endif %}
 .DEFAULT_GOAL := help
 
@@ -50,6 +50,17 @@ lint: ## check style with flake8
 	isort --profile black rlmflow
 	black rlmflow
 	flake8 rlmflow
+
+# ── Markdown ─────────────────────────────────────────────────────────
+# Scoped to public-facing docs only; skips docs/internal/ scratch notes.
+# Install once:  pip install mdformat mdformat-gfm
+MD_FILES := README.md CHANGELOG.md $(wildcard docs/*.md)
+
+format-md: ## Auto-format public markdown (one paragraph per line, no hard wrap).
+	python -m mdformat --wrap no $(MD_FILES)
+
+lint-md: ## Check public markdown formatting without writing changes.
+	python -m mdformat --wrap no --check $(MD_FILES)
 
 install: clean lint
 	python -m pip install . --upgrade

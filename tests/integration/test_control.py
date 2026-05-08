@@ -61,8 +61,8 @@ def test_step_loop_reaches_result_node():
 
     final = _run(agent, agent.start("control-step"))
 
-    assert isinstance(final, ResultNode)
-    assert final.result == "direct-answer"
+    assert isinstance(final.current(), ResultNode)
+    assert final.current().result == "direct-answer"
 
 
 def test_checkpoint_round_trip_resumes_cleanly():
@@ -74,8 +74,8 @@ def test_checkpoint_round_trip_resumes_cleanly():
     final = _run(agent, agent.start("control-ckpt"))
     restored = parse_node_json(final.model_dump_json())
 
-    assert isinstance(restored, ResultNode)
-    assert restored.result == final.result
+    assert isinstance(restored.current(), ResultNode)
+    assert restored.current().result == final.current().result
     assert restored.tree_usage() == final.tree_usage()
 
 
@@ -93,8 +93,8 @@ def test_fork_from_midrun_node_diverges():
     final_a = _run(agent_a, mid)
     final_b = _run(agent_b, mid)
 
-    assert final_a.result == "path-A"
-    assert final_b.result == "path-B"
+    assert final_a.current().result == "path-A"
+    assert final_b.current().result == "path-B"
 
 
 def test_rewind_is_just_list_indexing():
@@ -110,7 +110,8 @@ def test_rewind_is_just_list_indexing():
         states.append(node)
 
     assert states[0].type == "query"
-    assert states[-1].type == "result"
+    assert states[-1].type == "query"
+    assert states[-1].current().type == "result"
     assert states[0] is not states[-1]
 
 
@@ -127,12 +128,15 @@ def test_intervene_replaces_child_result_before_resume():
     )
 
     node = agent.step(agent.start("control-intervene"))
-    assert isinstance(node, SupervisingNode)
-    assert node.waiting_on == ["root.child"]
+    assert isinstance(node.current(), SupervisingNode)
+    assert node.current().waiting_on == ["root.child"]
 
-    killed_child = node.children[0].successor(ResultNode, result="killed-by-supervisor")
-    patched = node.update(children=[killed_child])
+    supervisor = node.current()
+    killed_child = supervisor.children[0].successor(
+        ResultNode, result="killed-by-supervisor"
+    )
+    patched = supervisor.update(children=[killed_child])
     final = _run(agent, patched)
 
-    assert isinstance(final, ResultNode)
-    assert final.result == "killed-by-supervisor"
+    assert isinstance(final.current(), ResultNode)
+    assert final.current().result == "killed-by-supervisor"

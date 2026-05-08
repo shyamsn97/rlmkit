@@ -366,7 +366,7 @@ def run_rlm_task(
             states.append(state)
             on_step(state)
 
-        prediction = state.result or ""
+        prediction = state.get_result()
     except Exception as exc:
         error = "".join(traceback.format_exception_only(type(exc), exc)).strip()
     finally:

@@ -55,7 +55,7 @@ class Session(ABC):
         """Load latest nodes keyed by id."""
 
     @abstractmethod
-    def fork(self, new_location: object) -> "Session":
+    def fork(self, new_location: object) -> Session:
         """Return a deep copy of this session."""
 
     def chain_to(self, node: Node) -> list[Node]:

@@ -144,7 +144,7 @@ def main():
 
         print(f"\n{'=' * 40}")
         print(f"Actual answer:  {answer}")
-        print(f"Correct:        {answer in (state.result or '')}")
+        print(f"Correct:        {answer in state.get_result()}")
 
         from rlmflow.utils.trace import save_trace
         trace_dir = Path("traces/needle_haystack")

@@ -82,9 +82,9 @@ def test_default_prompt_teaches_size_up_strategy():
     prompt = DEFAULT_BUILDER.build(tools="- read_file: ...", status="depth 0")
     assert "Inline first" in prompt
     assert "Size up" in prompt or "size up" in prompt.lower()
-    assert "Search before solving" in prompt
+    assert "Search" in prompt
     assert "Delegate" in prompt
-    assert "Combine in the parent" in prompt
+    assert "verify" in prompt.lower()
 
 
 def test_baseline_prompt_documents_context_and_done():

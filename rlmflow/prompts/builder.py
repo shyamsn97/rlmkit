@@ -1,8 +1,8 @@
 """Prompt builder: ordered list of named sections, immutable fluent API.
 
-Every mutation method (``.section()``, ``.remove()``) returns a **new**
-``PromptBuilder`` — the original is never modified.  This makes it safe
-to keep a module-level ``DEFAULT_BUILDER`` and derive from it.
+``.section()`` returns a **new** ``PromptBuilder`` — the original is never
+modified.  This makes it safe to keep a module-level ``DEFAULT_BUILDER`` and
+derive from it.
 
 Usage::
 
@@ -54,10 +54,10 @@ class Section:
 class PromptBuilder:
     """Ordered list of sections with an immutable fluent API.
 
-    ``.section()`` and ``.remove()`` return a **new** builder — the
-    original is never mutated.  ``build()`` renders sections
-    top-to-bottom, skipping empties.  Pass keyword arguments to
-    ``build()`` to override section bodies for that single render.
+    ``.section()`` returns a **new** builder — the original is never mutated.
+    ``build()`` renders sections top-to-bottom, skipping empties.  Pass
+    keyword arguments to ``build()`` to override section bodies for that
+    single render.
     """
 
     def __init__(self) -> None:
