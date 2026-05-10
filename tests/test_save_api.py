@@ -19,6 +19,7 @@ from rlmflow.utils.viewer import _scale_figure_elements
 
 KALEIDO_INSTALLED = importlib.util.find_spec("kaleido") is not None
 PIL_INSTALLED = importlib.util.find_spec("PIL") is not None
+PLOTLY_INSTALLED = importlib.util.find_spec("plotly") is not None
 
 
 class _DelegatingLLM(LLMClient):
@@ -59,6 +60,7 @@ def _run() -> list[Node]:
 # ── render_html / save_html ──────────────────────────────────────────────────
 
 
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_render_html_contains_one_slide_per_state():
     states = _run()
     html = render_html(states, title="trace test")
@@ -84,6 +86,7 @@ def test_render_html_rejects_empty_states():
         render_html([])
 
 
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_save_html_writes_file(tmp_path):
     states = _run()
     out = save_html(states, tmp_path / "trace.html", title="t")
@@ -94,6 +97,7 @@ def test_save_html_writes_file(tmp_path):
     assert "<title>t</title>" in contents
 
 
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_save_html_creates_parent_dirs(tmp_path):
     states = _run()
     out = save_html(states, tmp_path / "nested" / "deep" / "trace.html")
@@ -102,6 +106,7 @@ def test_save_html_creates_parent_dirs(tmp_path):
     assert out.parent.is_dir()
 
 
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_node_save_html_method(tmp_path):
     states = _run()
     out = states[-1].save_html(tmp_path / "trace.html", states=states)
@@ -113,6 +118,7 @@ def test_node_save_html_method(tmp_path):
     assert section_count == len(states)
 
 
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_render_html_normalize_labels_default_strips_top_positions():
     """The HTML stepper should default to bottom-only labels (matches save_image)."""
     states = _run()
@@ -132,6 +138,7 @@ def test_render_html_normalize_labels_default_strips_top_positions():
     )
 
 
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_render_html_marker_mult_shows_up_in_embedded_json():
     """marker_mult should propagate all the way through render_html."""
     states = _run()
@@ -340,7 +347,7 @@ def test_save_gif_empty_states_raises(tmp_path):
 
 def test_save_image_raises_helpful_error_without_kaleido(tmp_path, monkeypatch):
     """Even with kaleido installed, simulate its absence to lock the message in."""
-    import plotly.io as pio
+    pio = pytest.importorskip("plotly.io")
 
     states = _run()
 

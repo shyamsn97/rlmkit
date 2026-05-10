@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
 
 import pytest
 
@@ -10,6 +11,9 @@ from rlmflow import LLMClient, LLMUsage, Node, RLMConfig, RLMFlow
 from rlmflow.cli import _load, main
 from rlmflow.runtime.local import LocalRuntime
 from rlmflow.utils.trace import save_trace
+
+
+PLOTLY_INSTALLED = importlib.util.find_spec("plotly") is not None
 
 
 class DelegatingLLM(LLMClient):
@@ -195,6 +199,7 @@ def test_render_requires_format(tmp_path: Path, run_states: list[Node]):
         main(["render", str(ckpt)])
 
 
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_render_html_writes_stepper(tmp_path: Path, run_states: list[Node]):
     trace_dir = tmp_path / "trace"
     save_trace(run_states, trace_dir)
@@ -224,6 +229,7 @@ def test_render_html_writes_stepper(tmp_path: Path, run_states: list[Node]):
     assert "top center" not in text
 
 
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_render_html_no_normalize_labels_keeps_top_positions(
     tmp_path: Path, run_states: list[Node]
 ):
@@ -249,6 +255,7 @@ def test_render_html_no_normalize_labels_keeps_top_positions(
     assert "top center" in text
 
 
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_render_html_marker_mult_propagates(
     tmp_path: Path, run_states: list[Node]
 ):

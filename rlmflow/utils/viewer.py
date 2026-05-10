@@ -1387,15 +1387,15 @@ def save_gif(
     Requires both ``kaleido`` (for PNG export) and ``Pillow`` (for GIF
     assembly): ``pip install rlmflow[image] pillow``.
     """
-    try:
-        from PIL import Image
-    except ImportError as exc:
-        raise ImportError("save_gif() requires Pillow: `pip install pillow`.") from exc
-
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     if not states:
         raise ValueError("save_gif() needs at least one state")
+
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ImportError("save_gif() requires Pillow: `pip install pillow`.") from exc
 
     import io
 
