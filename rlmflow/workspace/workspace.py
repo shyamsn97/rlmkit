@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from rlmflow.workspace.context import Context, FileContext
 from rlmflow.workspace.session import FileSession, Session
+from rlmflow.workspace.store import FileStore
 
 if TYPE_CHECKING:
     from rlmflow.node import WorkspaceRef
@@ -47,10 +48,11 @@ class Workspace:
     ) -> Workspace:
         root = Path(dir).resolve()
         root.mkdir(parents=True, exist_ok=True)
+        store = FileStore(root)
         if session is None:
-            session = FileSession(root / "session")
+            session = FileSession(store)
         if context is None:
-            context = FileContext(root / "context")
+            context = FileContext(store)
         return cls(root=root, session=session, context=context, branch_id=branch_id)
 
     @classmethod
@@ -78,7 +80,7 @@ class Workspace:
             shutil.rmtree(new_root)
         new_root.mkdir(parents=True, exist_ok=True)
 
-        reserved = {"session", "context", "trace", "checkpoint.json"}
+        reserved = {"session", "context", "graph.jsonl", "trace", "checkpoint.json"}
         for item in self.root.iterdir():
             if item.name in reserved:
                 continue
@@ -88,8 +90,18 @@ class Workspace:
             else:
                 shutil.copy2(item, dst)
 
-        new_session = self.session.fork(new_root / "session")
-        new_context = self.context.fork(new_root / "context")
+        session_target = (
+            new_root
+            if getattr(self.session, "legacy", True) is False
+            else new_root / "session"
+        )
+        context_target = (
+            new_root
+            if getattr(self.context, "legacy", True) is False
+            else new_root / "context"
+        )
+        new_session = self.session.fork(session_target)
+        new_context = self.context.fork(context_target)
         return Workspace(
             root=new_root,
             session=new_session,

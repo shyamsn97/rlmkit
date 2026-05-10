@@ -552,9 +552,12 @@ def _session_path(states: list[Node]) -> Path | None:
         ws = getattr(state, "workspace", None)
         root = getattr(ws, "root", None) if ws else None
         if root:
-            path = Path(root) / "session"
-            if (path / "nodes.jsonl").exists():
+            path = Path(root)
+            if (path / "graph.jsonl").exists():
                 return path
+            legacy_path = path / "session"
+            if (legacy_path / "nodes.jsonl").exists():
+                return legacy_path
     return None
 
 
@@ -592,13 +595,13 @@ def main() -> None:
             states, _ = run_demo(workspace_root)
             markdown = render_markdown(states)
             html = render_html_viewer(states)
-            events = session_events(workspace_root / "session")
+            events = session_events(workspace_root)
     else:
         args.workspace.mkdir(parents=True, exist_ok=True)
         states, _ = run_demo(args.workspace)
         markdown = render_markdown(states)
         html = render_html_viewer(states)
-        events = session_events(args.workspace / "session")
+        events = session_events(args.workspace)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(markdown, encoding="utf-8")

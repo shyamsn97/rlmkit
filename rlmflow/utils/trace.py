@@ -54,7 +54,10 @@ def _events_from_states(states: list[Node]) -> list[Node]:
         root = getattr(ws, "root", None) if ws else None
         if not root:
             continue
-        events = session_events(Path(root) / "session")
+        root_path = Path(root)
+        events = session_events(root_path)
+        if not events:
+            events = session_events(root_path / "session")
         if events:
             return events
     return []

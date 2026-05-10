@@ -1,0 +1,9 @@
+{
+  "agent_id": "root.write_package.json",
+  "latest_leaf_id": "n_88f8a6acc657",
+  "branch_id": "main",
+  "depth": 1,
+  "type": "result",
+  "terminal": true,
+  "result": "OK"
+}

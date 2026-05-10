@@ -30,6 +30,7 @@ from rlmflow.utils.viz import (
     session_events,
 )
 from rlmflow.workspace.session import FileSession, Session
+from rlmflow.workspace.store import FileStore
 
 # Imported at module top so annotations on nested handlers (e.g. `evt:
 # gradio.SelectData`) resolve via `typing.get_type_hints()` even with
@@ -53,7 +54,14 @@ def _resolve_session(
     if isinstance(session, Session):
         return session
     if isinstance(session, (str, Path)):
-        return FileSession(session)
+        path = Path(session)
+        if (path / "nodes.jsonl").exists():
+            return FileSession(path)
+        if path.name == "session" and path.exists():
+            return FileSession(FileStore(path.parent))
+        if (path / "graph.jsonl").exists() or (path / "session").exists():
+            return FileSession(FileStore(path))
+        return FileSession(path)
     if not states:
         return None
     # Best-effort: any node may carry a workspace pointer with a sibling session/.
@@ -62,9 +70,14 @@ def _resolve_session(
         root = getattr(ws, "root", None) if ws else None
         if not root:
             continue
-        cand = Path(root) / "session"
+        workspace_root = Path(root)
+        if (workspace_root / "graph.jsonl").exists():
+            return FileSession(FileStore(workspace_root))
+        cand = workspace_root / "session"
         if (cand / "nodes.jsonl").exists():
             return FileSession(cand)
+        if cand.exists():
+            return FileSession(FileStore(workspace_root))
     return None
 
 

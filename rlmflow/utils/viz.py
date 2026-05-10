@@ -12,6 +12,7 @@ from typing import Any, Callable, Literal
 
 from rlmflow.node import Node, parse_node_json
 from rlmflow.workspace.session import FileSession, Session
+from rlmflow.workspace.store import FileStore
 
 
 def _node_label(state: Node):
@@ -631,7 +632,18 @@ def session_events(session: Session | str | Path | None) -> list[Node]:
     if session is None:
         return []
     if isinstance(session, (str, Path)):
-        session = FileSession(session)
+        path = Path(session)
+        if (path / "nodes.jsonl").exists():
+            session = FileSession(path)
+        elif path.name == "session" and path.exists():
+            session = FileSession(FileStore(path.parent))
+        elif (path / "graph.jsonl").exists() or (path / "session").exists():
+            session = FileSession(FileStore(path))
+        else:
+            session = FileSession(path)
+    events = getattr(session, "events", None)
+    if callable(events):
+        return list(events())
     nodes_path = getattr(session, "nodes_path", None)
     if nodes_path is not None:
         path = Path(nodes_path)

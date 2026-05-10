@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import re
-import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+
+from rlmflow.workspace.store import (
+    FileStore,
+    Store,
+    copy_workspace_paths,
+    copy_workspace_root,
+    resolve_backend,
+)
 
 CONTEXT_VARIABLE_PROMPT = """
 **Context variable:**
@@ -130,15 +136,29 @@ class Context(ABC):
 
 
 class FileContext(Context):
-    """Filesystem payload store under ``workspace/context``."""
+    """Store-backed context persistence.
 
-    def __init__(self, root: str | Path) -> None:
-        self.root = Path(root).resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+    ``FileContext(path)`` preserves the legacy ``<key>.txt`` +
+    ``<key>.json`` layout rooted at ``path``. ``FileContext(store)``
+    uses the flat workspace layout under ``context/<agent-id>/``.
+    """
+
+    def __init__(self, root: Store | str | Path) -> None:
+        self.store, self.root, self.legacy = resolve_backend(root)
 
     def _context_paths(self, key: str, *, agent_id: str) -> tuple[Path, Path]:
-        base = self.root / _agent_path(agent_id)
         safe = _safe_name(key)
+        if self.legacy:
+            base = _agent_path(agent_id)
+            return base / f"{safe}.txt", base / f"{safe}.json"
+        base = Path("context") / _safe_name(agent_id)
+        if safe == "context":
+            return base / "context.txt", base / "context_metadata.json"
+        return base / f"{safe}.txt", base / f"{safe}_metadata.json"
+
+    def _legacy_context_paths(self, key: str, *, agent_id: str) -> tuple[Path, Path]:
+        safe = _safe_name(key)
+        base = Path("context") / _agent_path(agent_id)
         return base / f"{safe}.txt", base / f"{safe}.json"
 
     def write(
@@ -150,21 +170,24 @@ class FileContext(Context):
         metadata: dict[str, Any] | None = None,
     ) -> None:
         path, meta_path = self._context_paths(key, agent_id=agent_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(value, encoding="utf-8")
+        self.store.write_text(str(path), value)
         meta = {
             "key": key,
             "agent_id": agent_id,
             "chars": len(value),
             "metadata": metadata or {},
         }
-        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        self.store.write_json(str(meta_path), meta)
 
     def read(self, key: str = "context", *, agent_id: str = "root") -> str:
         for aid in (agent_id, "root"):
             path, _ = self._context_paths(key, agent_id=aid)
-            if path.exists():
-                return path.read_text(encoding="utf-8")
+            if self.store.exists(str(path)):
+                return self.store.read_text(str(path))
+            if not self.legacy:
+                legacy_path, _ = self._legacy_context_paths(key, agent_id=aid)
+                if self.store.exists(str(legacy_path)):
+                    return self.store.read_text(str(legacy_path))
         raise KeyError(f"context {key!r} not found for {agent_id!r}")
 
     def list_contexts(self, *, agent_id: str | None = None) -> list[str]:
@@ -175,20 +198,35 @@ class FileContext(Context):
         for aid in agent_ids:
             if aid is None:
                 continue
-            base = self.root / _agent_path(aid)
-            if base.exists():
-                keys.update(p.stem for p in base.glob("*.txt"))
+            if self.legacy:
+                base = _agent_path(aid)
+                if isinstance(self.store, FileStore):
+                    base_path = self.store.path(str(base) if str(base) != "." else "")
+                    paths = (
+                        [
+                            str(path.relative_to(self.store.root))
+                            for path in base_path.glob("*.txt")
+                        ]
+                        if base_path.exists()
+                        else []
+                    )
+                else:
+                    prefix = str(base) if str(base) != "." else ""
+                    paths = self.store.list(prefix)
+            else:
+                base = Path("context") / _safe_name(aid)
+                paths = self.store.list(str(base))
+                legacy_base = Path("context") / _agent_path(aid)
+                paths.extend(self.store.list(str(legacy_base)))
+            for path in paths:
+                if path.endswith(".txt"):
+                    keys.add(Path(path).stem)
         return sorted(keys)
 
     def fork(self, new_location: object) -> Context:
-        dst = Path(new_location).resolve()
-        if dst.exists():
-            shutil.rmtree(dst)
-        if self.root.exists():
-            shutil.copytree(self.root, dst)
-        else:
-            dst.mkdir(parents=True)
-        return FileContext(dst)
+        if self.legacy:
+            return FileContext(copy_workspace_root(self.root, new_location))
+        return FileContext(copy_workspace_paths(self.store, new_location, ("context",)))
 
 
 class InMemoryContext(Context):

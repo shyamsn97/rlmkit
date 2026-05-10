@@ -91,6 +91,8 @@ Or pass a list to `runtime.register_tools([...])`.
 
 ## Custom prompt
 
+For a fuller guide, see [`prompt_customization.md`](prompt_customization.md).
+
 ```python
 from rlmflow.prompts.default import DEFAULT_BUILDER, GUARDRAILS_TEXT
 
@@ -113,11 +115,29 @@ nodes = workspace.session.load()
 chain = workspace.session.chain_to(node)
 ```
 
+On disk, the workspace keeps the append-only graph log at `graph.jsonl` and
+per-call session views under `session/<agent-id>/`:
+
+```text
+workspace/
+  graph.jsonl
+  session/root/session.jsonl
+  session/root/latest.json
+```
+
 `Workspace.context` stores optional payloads exposed inside the REPL as
 `CONTEXT`. The root agent's payload is keyword-only and optional:
 
 ```python
 node = agent.start("answer from the payload", context=large_text)
+```
+
+Payloads live beside the session views under `context/<agent-id>/`:
+
+```text
+workspace/
+  context/root/context.txt
+  context/root/context_metadata.json
 ```
 
 Inside the REPL, agents see `CONTEXT` (read-only payload), `SESSION`

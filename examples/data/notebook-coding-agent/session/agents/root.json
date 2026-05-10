@@ -1,9 +1,0 @@
-{
-  "agent_id": "root",
-  "latest_leaf_id": "n_9869326f37da",
-  "branch_id": "main",
-  "depth": 0,
-  "type": "result",
-  "terminal": true,
-  "result": "Wrote and verified output/boids-simulation ({index.html, main.js, sim.js, boid.js}). Open output/boids-simulation/index.html in a browser to run the fast, colorful boids simulation."
-}

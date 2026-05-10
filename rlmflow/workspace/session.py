@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import re
-import shutil
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from rlmflow.node import Node, parse_node_json
+from rlmflow.node import Node, parse_node_json, parse_node_obj
+from rlmflow.workspace.store import (
+    FileStore,
+    Store,
+    copy_workspace_paths,
+    copy_workspace_root,
+    resolve_backend,
+)
 
 # Terminal-first ordering. Used when an agent has multiple persisted nodes
 # and we want the most-evolved one as the chain endpoint.
@@ -91,18 +96,36 @@ class Session(ABC):
 
 
 class FileSession(Session):
-    """Filesystem session store under ``workspace/session``."""
+    """Store-backed session persistence.
 
-    def __init__(self, root: str | Path) -> None:
-        self.root = Path(root).resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / "agents").mkdir(parents=True, exist_ok=True)
-        self.nodes_path = self.root / "nodes.jsonl"
+    ``FileSession(path)`` preserves the legacy ``nodes.jsonl`` +
+    ``agents/*.json`` layout rooted at ``path``. ``FileSession(store)``
+    uses the new flat workspace layout:
+
+    - ``graph.jsonl``
+    - ``session/<agent-id>/session.jsonl``
+    - ``session/<agent-id>/latest.json``
+    """
+
+    def __init__(self, root: Store | str | Path) -> None:
+        self.store, self.root, self.legacy = resolve_backend(
+            root, legacy_dirs=("agents",)
+        )
+        self.nodes_path = (
+            self.store.path("nodes.jsonl" if self.legacy else "graph.jsonl")
+            if isinstance(self.store, FileStore)
+            else None
+        )
 
     def write(self, node: Node) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        with self.nodes_path.open("a", encoding="utf-8") as f:
-            f.write(node.model_dump_json() + "\n")
+        if self.legacy:
+            self.store.append_jsonl("nodes.jsonl", node)
+            self.write_agent_view(node)
+            return
+        self.store.append_jsonl("graph.jsonl", node)
+        self.store.append_jsonl(
+            f"session/{_safe_name(node.agent_id)}/session.jsonl", node
+        )
         self.write_agent_view(node)
 
     def write_agent_view(self, node: Node) -> None:
@@ -115,29 +138,65 @@ class FileSession(Session):
             "terminal": node.terminal,
             "result": getattr(node, "result", None),
         }
-        path = self.root / "agents" / f"{_safe_name(node.agent_id)}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(view, indent=2), encoding="utf-8")
+        if self.legacy:
+            self.store.write_json(f"agents/{_safe_name(node.agent_id)}.json", view)
+        else:
+            self.store.write_json(
+                f"session/{_safe_name(node.agent_id)}/latest.json", view
+            )
 
     def load(self) -> dict[str, Node]:
         nodes: dict[str, Node] = {}
-        if not self.nodes_path.exists():
+        if self.legacy:
+            lines = (
+                self.store.read_text("nodes.jsonl").splitlines()
+                if self.store.exists("nodes.jsonl")
+                else []
+            )
+            for line in lines:
+                if line.strip():
+                    node = parse_node_json(line)
+                    nodes[node.id] = node
             return nodes
-        for line in self.nodes_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                node = parse_node_json(line)
+
+        for path in self.event_paths():
+            for obj in self.store.read_jsonl(path):
+                node = parse_node_obj(obj)
                 nodes[node.id] = node
         return nodes
 
+    def event_paths(self) -> list[str]:
+        if self.legacy:
+            return ["nodes.jsonl"] if self.store.exists("nodes.jsonl") else []
+        paths: list[str] = []
+        if self.store.exists("graph.jsonl"):
+            paths.append("graph.jsonl")
+        if self.store.exists("session/nodes.jsonl"):
+            paths.append("session/nodes.jsonl")
+        return paths
+
+    def events(self) -> list[Node]:
+        out: list[Node] = []
+        if self.legacy:
+            lines = (
+                self.store.read_text("nodes.jsonl").splitlines()
+                if self.store.exists("nodes.jsonl")
+                else []
+            )
+            for line in lines:
+                if line.strip():
+                    out.append(parse_node_json(line))
+            return out
+        for path in self.event_paths():
+            out.extend(parse_node_obj(obj) for obj in self.store.read_jsonl(path))
+        return out
+
     def fork(self, new_location: object) -> Session:
-        dst = Path(new_location).resolve()
-        if dst.exists():
-            shutil.rmtree(dst)
-        if self.root.exists():
-            shutil.copytree(self.root, dst)
-        else:
-            dst.mkdir(parents=True)
-        return FileSession(dst)
+        if self.legacy:
+            return FileSession(copy_workspace_root(self.root, new_location))
+        return FileSession(
+            copy_workspace_paths(self.store, new_location, ("graph.jsonl", "session"))
+        )
 
 
 class InMemorySession(Session):

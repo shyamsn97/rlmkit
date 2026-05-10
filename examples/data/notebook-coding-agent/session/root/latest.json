@@ -1,0 +1,9 @@
+{
+  "agent_id": "root",
+  "latest_leaf_id": "n_d0ecff3f2040",
+  "branch_id": "main",
+  "depth": 0,
+  "type": "result",
+  "terminal": true,
+  "result": "Boids simulation written to output/boids-simulation and verified. Open output/boids-simulation/index.html in a modern browser to run."
+}

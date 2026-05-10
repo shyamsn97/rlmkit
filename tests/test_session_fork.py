@@ -7,7 +7,8 @@ from pathlib import Path
 
 from rlmflow import QueryNode, RLMConfig, RLMFlow, Workspace
 from rlmflow.llm import LLMClient
-from rlmflow.workspace import ContextVariable, FileContext, FileSession
+from rlmflow.utils.viz import session_events
+from rlmflow.workspace import ContextVariable, FileContext, FileSession, FileStore
 
 
 class DummyLLM(LLMClient):
@@ -41,6 +42,35 @@ def test_agent_view_records_depth(tmp_path: Path):
 
     assert root_view["depth"] == 0
     assert child_view["depth"] == 1
+
+
+def test_store_backed_session_writes_flat_layout(tmp_path: Path):
+    store = FileStore(tmp_path / "workspace")
+    session = FileSession(store)
+    root = QueryNode(agent_id="root", content="hello")
+    child = QueryNode(agent_id="root.child", depth=1, content="delegated")
+
+    session.write(root)
+    session.write(child)
+
+    assert (tmp_path / "workspace" / "graph.jsonl").exists()
+    assert (
+        tmp_path / "workspace" / "session" / "root" / "session.jsonl"
+    ).exists()
+    latest = json.loads(
+        (tmp_path / "workspace" / "session" / "root.child" / "latest.json").read_text()
+    )
+    assert latest["agent_id"] == "root.child"
+    assert latest["latest_leaf_id"] == child.id
+    assert session.load()[child.id].content == "delegated"
+    assert [event.id for event in session_events(tmp_path / "workspace")] == [
+        root.id,
+        child.id,
+    ]
+    assert [event.id for event in session_events(tmp_path / "workspace" / "session")] == [
+        root.id,
+        child.id,
+    ]
 
 
 def test_fork_overwrites_existing_destination(tmp_path: Path):
@@ -91,6 +121,20 @@ def test_context_variable_read_lines_and_grep(tmp_path: Path):
     assert context.lines(1, 2).strip() == "beta user 123"
     assert context.line_count() == 3
     assert context.grep(r"user\s+456").strip() == "3:gamma user 456"
+
+
+def test_store_backed_context_writes_flat_layout(tmp_path: Path):
+    store = FileStore(tmp_path / "workspace")
+    context = FileContext(store)
+
+    context.write("context", "child payload", agent_id="root.child")
+
+    child_dir = tmp_path / "workspace" / "context" / "root.child"
+    assert (child_dir / "context.txt").read_text() == "child payload"
+    metadata = json.loads((child_dir / "context_metadata.json").read_text())
+    assert metadata["agent_id"] == "root.child"
+    assert metadata["key"] == "context"
+    assert context.read("context", agent_id="root.child") == "child payload"
 
 
 def test_context_falls_back_to_root_for_child_agents(tmp_path: Path):
@@ -148,3 +192,7 @@ def test_rlm_start_seeds_context_and_injects_context_variable(tmp_path: Path):
     assert "CONTEXT" in engine.runtime.repl.namespace
     text = engine.runtime.repl.namespace["CONTEXT"].read()
     assert text == "one\ntwo\nthree\n"
+    root = tmp_path / "workspace"
+    assert (root / "graph.jsonl").exists()
+    assert (root / "session" / "root" / "session.jsonl").exists()
+    assert (root / "context" / "root" / "context.txt").read_text() == "one\ntwo\nthree\n"

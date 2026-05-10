@@ -110,6 +110,11 @@ save_trace(states, "traces/run1")
 open_viewer(states)
 ```
 
+`Workspace.create("./myproject")` writes a debuggable workspace as it runs:
+`graph.jsonl` is the append-only node event log, `session/<agent-id>/` holds
+per-call session views, and `context/<agent-id>/` holds payloads exposed as
+`CONTEXT`. Saved traces are separate export artifacts and can live anywhere.
+
 ## Drop-in `LLMClient`
 
 `RLMFlow` implements `LLMClient`, so it is a drop-in replacement for any LLM.
