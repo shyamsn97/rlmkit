@@ -75,6 +75,19 @@ class Workspace:
         """Load the current graph snapshot from this workspace's session."""
         return self.session.load_graph()
 
+    def load_steps(self) -> list[Graph]:
+        """Load the run as a list of snapshots, one per state-append.
+
+        Retraces the persisted graph as it would have looked after each
+        successive state was written, ordered the way an ``RLMFlow``
+        with unbounded ``max_concurrency`` would have produced them
+        (children spawned by the same supervising step are
+        round-robined, not drained one-at-a-time).
+        """
+        from rlmflow.graph import retrace_steps
+
+        return retrace_steps(self.load_graph())
+
     def open_viewer(self, **kwargs):
         """Open the interactive viewer for this workspace."""
         from rlmflow.utils.viewer import open_viewer

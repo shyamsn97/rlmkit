@@ -154,9 +154,13 @@ def test_resolve_graphs_loads_workspace_or_path(tmp_path):
     workspace = _run_workspace(tmp_path)
     from_workspace = resolve_graphs(workspace)
     from_path = resolve_graphs(workspace.root)
-    assert len(from_workspace) == 1
-    assert from_workspace[0].result() == "root:child-answer"
-    assert from_path[0].tree() == from_workspace[0].tree()
+    # Workspaces / workspace paths fan out into one Graph per state
+    # append (replayed in execution order) so the viewer slider can
+    # scrub through the run.
+    assert len(from_workspace) >= 1
+    assert from_workspace[-1].result() == "root:child-answer"
+    assert from_path[-1].tree() == from_workspace[-1].tree()
+    assert len(from_path) == len(from_workspace)
 
 
 # ── render_html / save_html ──────────────────────────────────────────
@@ -185,7 +189,7 @@ def test_render_html_accepts_workspace(tmp_path):
     workspace = _run_workspace(tmp_path)
     html = render_html(workspace, title="workspace")
     assert "<title>workspace</title>" in html
-    assert html.count('<section class="slide') == 1
+    assert html.count('<section class="slide') >= 1
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")

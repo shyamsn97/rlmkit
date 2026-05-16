@@ -155,7 +155,7 @@ class Graph:
 
     @property
     def root(self) -> Node | None:
-        """First state of this agent (the :class:`QueryNode` at ``seq=0``)."""
+        """First state of this agent (the :class:`UserQuery` at ``seq=0``)."""
         return self.states[0] if self.states else None
 
     # ── subtree iteration ────────────────────────────────────────────
@@ -517,25 +517,54 @@ class NodesView:
         return _filter(self, predicate, filters)
 
     def queries(self) -> list[Node]:
-        return self.where(type="query")
+        """Bootstrap user queries (``type == "user_query"``)."""
+        return self.where(type="user_query")
 
-    def actions(self) -> list[Node]:
-        return self.where(type="action")
+    def llm_actions(self) -> list[Node]:
+        """LLM action records (``type == "llm_action"``)."""
+        return self.where(type="llm_action")
+
+    def llm_outputs(self) -> list[Node]:
+        """LLM replies (``type == "llm_output"``)."""
+        return self.where(type="llm_output")
+
+    def exec_actions(self) -> list[Node]:
+        """Code-execution actions (``type == "exec_action"``)."""
+        return self.where(type="exec_action")
+
+    def resume_actions(self) -> list[Node]:
+        """Resume actions (``type == "resume_action"``)."""
+        return self.where(type="resume_action")
 
     def observations(self) -> list[Node]:
-        return self.where(type="observation")
+        """:class:`ExecOutput` nodes that were *not* produced by a resume."""
+        return [
+            n
+            for n in self._iter()
+            if n.type == "exec_output" and not getattr(n, "resumed_from", None)
+        ]
 
     def supervising(self) -> list[Node]:
-        return self.where(type="supervising")
+        """Yielded code observations (``type == "supervising_output"``)."""
+        return self.where(type="supervising_output")
 
     def resumes(self) -> list[Node]:
-        return self.where(type="resume")
+        """Code observations produced by a :class:`ResumeAction`."""
+        return [
+            n
+            for n in self._iter()
+            if n.type
+            in ("exec_output", "supervising_output", "error_output", "done_output")
+            and bool(getattr(n, "resumed_from", None))
+        ]
 
     def results(self) -> list[Node]:
-        return self.where(type="result")
+        """Terminal results (``type == "done_output"``)."""
+        return self.where(type="done_output")
 
     def errors(self) -> list[Node]:
-        return self.where(type="error")
+        """Error observations (``type == "error_output"``)."""
+        return self.where(type="error_output")
 
 
 class AgentsView(Mapping[str, Graph]):

@@ -16,12 +16,10 @@ def test_default_prompt_section_order_is_capabilities_first():
     assert DEFAULT_BUILDER.names == [
         "role",
         "repl",
-        "strategy",
         "tools",
         "context",
         "recursion",
         "session",
-        "guardrails",
         "core_examples",
         "status",
     ]
@@ -31,10 +29,8 @@ def test_baseline_prompt_section_order_drops_recursion_and_session():
     assert BASELINE_BUILDER.names == [
         "role",
         "repl",
-        "strategy",
         "tools",
         "context",
-        "guardrails",
         "core_examples",
         "status",
     ]
@@ -75,23 +71,29 @@ def test_default_prompt_emphasizes_done_as_final_answer():
     prompt = DEFAULT_BUILDER.build(tools="- read_file: ...", status="depth 0")
     assert "Final answer:" in prompt
     assert "done(answer)" in prompt
-    assert "No `done`, no result." in prompt
+    # The prompt must make it clear that `done(answer)` is the only way the
+    # parent / user sees the result. Don't pin the exact wording.
+    assert (
+        "what the parent/user sees" in prompt
+        or "what the parent / user sees" in prompt
+        or "what the user sees" in prompt
+    )
 
 
-def test_default_prompt_teaches_size_up_strategy():
-    prompt = DEFAULT_BUILDER.build(tools="- read_file: ...", status="depth 0")
-    # The strategy section must keep the size-up → search → delegate-or-inline → verify spine.
-    # We do NOT pin "Inline first" anymore — that bias regressed delegation on tasks that
-    # explicitly asked for split files (boids notebook). The current strategy frames the
-    # decision instead: delegate for parallelism / fresh context / split-by-spec, inline
-    # when small or tightly coupled.
-    assert "Size up" in prompt or "size up" in prompt.lower()
-    assert "Search" in prompt
-    assert "Delegate" in prompt
-    assert "Inline" in prompt
-    assert "verify" in prompt.lower()
-    # Decide-before-delegate framing must be present.
-    assert "Decide" in prompt or "decide" in prompt.lower()
+def test_default_prompt_teaches_recursion():
+    prompt = DEFAULT_BUILDER.build(tools="- read_file: ...", status="depth 0").lower()
+    # The default prompt must motivate recursion ("why recurse?") and document the
+    # core delegate / wait / verify protocol. We don't pin a dedicated Strategy
+    # section anymore — the same ideas live in role/repl/recursion.
+    for needle in (
+        "delegate(",          # the API
+        "yield wait(",        # the suspension protocol
+        "context",            # context contract
+        "verify",             # verify-before-done discipline
+        "fresh context",      # the "why recurse?" framing
+        "inline",             # inline is the alternative to delegate
+    ):
+        assert needle in prompt, f"prompt missing landmark: {needle!r}"
 
 
 def test_baseline_prompt_documents_context_and_done():

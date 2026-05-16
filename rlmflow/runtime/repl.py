@@ -23,10 +23,14 @@ from __future__ import annotations
 import argparse
 import ast
 import io
+import itertools
 import json
+import linecache
+import os
 import re
 import sys
 import threading
+import traceback
 import types
 from contextlib import contextmanager
 from typing import Any, TextIO
@@ -35,10 +39,37 @@ from rlmflow.graph import ChildHandle, WaitRequest
 from rlmflow.tools.builtins import DoneSignal
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_THIS_FILE = os.path.normpath(__file__)
+_REPL_ID_COUNTER = itertools.count(1)
 
 
 def strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
+
+
+def _register_source(filename: str, code: str) -> None:
+    """Register `code` under `filename` so traceback can render source lines.
+
+    `linecache.cache` is the same hook real Python files use; once a frame's
+    filename is in there, ``traceback.format_exception`` will include the
+    actual source line for each frame (e.g. ``    return x['key']``).
+    """
+    lines = code.splitlines(keepends=True)
+    linecache.cache[filename] = (len(code), None, lines, filename)
+
+
+def _format_repl_traceback(exc: BaseException) -> str:
+    """Format `exc`'s traceback, hiding `repl.py`'s own machinery frames.
+
+    The agent only cares about frames in its own code (``<rlm:...>``) and in
+    tool implementations. Frames from ``rlmflow/runtime/repl.py`` itself
+    (``self.gen.send(...)``, ``exec(...)``) are pure noise — strip them.
+    """
+    te = traceback.TracebackException.from_exception(exc)
+    te.stack = traceback.StackSummary.from_list(
+        [frame for frame in te.stack if os.path.normpath(frame.filename) != _THIS_FILE]
+    )
+    return "".join(te.format()).rstrip()
 
 
 class _AnnotationStripper(ast.NodeTransformer):
@@ -136,6 +167,9 @@ class REPL:
         self.protocol_out = protocol_out or sys.stdout
         self.gen = None
         self.buf: io.StringIO | None = None
+        self.errored: bool = False
+        self._repl_id = next(_REPL_ID_COUNTER)
+        self._src_counter = 0
         if not isinstance(sys.stdout, _StdoutProxy):
             sys.stdout = _StdoutProxy(sys.stdout)
 
@@ -152,18 +186,27 @@ class REPL:
             # The engine reads DONE_RESULT from runtime.env after this returns.
             pass
         except Exception as exc:
-            self.buf.write(f"\n{type(exc).__name__}: {exc}")
+            self.buf.write("\n" + _format_repl_traceback(exc))
+            self.errored = True
         finally:
             _capture.buf = None
+
+    def _source_filename(self, code: str) -> str:
+        """Stable per-call filename so traceback frames show the right source."""
+        self._src_counter += 1
+        filename = f"<rlm-{self._repl_id}.{self._src_counter}>"
+        _register_source(filename, code)
+        return filename
 
     def execute(self, code: str) -> str:
         """Execute code without generator support. Returns stdout."""
         self.buf = io.StringIO()
+        filename = self._source_filename(code)
         with self.captured():
-            exec(code, self.namespace)
+            exec(compile(code, filename, "exec"), self.namespace)
         return strip_ansi(self.buf.getvalue().strip())
 
-    def _wrap_generator(self, tree: ast.Module):
+    def _wrap_generator(self, tree: ast.Module, filename: str):
         """Wrap parsed ``tree`` in a generator fn; ``global`` every assigned
         name so variables persist in ``self.namespace`` across yields.
 
@@ -190,7 +233,7 @@ class REPL:
         if star_imports:
             imports_mod = ast.Module(body=star_imports, type_ignores=[])
             ast.fix_missing_locations(imports_mod)
-            exec(compile(imports_mod, "<rlm-imports>", "exec"), self.namespace)
+            exec(compile(imports_mod, filename, "exec"), self.namespace)
 
         assigned = {
             node.id
@@ -206,34 +249,38 @@ class REPL:
         func.body = body
         module = ast.Module(body=[func], type_ignores=[])
         ast.fix_missing_locations(module)
-        exec(compile(module, "<rlm>", "exec"), self.namespace)
+        exec(compile(module, filename, "exec"), self.namespace)
         return self.namespace.pop("__rlm_gen__")
 
     def start(self, code: str) -> tuple[bool, object]:
         """Execute ``code``. Returns ``(True, yielded)`` or ``(False, stdout)``."""
         self.buf = io.StringIO()
+        self.errored = False
         try:
             tree = ast.parse(code)
         except SyntaxError as exc:
             self.buf.write(f"\nSyntaxError: {exc}")
+            self.errored = True
             return False, self.buf.getvalue().strip()
 
         has_yield = any(
             isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(tree)
         )
+        filename = self._source_filename(code)
 
         if not has_yield:
             with self.captured():
-                exec(code, self.namespace)
+                exec(compile(code, filename, "exec"), self.namespace)
             return False, strip_ansi(self.buf.getvalue().strip())
 
-        fn = self._wrap_generator(tree)
+        fn = self._wrap_generator(tree, filename)
         self.gen = fn()
         return self.advance()
 
     def resume(self, send_value=None) -> tuple[bool, object]:
         """Resume a suspended generator. Same return convention as :meth:`start`."""
         self.buf = io.StringIO()
+        self.errored = False
         return self.advance(send_value)
 
     def advance(self, send_value=None) -> tuple[bool, object]:
@@ -281,8 +328,13 @@ class REPL:
             resp = {"suspended": True, "agent_ids": request.agent_ids}
             if pre_output:
                 resp["pre_output"] = pre_output
+            if self.errored:
+                resp["errored"] = True
             return resp
-        return {"suspended": False, "output": result}
+        resp = {"suspended": False, "output": result}
+        if self.errored:
+            resp["errored"] = True
+        return resp
 
     def handle(self, msg: dict) -> dict:
         """Process a single command and return the response dict."""

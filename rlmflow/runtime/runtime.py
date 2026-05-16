@@ -97,6 +97,11 @@ class Runtime(ABC):
         # core tool closures (``done``, ``delegate``) the engine binds to
         # this runtime. The engine resets this between executions.
         self.env: dict[str, Any] = {}
+        # ``True`` while the REPL holds a generator paused at a ``yield``.
+        # The engine reads this to detect a lost suspension (e.g. after
+        # fork or process restart) and trigger replay-of-one to rebuild
+        # the generator before calling ``resume_code``.
+        self.suspended: bool = False
 
     # ── subclasses implement these two ────────────────────────────────
 
@@ -152,17 +157,28 @@ class Runtime(ABC):
         """Run ``code`` and return captured stdout."""
         return self.call({"cmd": "run", "code": code}).get("output", "")
 
-    def start_code(self, code: str) -> tuple[bool, object]:
+    def start_code(self, code: str) -> tuple[bool, object, bool]:
         """Run code that may ``yield``.
 
-        Returns ``(True, (WaitRequest, pre_output))`` on suspend or
-        ``(False, stdout)`` on completion.
+        Returns ``(suspended, payload, errored)``. ``payload`` is
+        ``(WaitRequest, pre_output)`` when ``suspended`` else captured
+        stdout. ``errored`` is ``True`` when user code raised an
+        exception (or had a ``SyntaxError``); the traceback is included
+        in the captured output.
         """
-        return parse_response(self.call({"cmd": "run", "code": code}))
+        suspended, payload, errored = parse_response(
+            self.call({"cmd": "run", "code": code})
+        )
+        self.suspended = suspended
+        return suspended, payload, errored
 
-    def resume_code(self, send_value=None) -> tuple[bool, object]:
+    def resume_code(self, send_value=None) -> tuple[bool, object, bool]:
         """Resume a suspended generator. Same return shape as :meth:`start_code`."""
-        return parse_response(self.call({"cmd": "resume", "value": send_value}))
+        suspended, payload, errored = parse_response(
+            self.call({"cmd": "resume", "value": send_value})
+        )
+        self.suspended = suspended
+        return suspended, payload, errored
 
     def read(self, name: str) -> Any:
         """Return the REPL-namespace value bound to ``name`` (``None`` if missing).
@@ -316,11 +332,16 @@ class Runtime(ABC):
         return list(self.tools.values())
 
 
-def parse_response(resp: dict) -> tuple[bool, object]:
-    """Convert a REPL response dict into ``(suspended, payload)``."""
+def parse_response(resp: dict) -> tuple[bool, object, bool]:
+    """Convert a REPL response dict into ``(suspended, payload, errored)``."""
+    errored = bool(resp.get("errored"))
     if resp.get("suspended"):
-        return True, (
-            WaitRequest(agent_ids=resp["agent_ids"]),
-            resp.get("pre_output", ""),
+        return (
+            True,
+            (
+                WaitRequest(agent_ids=resp["agent_ids"]),
+                resp.get("pre_output", ""),
+            ),
+            errored,
         )
-    return False, resp.get("output", "")
+    return False, resp.get("output", ""), errored

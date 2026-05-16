@@ -8,8 +8,11 @@ from rlmflow import (
     LLMUsage,
     RLMConfig,
     RLMFlow,
-    ResultNode,
-    SupervisingNode,
+    DoneOutput,
+    SupervisingOutput,
+    is_done,
+    is_user_query,
+    is_supervising,
 )
 from rlmflow.runtime.local import LocalRuntime
 
@@ -65,7 +68,7 @@ def test_step_loop_reaches_result_node():
 
     final = _run(agent, agent.start("control-step"))
 
-    assert isinstance(final.current(), ResultNode)
+    assert is_done(final.current())
     assert final.result() == "direct-answer"
 
 
@@ -79,7 +82,7 @@ def test_graph_save_load_resumes_cleanly(tmp_path):
     final.save(tmp_path / "graph.json")
     restored = Graph.load(tmp_path / "graph.json")
 
-    assert isinstance(restored.current(), ResultNode)
+    assert is_done(restored.current())
     assert restored.result() == final.result()
     assert restored.tokens() == final.tokens()
 
@@ -97,8 +100,8 @@ def test_run_history_is_just_a_list_of_graphs():
         graph = agent.step(graph)
         history.append(graph)
 
-    assert history[0].current().type == "query"
-    assert history[-1].current().type == "result"
+    assert is_user_query(history[0].current())
+    assert is_done(history[-1].current())
     assert history[0] is not history[-1]
 
 
@@ -115,9 +118,9 @@ def test_supervising_state_lists_waiting_children():
     )
 
     graph = agent.step(agent.start("control-supervise"))
-    assert isinstance(graph.current(), SupervisingNode)
+    assert is_supervising(graph.current())
     assert graph.current().waiting_on == ["root.child"]
 
     final = _run(agent, graph)
-    assert isinstance(final.current(), ResultNode)
+    assert is_done(final.current())
     assert final.result() == "child-answer"

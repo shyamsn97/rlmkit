@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rlmflow import Graph, LLMClient, LLMUsage, RLMConfig, RLMFlow, ResultNode
+from rlmflow import Graph, LLMClient, LLMUsage, RLMConfig, RLMFlow, DoneOutput, is_done
 from rlmflow.runtime.local import LocalRuntime
 from rlmflow.utils.trace import Trace, load_trace, save_trace
 
@@ -55,7 +55,7 @@ def test_tree_render_contains_every_agent():
 
     assert "root" in rendered
     assert "root.child" in rendered
-    assert "result -> " in rendered
+    assert "done -> " in rendered
 
 
 def test_tokens_sum_children_into_root():
@@ -74,9 +74,14 @@ def test_tokens_sum_children_into_root():
 def test_step_snapshots_are_graph_instances():
     graphs = _run_to_completion(_agent(), "obs-graphs")
     assert all(isinstance(g, Graph) for g in graphs)
-    # At least one snapshot shows a supervising state mid-run.
-    types = [g.current().type for g in graphs]
-    assert {"query", "supervising", "result"} <= set(types)
+    # The trajectory passes through a seed (start), at least one
+    # yielded supervise (mid-run), and a terminal done (end).
+    from rlmflow import is_done, is_user_query, is_supervising
+
+    currents = [g.current() for g in graphs]
+    assert any(is_user_query(c) for c in currents)
+    assert any(is_supervising(c) for c in currents)
+    assert any(is_done(c) for c in currents)
 
 
 def test_trace_save_and_load_round_trip(tmp_path: Path):
@@ -90,7 +95,7 @@ def test_trace_save_and_load_round_trip(tmp_path: Path):
     assert loaded.metadata == {"kind": "test"}
     assert len(loaded.graphs) == len(graphs)
     assert loaded.graphs[0].root_agent_id == "root"
-    assert isinstance(loaded.graphs[-1].current(), ResultNode)
+    assert is_done(loaded.graphs[-1].current())
     assert "root.child" in loaded.graphs[-1]
     assert loaded.graphs[-1].tree() == graphs[-1].tree()
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import random
 import string
-import tempfile
 from pathlib import Path
 
 from rlmflow.llm import AnthropicClient, OpenAIClient

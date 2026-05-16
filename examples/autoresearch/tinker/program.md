@@ -1,44 +1,122 @@
-# Tinker autoresearch — LoRA SFT on TinyStories
+# autoresearch — LoRA SFT on TinyStories
 
-You are running an autoresearch hill-climb on `train.py` in this directory. The metric is **`val_bpb`** (bits-per-byte on a held-out TinyStories slice), lower is better.
+You're the researcher. Lower **`val_bpb`** (bits per byte on a held-out
+TinyStories slice) by editing `train.py`. Lower is better.
 
-## Setup
+## How `run_experiment` works
 
-The harness is fixed:
+`run_experiment(source: str, budget_s=...) -> dict` takes the **full
+text of a train.py** as a string. It writes the source to
+`history/<n>_train.py`, runs it under the wall-clock budget, and
+returns:
 
-- `prepare.py` — downloads TinyStories, caches `data/train.txt` and `data/val.txt`. Run once: `uv run prepare.py` (or `python prepare.py`). **Do not edit.**
-- `train.py` — Tinker LoRA SFT on TinyStories. Prints metrics each step and ends with `val_bpb: <float>` on the last line. **This is the only file you edit.**
-- Tinker requires `TINKER_API_KEY` in the environment. Confirm it's set before doing anything else.
+```
+{n, val_bpb, returncode, stdout_tail, stderr_tail, elapsed_s, train_py_path}
+```
 
-## What you can change in `train.py`
+`val_bpb` is None on crash. If `returncode != 0`, the real error is in
+`stderr_tail`. Every call also appends a row to `history/ledger.jsonl`,
+so `list_runs()` always tells you what's been tried.
 
-- `BASE_MODEL` — any Tinker-supported base. Smaller is faster (`Qwen/Qwen3-0.6B-Base`, `meta-llama/Llama-3.2-1B`).
-- `LORA_RANK` — capacity vs speed trade.
-- `LR`, `BETA1`, `BETA2`, `EPS` — Adam params.
-- `BATCH_SIZE`, `SEQ_LEN`, `MAX_STEPS` — compute knobs.
-- LR schedule shape (currently linear-decay).
-- Loss masking, sequence packing, dataset filtering.
-- The eval loop itself if you have a better val_bpb estimator (just don't fake the number).
+There is **no trial dir** to manage. You don't write `train.py`
+yourself before running — you compute the new source as a Python
+string and pass it in. Save winners by `write_file("train.py", new)`
+once you've decided.
+
+## What's mutable in `train.py`
+
+`LORA_RANK`, `LR`, `BETA1`, `BETA2`, `EPS`, `BATCH_SIZE`, `SEQ_LEN`,
+`MAX_STEPS`, `LR_SCHEDULE`, the loop / schedule shape, packing,
+masking, the eval procedure. **Don't change `BASE_MODEL`** — trials
+must be comparable.
+
+`train.py` declares constants with PEP 526 type annotations:
+
+```python
+LR: float = 3e-4
+SEQ_LEN: int = 512
+LR_SCHEDULE: str = "linear"
+```
+
+So `old`/`new` literals for `str.replace` look like
+`"LR: float = 3e-4"`, **not** `"LR=3e-4"`.
 
 ## Loop
 
-1. Read the relevant copy's `train.py` (`target/train.py` for the parent, `trials/<name>/train.py` for a child). Form a hypothesis: "X should help because Y."
-2. Edit only that copy's `train.py`.
-3. `run_experiment(path=..., budget_s=300)` — runs `python train.py` in that copy under a wall-clock timeout. Returns `{val_bpb, returncode, stdout_tail, stderr_tail}`.
-4. If `val_bpb` improved over the last commit: `git_op("commit -am '<hypothesis>: <delta>'", path=...)`. If it got worse or crashed: `git_op("reset --hard", path=...)`.
-5. Repeat. Keep a brief journal of what worked.
+1. **Block 1 — baseline.** Read `train.py` and run it as-is.
+
+   ```python
+   src = read_file("train.py")
+   r   = run_experiment(src, budget_s=...)
+   if r["returncode"] != 0 or r["val_bpb"] is None:
+       done(f"Baseline broken: {r['stderr_tail']}")
+   best_val, best_src = r["val_bpb"], src
+   ```
+
+2. **Block 2..N — try mutations.** Either run them sequentially yourself,
+   or fan out via `delegate` (next section). For each, make a single
+   `str.replace`, assert it actually changed the source, then
+   `run_experiment(new)`:
+
+   ```python
+   new = best_src.replace("LR: float = 3e-4", "LR: float = 1.5e-4")
+   assert new != best_src
+   r   = run_experiment(new)
+   if r["returncode"] == 0 and r["val_bpb"] is not None and r["val_bpb"] < best_val:
+       best_val, best_src = r["val_bpb"], new
+       write_file("train.py", new)
+   ```
+
+3. **Don't `done()` after one trial.** A "session" is many repl blocks;
+   keep going until your iteration budget is gone or you've truly
+   nothing left to try. Then `done(<final val_bpb vs baseline>)`.
+
+## Parallel trials with `delegate`
+
+For independent hypotheses, fan out one child per hypothesis. Each
+child does **the same little block** as above, just with a different
+mutation. Pass the parent's current `train.py` and the mutation in the
+context — the child needs nothing else.
+
+```python
+import json
+BUDGET = 300
+
+CHILD_QUERY = (
+    "You're a trial child. CONTEXT is JSON {src, old, new, budget_s}. "
+    "Run exactly:\n"
+    "    import json\n"
+    "    s = json.loads(CONTEXT.read())\n"
+    "    new = s['src'].replace(s['old'], s['new'])\n"
+    "    assert new != s['src'], 'no-op replace'\n"
+    "    r = run_experiment(new, s['budget_s'])\n"
+    "    done(json.dumps({'val_bpb': r['val_bpb'], "
+        "'returncode': r['returncode'], "
+        "'train_py_path': r['train_py_path'], "
+        "'stderr_tail': (r['stderr_tail'] or '')[-400:]}))\n"
+    "Output exactly that ```repl``` block, nothing else."
+)
+
+def trial(name, old, new):
+    ctx = json.dumps({"src": best_src, "old": old, "new": new, "budget_s": BUDGET})
+    return delegate(name, CHILD_QUERY, ctx)
+
+handles = [
+    trial("lr_half",   "LR: float = 3e-4",            "LR: float = 1.5e-4"),
+    trial("cosine_lr", 'LR_SCHEDULE: str = "linear"', 'LR_SCHEDULE: str = "cosine"'),
+    trial("rank_x2",   "LORA_RANK: int = 16",         "LORA_RANK: int = 32"),
+]
+results = [json.loads(r) for r in (yield wait(*handles))]
+```
+
+Three children, three Tinker runs concurrent, one repl turn.
 
 ## Rules
 
-- **Never invent numbers.** Every reported `val_bpb` comes from `run_experiment` stdout.
-- **Verify the run finished.** If `returncode != 0` or stdout is missing `val_bpb:`, treat the experiment as failed and reset.
-- **On failure, read `stderr_tail`.** When `returncode != 0` the actual error message is in `stderr_tail`, not `stdout_tail`. Always quote `stderr_tail` in your journal / `done()` message — otherwise debugging is impossible.
-- **Tinker calls cost money.** Keep `MAX_STEPS` honest — don't crank it to 10× to brute-force a win.
-- **Parallel children:** each child works in its own workspace trial copy under `trials/<name>/` (don't fight over one `train.py`). The parent merges the best returned `train_py` into `target/train.py`.
-- **Commit messages = your journal.** Future-you will read `git_op("log --oneline")` to figure out what's been tried.
-
-## Sanity checklist before delegating
-
-- `python prepare.py` finished and `data/train.txt` exists?
-- `TINKER_API_KEY` set?
-- A baseline `python train.py` ran end-to-end and printed a `val_bpb`? (Don't start hill-climbing until you have a baseline number.)
+- Never change `BASE_MODEL`.
+- Every reported `val_bpb` comes from `run_experiment` or `list_runs`.
+- A run with `returncode != 0` or `val_bpb is None` is **not a result**
+  — quote `stderr_tail`, fix the code, or move on.
+- Tinker calls cost real money — keep `MAX_STEPS` honest.
+- Sanity-check `stdout_tail`: `train_nll` should be decreasing. A "win"
+  with flat or rising train loss is suspect.

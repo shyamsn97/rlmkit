@@ -66,3 +66,4 @@ examples/runs/
 */**/needle_trace_images/*
 examples/*/**/workspaces/*
 examples/autoresearch/runs/*
+examples/*/**/frames/*

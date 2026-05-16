@@ -31,7 +31,14 @@ def test_workspace_session_records_states_for_branch(tmp_path: Path):
 
     assert final.result() == "ok"
     assert reloaded.branch_id == "b1"
-    assert [s.type for s in reloaded.states] == ["query", "action", "result"]
+    assert [s.type for s in reloaded.states] == [
+        "user_query",
+        "llm_action",
+        "llm_output",
+        "exec_action",
+        "done_output",
+    ]
+    assert reloaded.states[-1].type == "done_output"
 
 
 def test_workspace_fork_copies_user_files_session_and_context(tmp_path: Path):

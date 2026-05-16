@@ -7,10 +7,10 @@ from pathlib import Path
 
 from rlmflow import (
     Graph,
-    QueryNode,
+    UserQuery,
     RLMConfig,
     RLMFlow,
-    ResultNode,
+    DoneOutput,
     Workspace,
 )
 from rlmflow.llm import LLMClient
@@ -22,9 +22,9 @@ class DummyLLM(LLMClient):
         return '```repl\ndone("ok")\n```'
 
 
-def _seed_root(session: FileSession) -> QueryNode:
+def _seed_root(session: FileSession) -> UserQuery:
     session.write_agent(Graph(agent_id="root", query="hello"))
-    state = QueryNode(agent_id="root", seq=0, content="hello")
+    state = UserQuery(agent_id="root", seq=0, content="hello")
     session.write_state(state)
     return state
 
@@ -52,8 +52,8 @@ def test_file_session_writes_flat_layout(tmp_path: Path):
 def test_file_session_latest_view_tracks_terminal_result(tmp_path: Path):
     session = FileSession(tmp_path / "workspace")
     session.write_agent(Graph(agent_id="root.worker", depth=1))
-    session.write_state(QueryNode(agent_id="root.worker", seq=0))
-    session.write_state(ResultNode(agent_id="root.worker", seq=1, result="ok"))
+    session.write_state(UserQuery(agent_id="root.worker", seq=0))
+    session.write_state(DoneOutput(agent_id="root.worker", seq=1, result="ok"))
 
     latest = json.loads(
         (
@@ -61,7 +61,7 @@ def test_file_session_latest_view_tracks_terminal_result(tmp_path: Path):
         ).read_text()
     )
     assert latest["agent_id"] == "root.worker"
-    assert latest["type"] == "result"
+    assert latest["type"] == "done_output"
     assert latest["terminal"] is True
     assert latest["result"] == "ok"
 
@@ -77,7 +77,7 @@ def test_child_agent_persists_parent_link(tmp_path: Path):
             parent_node_id=root_state.id,
         )
     )
-    child_state = QueryNode(agent_id="root.child", seq=0)
+    child_state = UserQuery(agent_id="root.child", seq=0)
     session.write_state(child_state)
 
     manifest = json.loads((tmp_path / "workspace" / "graph.json").read_text())
@@ -112,7 +112,7 @@ def test_file_session_fork_overwrites_existing_destination(tmp_path: Path):
 
     pre = FileSession(tmp_path / "b2")
     pre.write_agent(Graph(agent_id="root.stale", depth=1))
-    pre.write_state(QueryNode(agent_id="root.stale", seq=0, content="leftover"))
+    pre.write_state(UserQuery(agent_id="root.stale", seq=0, content="leftover"))
 
     dst = src.fork(tmp_path / "b2")
     graph = dst.load_graph()
@@ -127,7 +127,7 @@ def test_file_session_fork_isolates_subsequent_writes(tmp_path: Path):
     dst.write_agent(
         Graph(agent_id="root.diverged", depth=1, parent_agent_id="root")
     )
-    dst.write_state(QueryNode(agent_id="root.diverged", seq=0, content="dst-only"))
+    dst.write_state(UserQuery(agent_id="root.diverged", seq=0, content="dst-only"))
 
     src_graph = src.load_graph()
     dst_graph = dst.load_graph()

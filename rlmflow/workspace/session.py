@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from rlmflow.graph import Graph, Node, ObservationNode, ResultNode, parse_node_obj
+from rlmflow.graph import Graph, Node, is_done, is_observation, parse_node_obj
 from rlmflow.workspace.store import Store, copy_workspace_paths, resolve_backend
 
 SESSION_VARIABLE_PROMPT = """
@@ -356,10 +356,15 @@ def _summarize(
         if tip is None:
             continue
         preview_src = ""
-        if isinstance(tip, ResultNode):
+        if is_done(tip):
             preview_src = tip.result or ""
-        elif isinstance(tip, ObservationNode):
-            preview_src = tip.content or ""
+        elif is_observation(tip):
+            preview_src = (
+                getattr(tip, "content", "")
+                or getattr(tip, "output", "")
+                or getattr(tip, "reply", "")
+                or ""
+            )
         preview = " ".join(preview_src.split())
         out.append(
             {

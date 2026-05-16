@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from rlmflow import (
-    ErrorNode,
+    ErrorOutput,
     Graph,
     LLMClient,
     LLMUsage,
-    QueryNode,
+    UserQuery,
     RLMConfig,
     RLMFlow,
 )
@@ -69,14 +69,14 @@ def _agent() -> RLMFlow:
 
 
 def _error_graph() -> Graph:
-    root_query = QueryNode(agent_id="root", seq=0, content="boom")
+    root_query = UserQuery(agent_id="root", seq=0, content="boom")
     child = Graph(
         agent_id="root.child",
         depth=1,
         parent_agent_id="root",
         parent_node_id=root_query.id,
         states=(
-            ErrorNode(
+            ErrorOutput(
                 agent_id="root.child",
                 seq=0,
                 error="orphaned_delegates",
@@ -100,8 +100,8 @@ def test_mermaid_export_contains_every_agent_and_result():
     mmd = to_mermaid(final)
 
     assert mmd.startswith("stateDiagram-v2")
-    assert "root (result)" in mmd
-    assert "root.child (result)" in mmd
+    assert "root (done)" in mmd
+    assert "root.child (done)" in mmd
     assert "[*] -->" in mmd
     assert "root:child-answer" in mmd
 
@@ -119,7 +119,7 @@ def test_mermaid_flowchart_includes_classes_and_edges():
     out = to_mermaid_flowchart(final)
     assert out.startswith("flowchart TD")
     assert "-->" in out
-    assert "classDef result" in out
+    assert "classDef done" in out
     assert "root" in out
 
 
@@ -143,7 +143,7 @@ def test_dot_export_has_edges_and_type_labels():
     assert dot.startswith("digraph rlmflow {")
     assert dot.rstrip().endswith("}")
     assert "->" in dot
-    assert "result" in dot
+    assert "done" in dot
 
 
 # ── d2 ───────────────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ def test_gantt_html_is_self_contained():
     assert "test run" in html
     assert "root" in html
     assert "root.child" in html
-    for node_type in ("query", "action", "supervising", "result"):
+    for node_type in ("query", "llm", "supervising", "done"):
         assert node_type in html
 
 

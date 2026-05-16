@@ -5,11 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from rlmflow.graph import (
-    ActionNode,
+    DoneOutput,
+    ExecAction,
+    ExecOutput,
     Graph,
-    ObservationNode,
-    QueryNode,
-    ResultNode,
+    LLMAction,
+    LLMOutput,
+    UserQuery,
 )
 from rlmflow.workspace import FileSession, InMemorySession, SessionVariable
 
@@ -42,11 +44,13 @@ def _seed_agent(
     )
     session.write_agent(graph)
 
-    q = QueryNode(agent_id=agent_id, seq=0, content=query)
-    a = ActionNode(agent_id=agent_id, seq=1, reply=code, code=code)
-    o = ObservationNode(agent_id=agent_id, seq=2, content=observation)
-    r = ResultNode(agent_id=agent_id, seq=3, result=result)
-    for state in (q, a, o, r):
+    q = UserQuery(agent_id=agent_id, seq=0, content=query)
+    la = LLMAction(agent_id=agent_id, seq=1)
+    lo = LLMOutput(agent_id=agent_id, seq=2, reply=code, code=code)
+    ea = ExecAction(agent_id=agent_id, seq=3, code=code)
+    o = ExecOutput(agent_id=agent_id, seq=4, content=observation, output=observation)
+    r = DoneOutput(agent_id=agent_id, seq=5, result=result)
+    for state in (q, la, lo, ea, o, r):
         session.write_state(state)
 
     return q.id, r.id
@@ -81,7 +85,7 @@ def test_list_agents_excludes_self_and_summarizes_siblings(tmp_path: Path):
     ids = [r["agent_id"] for r in rows]
     assert ids == ["root.html"]
     [child] = rows
-    assert child["type"] == "result"
+    assert child["type"] == "done_output"
     assert child["terminal"] is True
     assert "wrote index.html" in child["result_preview"]
 

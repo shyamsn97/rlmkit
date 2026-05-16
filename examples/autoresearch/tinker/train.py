@@ -28,18 +28,28 @@ from tinker import types
 
 
 # ── Mutable hyperparams ──────────────────────────────────────────────
+#
+# Pick a *small base model* so there's real headroom — a heavily
+# pretrained instruct model is already near-optimal on TinyStories and
+# LoRA can barely move it. Tinker's available base (non-instruct) models
+# in ascending size:
+#   meta-llama/Llama-3.2-1B   ← weakest, default
+#   meta-llama/Llama-3.2-3B
+#   Qwen/Qwen3-4B-Base
+#   meta-llama/Llama-3.1-8B
+# Note: `Qwen/Qwen3-0.6B` exists but is instruct-tuned, not a base.
 
-BASE_MODEL: str = "Qwen/Qwen3.5-4B"
-LORA_RANK: int = 32
+BASE_MODEL: str = "meta-llama/Llama-3.2-1B"
+LORA_RANK: int = 16
 
-LR: float = 1e-4
+LR: float = 3e-4
 BETA1: float = 0.9
 BETA2: float = 0.95
 EPS: float = 1e-8
 
 BATCH_SIZE: int = 8
-SEQ_LEN: int = 1024
-MAX_STEPS: int = 60          # wall-clock budget caps this anyway
+SEQ_LEN: int = 512
+MAX_STEPS: int = 80          # wall-clock budget caps this anyway
 LR_SCHEDULE: str = "linear"  # "linear" | "constant" | "cosine"
 
 EVAL_SEQS: int = 64          # number of val sequences for the bpb estimate

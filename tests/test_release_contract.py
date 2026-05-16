@@ -8,8 +8,8 @@ from rlmflow import (
     LLMUsage,
     RLMConfig,
     RLMFlow,
-    ResultNode,
-    SupervisingNode,
+    DoneOutput,
+    is_done,
 )
 from rlmflow.runtime.local import LocalRuntime
 
@@ -122,7 +122,7 @@ def test_graph_tokens_sum_parent_and_child_usage():
 
     final = _run(agent, agent.start("root task"))
 
-    assert isinstance(final.current(), ResultNode)
+    assert is_done(final.current())
     root_in, root_out = final.tokens(recursive=False)
     child_in, child_out = final["root.child"].tokens(recursive=False)
     tree_in, tree_out = final.tokens()

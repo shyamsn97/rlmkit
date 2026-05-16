@@ -96,9 +96,24 @@ def test_inject_proxy_callable_roundtrip(runtime):
 
 
 def test_start_code_no_yield(runtime):
-    suspended, result = runtime.start_code("print('ran')")
+    suspended, result, errored = runtime.start_code("print('ran')")
     assert suspended is False
+    assert errored is False
     assert result == "ran"
+
+
+def test_start_code_exception_sets_errored(runtime):
+    suspended, result, errored = runtime.start_code("raise ValueError('boom')")
+    assert suspended is False
+    assert errored is True
+    assert "ValueError: boom" in result
+
+
+def test_start_code_syntax_error_sets_errored(runtime):
+    suspended, result, errored = runtime.start_code("def (")
+    assert suspended is False
+    assert errored is True
+    assert "SyntaxError" in result
 
 
 def test_start_code_with_yield_and_resume(runtime):
@@ -119,15 +134,17 @@ def test_start_code_with_yield_and_resume(runtime):
         "results = yield wait([h])\n"
         "print('after:', results)\n"
     )
-    suspended, payload = runtime.start_code(code)
+    suspended, payload, errored = runtime.start_code(code)
     assert suspended is True
+    assert errored is False
     request, pre_output = payload
     assert isinstance(request, WaitRequest)
     assert request.agent_ids == ["child-q1"]
     assert pre_output == "before"
 
-    suspended, result = runtime.resume_code({"child-q1": "answer"})
+    suspended, result, errored = runtime.resume_code({"child-q1": "answer"})
     assert suspended is False
+    assert errored is False
     assert result == "after: {'child-q1': 'answer'}"
 
 
@@ -150,9 +167,9 @@ def test_star_import_inside_yielding_block(runtime):
         "yield wait([h])\n"
         "print(int(pi * 100))\n"
     )
-    suspended, _ = runtime.start_code(code)
+    suspended, _, _ = runtime.start_code(code)
     assert suspended is True
-    suspended, out = runtime.resume_code({"c": "done"})
+    suspended, out, _ = runtime.resume_code({"c": "done"})
     assert suspended is False
     assert out == "314"
 
@@ -225,9 +242,9 @@ def test_annotated_assignment_inside_yielding_block(runtime):
         "count = len(errors)\n"
         "print(count, errors)\n"
     )
-    suspended, _ = runtime.start_code(code)
+    suspended, _, _ = runtime.start_code(code)
     assert suspended is True
-    suspended, out = runtime.resume_code({"c": "done"})
+    suspended, out, _ = runtime.resume_code({"c": "done"})
     assert suspended is False
     assert out == "2 ['e0', 'e1']"
 

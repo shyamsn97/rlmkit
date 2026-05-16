@@ -1,383 +1,298 @@
-"""Karpathy-style autoresearch loop on top of RLMFlow.
+"""Karpathy-style autoresearch on top of RLMFlow.
 
-Mirrors the loop from https://github.com/karpathy/autoresearch:
-
-    edit train.py  →  run for budget_s  →  read val_bpb  →
-        if better:  git commit (keep)
-        else:       git reset --hard (discard)
-    repeat
-
-The human authors `program.md` (the agent's operating manual) and a
-source target directory holding `train.py` (mutable) and `prepare.py`
-(fixed). This script copies that target into the RLMFlow workspace as
-`target/`, gives children isolated copies under `trials/<name>/`, and
-wires in two extra tools — a timeboxed experiment runner and a small
-`git` shell — so any RLMFlow agent (Anthropic / OpenAI) can drive the loop.
-
-Children are a natural fit: each one tries an independent mutation
-(branch / commit / measure / report `val_bpb`) and the parent keeps the
-best diff. Use `--branches N` to fan that out.
+The agent edits `train.py`, runs it via `run_experiment(source)`, looks
+at `val_bpb`, and decides what to try next. To run trials in parallel
+the agent uses RLMFlow's normal `delegate` / `wait`. There is no
+"trial dir" concept — every call to `run_experiment(source)` writes the
+source to `history/<n>_train.py` and runs it. That's the entire driver.
 
 Usage:
-    # point at a directory containing train.py + prepare.py + program.md
-    python examples/autoresearch.py --target ../autoresearch
-    python examples/autoresearch.py --target ../autoresearch --budget-s 300 --rounds 6
-    python examples/autoresearch.py --target ../autoresearch --branches 4
+    python examples/autoresearch/autoresearch.py --target examples/autoresearch/tinker
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from rlmflow import RLMConfig, RLMFlow, Workspace
 from rlmflow.llm import AnthropicClient, OpenAIClient
-from rlmflow.prompts import DEFAULT_BUILDER
 from rlmflow.runtime.local import LocalRuntime
 from rlmflow.tools import FILE_TOOLS, tool
+from rlmflow.utils.viz import LiveView
+
+VAL_BPB_RE = re.compile(r"val_bpb\s*[:=]\s*([0-9]+\.?[0-9]*)", re.IGNORECASE)
+SKIP_NAMES = {".git", ".DS_Store", "__pycache__", ".ipynb_checkpoints", "runs"}
 
 
-METRIC_RE = re.compile(r"val_bpb\s*[:=]\s*([0-9]+\.?[0-9]*)", re.IGNORECASE)
+def make_run_experiment(workspace_root: Path):
+    """Build `run_experiment(source)` and `list_runs()`.
 
-
-AUTORESEARCH_RULES = """\
-**You are running an autoresearch hill-climb on `train.py`.**
-
-- The live experiment is inside the RLMFlow workspace, not the original
-  `--target` directory:
-  - `target/` is the parent working copy.
-  - `trials/<name>/` are isolated child working copies.
-- File tools are workspace-rooted. Read/edit `target/train.py` in the
-  parent, and `trials/<name>/train.py` inside child tasks.
-- Every experiment runs through `run_experiment(path=..., budget_s=...)`
-  which executes `python train.py` in that path and returns
-  `{"val_bpb", "returncode", "stdout_tail", "stderr_tail", "elapsed_s"}`.
-  Lower `val_bpb` is better. **If `returncode != 0`, ALWAYS read
-  `stderr_tail` — that's where the real error is. Never report a failed
-  run without quoting `stderr_tail`.**
-- Use `git_op("status" | "diff" | "commit -am '<msg>'" | "reset --hard", path=...)`
-  for memory inside each working copy.
-- For each delegated child:
-  1. create a trial with `trial = create_trial("<short_name>")`;
-  2. pass the exact `trial` path in the query;
-  3. tell the child to edit only `{trial}/train.py`;
-  4. tell it to run `run_experiment(path=trial, budget_s=...)`;
-  5. require JSON: `{"success": bool, "val_bpb": float|null,
-     "train_py": str, "diff": str, "notes": str, "stderr_tail": str}`.
-- Do not put executable driver code in `CONTEXT`; context is data, not code.
-- The parent applies only the best child by copying its returned `train_py`
-  into `target/train.py` and committing in `target/`.
-- Never invent numbers — every reported val_bpb comes from
-  `run_experiment` output.
-"""
-
-
-def _safe_workspace_path(root: Path, path: str) -> Path:
-    """Resolve a relative workspace path and reject escapes."""
-    candidate = (root / path).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise PermissionError(f"path escapes workspace: {path}") from exc
-    return candidate
-
-
-def _ignore_generated(_: str, names: list[str]) -> set[str]:
-    ignored = {
-        ".git",
-        ".DS_Store",
-        "__pycache__",
-        ".ipynb_checkpoints",
-        "runs",
-        "workspace",
-        "workspaces",
-    }
-    return {name for name in names if name in ignored}
-
-
-def _copy_target_tree(source: Path, dest: Path) -> None:
-    if dest.exists():
-        shutil.rmtree(dest)
-    shutil.copytree(source, dest, symlinks=True, ignore=_ignore_generated)
-
-
-def _init_experiment_repo(path: Path) -> None:
-    """Create a tiny local git journal for the mutable experiment copy.
-
-    Only `train.py` is guaranteed tracked. Data and cache files stay present
-    but untracked, so `git reset --hard` is fast and won't delete datasets.
+    `run_experiment(source: str)` writes `source` to `history/<n>_train.py`,
+    runs `python <that file>` from `history/` (where `data/` and any
+    other harness file is symlinked), parses `val_bpb` from stdout, and
+    appends a row to `history/ledger.jsonl`. Concurrent callers each get
+    a unique `n` via one shared lock.
     """
-    subprocess.run(["git", "init"], cwd=path, capture_output=True, text=True)
-    tracked = [
-        name
-        for name in ("train.py", "program.md", "prepare.py")
-        if (path / name).exists()
-    ]
-    if tracked:
-        subprocess.run(["git", "add", *tracked], cwd=path, capture_output=True, text=True)
-        subprocess.run(
-            [
-                "git",
-                "-c",
-                "user.name=rlmflow",
-                "-c",
-                "user.email=rlmflow@example.invalid",
-                "commit",
-                "-m",
-                "baseline",
-            ],
-            cwd=path,
-            capture_output=True,
-            text=True,
-        )
+    root = workspace_root.resolve()
+    history = root / "history"
+    ledger = history / "ledger.jsonl"
+    lock = threading.RLock()
 
+    # train.py uses `Path(__file__).parent / "data"`, so every archived
+    # copy needs `data/` (and any other harness file) sitting next to it.
+    # Symlink everything except bookkeeping into `history/` once.
+    HARNESS_SKIP = {"train.py", "history", "session", "context",
+                    "graph.json", "viewer.html", "runs"}
 
-def prepare_workspace_target(source: Path, workspace_root: Path) -> Path:
-    """Copy the user's target into the RLMFlow workspace as `target/`."""
-    target_copy = workspace_root / "target"
-    trials = workspace_root / "trials"
-    _copy_target_tree(source, target_copy)
-    if trials.exists():
-        shutil.rmtree(trials)
-    trials.mkdir(parents=True, exist_ok=True)
-    _init_experiment_repo(target_copy)
-    return target_copy
+    harness_done = [False]  # mutable flag, guarded by `lock`
 
+    def _ensure_harness() -> None:
+        with lock:
+            if harness_done[0]:
+                return
+            history.mkdir(parents=True, exist_ok=True)
+            for entry in root.iterdir():
+                if entry.name in HARNESS_SKIP:
+                    continue
+                dst = history / entry.name
+                if dst.exists() or dst.is_symlink():
+                    continue
+                try:
+                    dst.symlink_to(entry.resolve())
+                except OSError:
+                    if entry.is_dir():
+                        shutil.copytree(entry, dst, symlinks=True, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(entry, dst)
+            harness_done[0] = True
 
-def _make_create_trial(workspace_root: Path):
     @tool(
-        "Create an isolated trial copy under `trials/<name>` from a workspace "
-        "source path (default `target`). Returns the relative trial path. "
-        "Use this before delegating a child experiment."
+        "Run a train.py source string under `budget_s` seconds. `source` "
+        "is the full Python text of a train.py — the tool writes it to "
+        "`history/<n>_train.py` and runs it. Returns a dict {n, val_bpb, "
+        "returncode, stdout_tail, stderr_tail, elapsed_s, train_py_path}. "
+        "`val_bpb` is parsed from a `val_bpb: <float>` line in stdout "
+        "(None on crash; lower is better). If `returncode != 0`, the "
+        "real error is in `stderr_tail`. Typical use: "
+        "`src = read_file('train.py'); new = src.replace('LR: float = 3e-4', "
+        "'LR: float = 1.5e-4'); r = run_experiment(new)`."
     )
-    def create_trial(name: str, source: str = "target") -> str:
-        slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._-")
-        if not slug:
-            raise ValueError("trial name must contain at least one safe character")
-        src = _safe_workspace_path(workspace_root, source)
-        if not src.is_dir():
-            raise FileNotFoundError(f"trial source is not a directory: {source}")
-        rel = f"trials/{slug}"
-        dst = _safe_workspace_path(workspace_root, rel)
-        _copy_target_tree(src, dst)
-        _init_experiment_repo(dst)
-        return rel
-
-    return create_trial
-
-
-def _make_run_experiment(workspace_root: Path):
-    @tool(
-        "Run `python train.py` from a workspace path under a wall-clock "
-        "timeout. Returns JSON: {val_bpb, elapsed_s, returncode, stdout_tail, "
-        "stderr_tail}. val_bpb is parsed from stdout (`val_bpb: <float>`); "
-        "`path` defaults to `target`; children should pass their `trials/<name>` path. "
-        "missing if the run crashed or didn't print it. **If returncode != 0, "
-        "the real error is almost always in `stderr_tail`, not `stdout_tail`.**"
-    )
-    def run_experiment(path: str = "target", budget_s: int = 300) -> str:
+    def run_experiment(source: str, budget_s: int = 300) -> dict:
+        if not isinstance(source, str) or not source.strip():
+            return {
+                "n": -1, "val_bpb": None, "returncode": -2,
+                "stdout_tail": "",
+                "stderr_tail": "run_experiment(source) expected a non-empty "
+                               "train.py source string. Did you pass a path? "
+                               "Use `src = read_file('train.py')` first.",
+                "elapsed_s": 0.0, "train_py_path": None,
+            }
         budget_s = max(10, min(int(budget_s), 3600))
-        workdir = _safe_workspace_path(workspace_root, path)
+        _ensure_harness()
+
+        with lock:
+            n = len(list(history.glob("*_train.py")))
+            archive = history / f"{n}_train.py"
+            while archive.exists():
+                n += 1
+                archive = history / f"{n}_train.py"
+            archive.write_text(source)
+
+        t0 = time.time()
+        # `-u` + PYTHONUNBUFFERED=1 force the child to flush prints as
+        # they happen. Without this, piped stdout is block-buffered and
+        # a timeout-kill loses every print the run made — the ledger
+        # then shows `stdout_tail=""` and you can't tell whether the run
+        # was making progress or actually hung.
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         try:
             proc = subprocess.run(
-                [sys.executable, "train.py"],
-                cwd=str(workdir),
-                capture_output=True,
-                text=True,
-                timeout=budget_s,
+                [sys.executable, "-u", archive.name],
+                cwd=str(history), capture_output=True, text=True,
+                timeout=budget_s, env=env,
             )
             stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
-            elapsed = None
         except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout or ""
-            stderr = (exc.stderr or "") + f"\n[timed out after {budget_s}s]"
+            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "replace")
+            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace")
+            stderr += f"\n[timed out after {budget_s}s]"
             rc = -1
-            elapsed = budget_s
-        match = METRIC_RE.search(stdout)
-        return json.dumps(
-            {
-                "val_bpb": float(match.group(1)) if match else None,
-                "elapsed_s": elapsed,
-                "returncode": rc,
-                "stdout_tail": stdout[-2000:],
-                "stderr_tail": stderr[-1000:],
-            },
-            indent=2,
-        )
+        elapsed = round(time.time() - t0, 2)
 
-    return run_experiment
+        m = VAL_BPB_RE.search(stdout or "")
+        val_bpb = float(m.group(1)) if m else None
 
+        row = {
+            "n": n, "ts": time.time(),
+            "val_bpb": val_bpb, "returncode": rc, "elapsed_s": elapsed,
+            "train_py_path": str(archive.relative_to(root)),
+            "stdout_tail": (stdout or "")[-2000:],
+            "stderr_tail": (stderr or "")[-1000:],
+        }
+        with lock, ledger.open("a") as fh:
+            fh.write(json.dumps(row) + "\n")
+        return row
 
-def _make_git_op(workspace_root: Path):
     @tool(
-        "Run `git <args>` inside a workspace path. Returns JSON: "
-        "{returncode, stdout, stderr}. Use this for status / diff / commit / "
-        "reset / log to manage the experiment journal. `path` defaults to `target`; "
-        "children should pass their `trials/<name>` path."
+        "Return every recorded run, best-first (successful runs sorted "
+        "by val_bpb ascending; crashes go last). Each row is `{n, "
+        "val_bpb, returncode, elapsed_s, ts, train_py_path}`. Survives "
+        "REPL crashes; iterate directly: `for r in list_runs(): ...`."
     )
-    def git_op(args: str, path: str = "target") -> str:
-        workdir = _safe_workspace_path(workspace_root, path)
-        proc = subprocess.run(
-            [
-                "git",
-                "-c",
-                "user.name=rlmflow",
-                "-c",
-                "user.email=rlmflow@example.invalid",
-                *shlex.split(args),
-            ],
-            cwd=str(workdir),
-            capture_output=True,
-            text=True,
-        )
-        return json.dumps(
-            {
-                "returncode": proc.returncode,
-                "stdout": proc.stdout[-3000:],
-                "stderr": proc.stderr[-1000:],
-            },
-            indent=2,
-        )
+    def list_runs() -> list:
+        if not ledger.exists():
+            return []
+        rows = []
+        for line in ledger.read_text().splitlines():
+            if line.strip():
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
+        rows.sort(key=lambda r: (
+            0 if (r.get("returncode") == 0 and r.get("val_bpb") is not None) else 1,
+            r.get("val_bpb") if r.get("val_bpb") is not None else float("inf"),
+            r.get("ts", 0),
+        ))
+        return [
+            {k: r.get(k) for k in
+             ("n", "val_bpb", "returncode", "elapsed_s", "ts", "train_py_path")}
+            for r in rows
+        ]
 
-    return git_op
-
-
-def build_prompt_builder():
-    return DEFAULT_BUILDER.section(
-        "autoresearch",
-        AUTORESEARCH_RULES,
-        title="Autoresearch Rules",
-        after="recursion",
-    )
+    return [run_experiment, list_runs]
 
 
 def make_llm(model: str):
     return AnthropicClient(model) if model.startswith("claude") else OpenAIClient(model)
 
 
+
+def _node_one_liner(node) -> str:
+    if node.type == "query":
+        text = (getattr(node, "content", "") or "").strip()
+    elif node.type == "action":
+        text = (getattr(node, "code", "") or "").strip()
+    elif node.type == "observation":
+        text = (getattr(node, "output", "") or "").strip()
+    elif node.type == "result":
+        text = (getattr(node, "result", "") or "").strip()
+    elif node.type == "supervising":
+        waiting = ", ".join(getattr(node, "waiting_on", []) or [])
+        return f"supervising  waiting on [{waiting}]"
+    else:
+        text = ""
+    first = next((ln for ln in text.splitlines() if ln.strip()), "")
+    return f"{node.type:11s} {first[:140]}"
+
+
+def _print_event(node, t0: float) -> None:
+    elapsed = time.monotonic() - t0
+    head = f"[{elapsed:6.1f}s] {node.agent_id:24s}"
+    print(head, _node_one_liner(node), flush=True)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Karpathy-style autoresearch hill-climb wired through RLMFlow."
-    )
-    parser.add_argument(
-        "--target",
-        type=Path,
-        required=True,
-        help="Directory containing train.py + prepare.py + program.md (a checkout of "
-        "karpathy/autoresearch or a compatible fork).",
-    )
-    parser.add_argument(
-        "--budget-s",
-        type=int,
-        default=300,
-        help="Wall-clock seconds per `run_experiment` call (default: 300 = 5 min).",
-    )
-    parser.add_argument(
-        "--rounds",
-        type=int,
-        default=6,
-        help="Iteration budget the parent agent gets (one round = one outer LLM turn).",
-    )
-    parser.add_argument(
-        "--branches",
-        type=int,
-        default=4,
-        help="Hint to the parent for how many parallel children to fan out per round.",
-    )
-    parser.add_argument("--model", default="gpt-5")
-    parser.add_argument("--fast-model", default="gpt-5-mini")
-    parser.add_argument(
-        "--workspace",
-        type=Path,
-        default=Path("./runs/autoresearch"),
-    )
-    parser.add_argument("--max-depth", type=int, default=2)
-    parser.add_argument("--max-concurrency", type=int, default=4)
-    parser.add_argument("--no-viewer", action="store_true")
-    args = parser.parse_args()
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--target", type=Path, required=True,
+                   help="Source dir with train.py + program.md (e.g. examples/autoresearch/tinker).")
+    p.add_argument("--budget-s", type=int, default=600,
+                   help="Default wall-clock budget per run_experiment call. "
+                        "Solo runs take ~210s; bump higher for parallel "
+                        "trials since the Tinker API serializes them.")
+    p.add_argument("--rounds", type=int, default=20)
+    p.add_argument("--model", default="gpt-5-mini")
+    p.add_argument("--workspace", type=Path, default=Path("./runs/autoresearch"))
+    p.add_argument("--max-concurrency", type=int, default=4)
+    p.add_argument("--max-depth", type=int, default=2)
+    p.add_argument("--no-ui", action="store_true",
+                   help="Disable the live rich dashboard; just stream events.")
+    args = p.parse_args()
 
     target = args.target.resolve()
-    if not (target / "train.py").exists():
-        raise SystemExit(f"autoresearch: {target}/train.py not found")
-    if not (target / "program.md").exists():
-        raise SystemExit(f"autoresearch: {target}/program.md not found")
+    if not (target / "train.py").exists() or not (target / "program.md").exists():
+        raise SystemExit(f"autoresearch: {target} must contain train.py and program.md")
 
     workspace = Workspace.create(args.workspace)
-    workspace_target = prepare_workspace_target(target, workspace.root)
+    for entry in target.iterdir():
+        if entry.name in SKIP_NAMES:
+            continue
+        dst = workspace.root / entry.name
+        if dst.exists():
+            continue
+        if entry.is_dir():
+            shutil.copytree(entry, dst, symlinks=True,
+                            ignore=lambda _, n: {x for x in n if x in SKIP_NAMES})
+        else:
+            shutil.copy2(entry, dst)
+
     runtime = LocalRuntime(workspace=workspace)
-    runtime.register_tools(
-        [
-            *FILE_TOOLS,
-            _make_create_trial(workspace.root),
-            _make_run_experiment(workspace.root),
-            _make_git_op(workspace.root),
-        ]
-    )
+    runtime.register_tools([*FILE_TOOLS, *make_run_experiment(workspace.root)])
 
-    llm_clients = None
-    if args.fast_model:
-        llm_clients = {
-            "fast": {
-                "model": make_llm(args.fast_model),
-                "description": "Cheaper/faster model for scoped child mutations.",
-            }
-        }
-
-    agent = RLMFlow(
+    flow = RLMFlow(
         llm_client=make_llm(args.model),
         runtime=runtime,
         workspace=workspace,
-        llm_clients=llm_clients,
         config=RLMConfig(
-            max_depth=args.max_depth,
             max_iterations=args.rounds,
+            max_depth=args.max_depth,
             max_concurrency=args.max_concurrency,
         ),
-        prompt_builder=build_prompt_builder(),
     )
 
-    program_md = (workspace_target / "program.md").read_text()
+    program = (workspace.root / "program.md").read_text()
     query = (
-        "Run an autoresearch hill-climb inside this RLMFlow workspace. "
-        f"The original source target was copied from {target} into `target/`; "
-        "`target/train.py` is the parent working copy. "
-        f"Target ~{args.branches} parallel mutations per round. For each child, "
-        "first call `create_trial('<short_name>')`, pass the returned "
-        "`trials/<short_name>` path to the child, and have the child edit only "
-        "that trial's `train.py` and run `run_experiment(path=trial_path, ...)`. "
-        "The parent keeps the best child by copying its returned `train_py` into "
-        "`target/train.py` and committing with `git_op(..., path='target')`. "
-        "Discard the rest. Iterate until `done(best_val_bpb)`.\n\n"
-        "----- program.md -----\n"
-        f"{program_md}"
+        f"{program}\n\n"
+        f"## Run parameters\n"
+        f"- pass `budget_s={args.budget_s}` to `run_experiment`.\n"
+        f"- you have {args.rounds} iterations total.\n"
+        f"- finish with `done(<short summary including final val_bpb>)`.\n"
     )
 
-    graph = agent.start(query)
-    while not graph.finished:
-        graph = agent.step(graph)
-        print(graph.tree())
+    print(f"[autoresearch] target={target}", flush=True)
+    print(f"[autoresearch] workspace={workspace.root}", flush=True)
+    print(f"[autoresearch] model={args.model}  rounds={args.rounds}  budget_s={args.budget_s}", flush=True)
 
-    result = graph.result()
-    print("\n" + "=" * 80)
-    print(result or "(no result)")
-    print(f"\nWorkspace saved to {workspace.root}")
-    print(f"Parent working copy: {workspace.root / 'target'}")
-    print(f"Trial copies: {workspace.root / 'trials'}")
+    if args.no_ui:
+        t0 = time.monotonic()
+        seen: set[str] = set()
+        graph = flow.start(query)
+        for node in graph.nodes:
+            if node.id not in seen:
+                _print_event(node, t0); seen.add(node.id)
+        while not graph.finished:
+            graph = flow.step(graph)
+            for node in graph.nodes:
+                if node.id not in seen:
+                    _print_event(node, t0); seen.add(node.id)
+    else:
+        with LiveView() as live:
+            graph = flow.start(query)
+            live(graph)
+            while not graph.finished:
+                graph = flow.step(graph)
+                live(graph)
 
-    if not args.no_viewer:
-        try:
-            from rlmflow.utils.viewer import save_html
+    print("=" * 80, flush=True)
+    print(graph.result() or "(no result)", flush=True)
+    print(f"\nWorkspace: {workspace.root}", flush=True)
 
-            save_html(workspace, args.workspace / "viewer.html")
-            print(f"Viewer saved to {args.workspace / 'viewer.html'}")
-        except ImportError as exc:
-            print(f"Viewer not saved: {exc}")
+    try:
+        from rlmflow.utils.viewer import save_html
+        viewer = args.workspace / "viewer.html"
+        save_html(workspace, viewer)
+        print(f"Viewer:    {viewer}", flush=True)
+    except ImportError as exc:
+        print(f"Viewer not saved: {exc}", flush=True)
 
 
 if __name__ == "__main__":

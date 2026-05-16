@@ -6,17 +6,17 @@ from rlmflow import (
     FileSession,
     Graph,
     InMemorySession,
-    QueryNode,
-    ResultNode,
-    SupervisingNode,
+    UserQuery,
+    DoneOutput,
+    SupervisingOutput,
 )
 
 
 def test_file_session_round_trips_states_through_load_graph(tmp_path):
     session = FileSession(tmp_path / "workspace")
     session.write_agent(Graph(agent_id="root", query="hello"))
-    q = QueryNode(agent_id="root", seq=0, content="start")
-    r = ResultNode(agent_id="root", seq=1, result="done")
+    q = UserQuery(agent_id="root", seq=0, content="start")
+    r = DoneOutput(agent_id="root", seq=1, result="done")
     session.write_state(q)
     session.write_state(r)
 
@@ -30,10 +30,10 @@ def test_file_session_round_trips_states_through_load_graph(tmp_path):
 def test_in_memory_session_fork_isolates_subsequent_writes():
     source = InMemorySession()
     source.write_agent(Graph(agent_id="root", query="src"))
-    source.write_state(QueryNode(agent_id="root", seq=0, content="source"))
+    source.write_state(UserQuery(agent_id="root", seq=0, content="source"))
 
     forked = source.fork(None)
-    forked.write_state(QueryNode(agent_id="root", seq=1, content="forked"))
+    forked.write_state(UserQuery(agent_id="root", seq=1, content="forked"))
 
     src_contents = [s.content for s in source.load_graph().states]
     dst_contents = [s.content for s in forked.load_graph().states]
@@ -44,8 +44,8 @@ def test_in_memory_session_fork_isolates_subsequent_writes():
 def test_load_graph_derives_flows_to_edges_from_seq_order():
     session = InMemorySession()
     session.write_agent(Graph(agent_id="root", query="q"))
-    a = QueryNode(agent_id="root", seq=0)
-    b = QueryNode(agent_id="root", seq=1)
+    a = UserQuery(agent_id="root", seq=0)
+    b = UserQuery(agent_id="root", seq=1)
     session.write_state(a)
     session.write_state(b)
 
@@ -59,7 +59,7 @@ def test_child_agent_links_to_parent_via_parent_node_id():
     """Spawn edges are derived from the child's ``parent_node_id``."""
     session = InMemorySession()
     session.write_agent(Graph(agent_id="root", query="q"))
-    parent = SupervisingNode(agent_id="root", seq=1, waiting_on=["root.child"])
+    parent = SupervisingOutput(agent_id="root", seq=1, waiting_on=["root.child"])
     session.write_state(parent)
 
     session.write_agent(
@@ -70,7 +70,7 @@ def test_child_agent_links_to_parent_via_parent_node_id():
             parent_node_id=parent.id,
         )
     )
-    child = QueryNode(agent_id="root.child", seq=0)
+    child = UserQuery(agent_id="root.child", seq=0)
     session.write_state(child)
 
     graph = session.load_graph()
@@ -88,6 +88,6 @@ def test_load_graph_skips_agents_without_meta(tmp_path):
     """If a state log exists but agent.json is missing, the agent is dropped."""
     session = FileSession(tmp_path / "workspace")
     session.write_agent(Graph(agent_id="root"))
-    session.write_state(QueryNode(agent_id="root", seq=0))
+    session.write_state(UserQuery(agent_id="root", seq=0))
     graph = session.load_graph()
     assert list(graph.agents) == ["root"]

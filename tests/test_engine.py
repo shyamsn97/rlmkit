@@ -18,16 +18,20 @@ Covers:
 from __future__ import annotations
 
 from rlmflow import (
-    ErrorNode,
+    ErrorOutput,
     Graph,
     LLMClient,
     LLMUsage,
     RLMConfig,
     RLMFlow,
-    ResultNode,
-    ResumeNode,
-    SupervisingNode,
+    DoneOutput,
+    ExecOutput,
+    SupervisingOutput,
     Workspace,
+    is_done,
+    is_errored,
+    is_resumed,
+    is_supervising,
 )
 from rlmflow.prompts.messages import FINAL_ANSWER_ACTION
 from rlmflow.runtime.local import LocalRuntime
@@ -38,6 +42,7 @@ from rlmflow.utils.trace import load_trace, save_trace
 
 
 def _types(g: Graph) -> list[str]:
+    """Trajectory types in order — strict obs/action alternation."""
     return [s.type for s in g.states]
 
 
@@ -56,12 +61,23 @@ def _assert_seqs_monotonic(g: Graph) -> None:
         )
 
 
-def _assert_spawn_links(g: Graph, spawner_seq: int = 1) -> None:
-    """Every direct child's parent_node_id equals the spawning state's id."""
-    spawner = g.states[spawner_seq]
+def _assert_spawn_links(g: Graph, spawner_seq: int | None = None) -> None:
+    """Every direct child's parent_node_id equals the spawning state's id.
+
+    The spawning state is whichever :class:`ExecAction` /
+    :class:`ResumeAction` was running when ``delegate()`` was called.
+    If ``spawner_seq`` is None (the default), we look it up by
+    matching child IDs back to whichever action node's id they
+    record as ``parent_node_id``.
+    """
+    if not g.children:
+        return
+    valid_ids = {s.id for s in g.states}
     for child in g.children.values():
-        assert child.parent_node_id == spawner.id
         assert child.parent_agent_id == g.agent_id
+        assert child.parent_node_id in valid_ids
+        if spawner_seq is not None:
+            assert child.parent_node_id == g.states[spawner_seq].id
 
 
 class _StaticLLM(LLMClient):
@@ -85,16 +101,16 @@ def test_start_records_query_node_at_seq_zero():
     assert isinstance(graph, Graph)
     assert graph.root_agent_id == "root"
     assert graph.query == "say ok"
-    assert _types(graph) == ["query"]
+    assert _types(graph) == ["user_query"]
     assert graph.states[0].seq == 0
 
 
 def test_step_drives_one_shot_to_result():
     agent = _agent()
     graph = agent.step(agent.start("say ok"))
-    assert isinstance(graph.current(), ResultNode)
+    assert is_done(graph.current())
     assert graph.result() == "ok"
-    assert _types(graph) == ["query", "action", "result"]
+    assert _types(graph) == ["user_query", "llm_action", "llm_output", "exec_action", "done_output"]
 
 
 def test_run_returns_result_string():
@@ -111,7 +127,7 @@ def test_tree_renders_root_query_and_result():
     tree = _run(agent, agent.start("say ok")).tree()
     assert "root" in tree
     assert "query" in tree
-    assert "result -> ok" in tree
+    assert "done -> ok" in tree
 
 
 # ── single-agent state machine ───────────────────────────────────────
@@ -129,7 +145,11 @@ def test_single_agent_observation_loop():
 
     agent = RLMFlow(_TwoTurn(), runtime=LocalRuntime(), config=RLMConfig(max_depth=0, max_iterations=5))
     g = _run(agent, agent.start("hi"))
-    assert _types(g) == ["query", "action", "observation", "action", "result"]
+    assert _types(g) == [
+        "user_query",
+        "llm_action", "llm_output", "exec_action", "exec_output",
+        "llm_action", "llm_output", "exec_action", "done_output",
+    ]
     _assert_seqs_monotonic(g)
     assert g.result() == "got:value"
 
@@ -159,12 +179,16 @@ def test_tight_pattern_records_resume_before_result():
     )
     g = _run(agent, agent.start("parent"))
 
-    assert _types(g) == ["query", "action", "supervising", "resume", "result"]
-    assert _types(g["root.child"]) == ["query", "action", "result"]
+    assert _types(g) == [
+        "user_query",
+        "llm_action", "llm_output", "exec_action", "supervising_output",
+        "resume_action", "done_output",
+    ]
+    assert _types(g["root.child"]) == ["user_query", "llm_action", "llm_output", "exec_action", "done_output"]
     _assert_seqs_monotonic(g)
-    _assert_spawn_links(g, spawner_seq=1)
+    _assert_spawn_links(g)
 
-    sup = next(s for s in g.states if isinstance(s, SupervisingNode))
+    sup = next(s for s in g.states if is_supervising(s))
     assert set(sup.waiting_on) == {"root.child"}
     assert g.result() == "p:c"
 
@@ -192,12 +216,16 @@ def test_tight_pattern_with_many_siblings_shares_one_supervising():
     agent = RLMFlow(_MultiSibling(), runtime=LocalRuntime(), config=RLMConfig(max_depth=1, max_iterations=5))
     g = _run(agent, agent.start("fan out"))
 
-    assert _types(g) == ["query", "action", "supervising", "resume", "result"]
+    assert _types(g) == [
+        "user_query",
+        "llm_action", "llm_output", "exec_action", "supervising_output",
+        "resume_action", "done_output",
+    ]
     assert set(g.children) == {f"root.c{i}" for i in range(n)}
-    sup = next(s for s in g.states if isinstance(s, SupervisingNode))
+    sup = next(s for s in g.states if is_supervising(s))
     assert set(sup.waiting_on) == set(g.children)
     _assert_seqs_monotonic(g)
-    _assert_spawn_links(g, spawner_seq=1)
+    _assert_spawn_links(g)
 
 
 def test_verify_pattern_records_resume_then_action():
@@ -221,7 +249,12 @@ def test_verify_pattern_records_resume_then_action():
     agent = RLMFlow(_VerifyChild(), runtime=LocalRuntime(), config=RLMConfig(max_depth=1, max_iterations=8))
     g = _run(agent, agent.start("parent"))
 
-    assert _types(g) == ["query", "action", "supervising", "resume", "action", "result"]
+    assert _types(g) == [
+        "user_query",
+        "llm_action", "llm_output", "exec_action", "supervising_output",
+        "resume_action", "exec_output",
+        "llm_action", "llm_output", "exec_action", "done_output",
+    ]
     _assert_seqs_monotonic(g)
     assert g.result() == "p:c-verified"
 
@@ -250,7 +283,10 @@ def test_multi_yield_same_block_records_two_supervising_resume_pairs():
     assert g.result() == "parent:verified"
     assert set(g.children) == {"root.child", "root.verify"}
     assert _types(g) == [
-        "query", "action", "supervising", "resume", "supervising", "resume", "result",
+        "user_query",
+        "llm_action", "llm_output", "exec_action", "supervising_output",
+        "resume_action", "supervising_output",
+        "resume_action", "done_output",
     ]
     _assert_seqs_monotonic(g)
 
@@ -288,10 +324,12 @@ def test_multi_yield_split_blocks_records_action_between_each_resume():
 
     assert g.result() == "p:a+b"
     assert _types(g) == [
-        "query",
-        "action", "supervising", "resume",
-        "action", "supervising", "resume",
-        "action", "result",
+        "user_query",
+        "llm_action", "llm_output", "exec_action", "supervising_output",
+        "resume_action", "exec_output",
+        "llm_action", "llm_output", "exec_action", "supervising_output",
+        "resume_action", "exec_output",
+        "llm_action", "llm_output", "exec_action", "done_output",
     ]
     _assert_seqs_monotonic(g)
 
@@ -320,10 +358,13 @@ def test_intra_agent_loop_then_delegation():
     g = _run(agent, agent.start("parent"))
 
     assert _types(g) == [
-        "query", "action", "observation", "action", "supervising", "resume", "result",
+        "user_query",
+        "llm_action", "llm_output", "exec_action", "exec_output",
+        "llm_action", "llm_output", "exec_action", "supervising_output",
+        "resume_action", "done_output",
     ]
     _assert_seqs_monotonic(g)
-    assert g["root.child"].parent_node_id == g.states[3].id
+    assert g["root.child"].parent_node_id == g.states[7].id
 
 
 # ── recursive depth ──────────────────────────────────────────────────
@@ -370,10 +411,14 @@ def test_depth_three_chain_each_level_records_supervising():
     chain = ["root", "root.child", "root.child.child", "root.child.child.child"]
     for aid in chain[:-1]:
         sub = g[aid]
-        assert _types(sub) == ["query", "action", "supervising", "resume", "result"]
-        sup = next(s for s in sub.states if isinstance(s, SupervisingNode))
+        assert _types(sub) == [
+            "user_query",
+            "llm_action", "llm_output", "exec_action", "supervising_output",
+            "resume_action", "done_output",
+        ]
+        sup = next(s for s in sub.states if is_supervising(s))
         assert set(sup.waiting_on) == {aid + ".child"}
-    assert _types(g[chain[-1]]) == ["query", "action", "result"]
+    assert _types(g[chain[-1]]) == ["user_query", "llm_action", "llm_output", "exec_action", "done_output"]
     _assert_seqs_monotonic(g)
     assert g.result() == "root->root.child->root.child.child->leaf:root.child.child.child"
 
@@ -412,10 +457,14 @@ def test_depth_five_mixed_branching_tree():
     for aid in all_ids:
         sub = g[aid]
         if aid in leaves:
-            assert _types(sub) == ["query", "action", "result"], aid
+            assert _types(sub) == ["user_query", "llm_action", "llm_output", "exec_action", "done_output"], aid
         else:
-            assert _types(sub) == ["query", "action", "supervising", "resume", "result"], aid
-            sup = next(s for s in sub.states if isinstance(s, SupervisingNode))
+            assert _types(sub) == [
+            "user_query",
+            "llm_action", "llm_output", "exec_action", "supervising_output",
+            "resume_action", "done_output",
+        ], aid
+            sup = next(s for s in sub.states if is_supervising(s))
             assert set(sup.waiting_on) == set(sub.children)
         assert sub.depth == aid.count(".")
     _assert_seqs_monotonic(g)
@@ -453,7 +502,7 @@ def test_each_step_advances_runnable_agents_once():
 
 
 def test_orphan_delegate_records_error_node():
-    """``delegate(...)`` without ``yield wait(...)`` records an ErrorNode."""
+    """``delegate(...)`` without ``yield wait(...)`` records an ErrorOutput."""
 
     class _OrphanThenDone(LLMClient):
         def __init__(self):
@@ -469,7 +518,7 @@ def test_orphan_delegate_records_error_node():
         _OrphanThenDone(), runtime=LocalRuntime(), config=RLMConfig(max_depth=1, max_iterations=5)
     )
     g = _run(agent, agent.start("p"))
-    errors = [s for s in g.states if isinstance(s, ErrorNode)]
+    errors = [s for s in g.states if is_errored(s)]
     assert errors and any(e.error == "orphaned_delegates" for e in errors)
     assert g.result() == "recovered"
 
@@ -538,9 +587,9 @@ def test_terminate_marks_every_running_agent():
 
     agent = RLMFlow(_DelegatingThenStalling(), runtime=LocalRuntime(), config=RLMConfig(max_depth=2, max_iterations=10))
     g = agent.step(agent.start("kickoff"))
-    assert isinstance(g.current(), SupervisingNode)
+    assert is_supervising(g.current())
     g = agent.terminate(g)
-    assert {"root", "root.child"} <= agent._terminate_requested
+    assert {"root", "root.child"} <= agent.terminate_requested
     final = _run(agent, g)
     assert final["root.child"].result() == "forced"
 
@@ -571,7 +620,42 @@ def test_no_code_block_records_error_node():
 
     agent = RLMFlow(_Mute(), runtime=LocalRuntime(), config=RLMConfig(max_iterations=5, max_depth=0))
     g = _run(agent, agent.start("p"))
-    assert any(isinstance(s, ErrorNode) and s.error == "no_code_block" for s in g.states)
+    assert any(is_errored(s) and s.error == "no_code_block" for s in g.states)
+
+
+def test_no_code_block_keeps_action_in_trajectory():
+    """The malformed LLM reply is recorded as an ActionNode with empty
+    code, then a separate ErrorOutput tells the model to retry. The run
+    log stays honest about what happened (the model was called, it
+    replied, the reply was malformed)."""
+
+    class _MuteThenFix(LLMClient):
+        def __init__(self):
+            self.calls = 0
+            self.last_usage = LLMUsage(input_tokens=1, output_tokens=1)
+
+        def chat(self, messages, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return "Sure! Here's how I'll start: ..."  # no code block
+            return '```repl\ndone("ok")\n```'
+
+    agent = RLMFlow(_MuteThenFix(), runtime=LocalRuntime(), config=RLMConfig(max_iterations=5, max_depth=0))
+    g = _run(agent, agent.start("p"))
+
+    assert _types(g) == [
+        "user_query",
+        "llm_action", "llm_output", "exec_action", "error_output",
+        "llm_action", "llm_output", "exec_action", "done_output",
+    ]
+    bad_output = g.states[2]
+    assert bad_output.code == ""
+    assert "Sure!" in bad_output.reply
+    empty_exec = g.states[3]
+    assert empty_exec.type == "exec_action" and empty_exec.code == ""
+    err = g.states[4]
+    assert is_errored(err) and err.error == "no_code_block"
+    _assert_seqs_monotonic(g)
 
 
 # ── resume semantics ─────────────────────────────────────────────────
@@ -607,7 +691,7 @@ def test_resume_node_does_not_inject_child_result_into_prompt():
     g = _run(agent, agent.start("parent task"))
 
     assert g.result() == f"parent:{secret}"
-    resume = next(s for s in g.states if isinstance(s, ResumeNode))
+    resume = next(s for s in g.states if is_resumed(s))
     assert resume.resumed_from == ["root.child"]
     assert resume.output == stdout_marker
     assert stdout_marker in resume.content
@@ -786,7 +870,7 @@ def test_workspace_round_trips_states_and_context(tmp_path):
     assert g.result() == "ok"
     assert ws.context.read("context") == "hello"
     reloaded = ws.session.load_graph()
-    assert _types(reloaded) == ["query", "action", "result"]
+    assert _types(reloaded) == ["user_query", "llm_action", "llm_output", "exec_action", "done_output"]
     assert ws.load_graph().tree() == reloaded.tree()
 
 
@@ -822,10 +906,12 @@ def test_graph_node_filters_separate_errors_results_and_predicates():
 
     errors = g.nodes.errors()
     results = g.nodes.results()
-    actions = g.nodes.where(type="action")
+    llm_actions = g.nodes.where(type="llm_action")
+    llm_outputs = g.nodes.where(type="llm_output")
     on_root = g.nodes.where(lambda e: e.agent_id == "root")
 
-    assert errors and all(isinstance(e, ErrorNode) for e in errors)
-    assert results and all(isinstance(r, ResultNode) for r in results)
-    assert actions and all(a.type == "action" for a in actions)
+    assert errors and all(is_errored(e) for e in errors)
+    assert results and all(is_done(r) for r in results)
+    assert llm_actions and all(a.type == "llm_action" for a in llm_actions)
+    assert llm_outputs and all(a.type == "llm_output" for a in llm_outputs)
     assert on_root and all(e.agent_id == "root" for e in on_root)

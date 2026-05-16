@@ -14,21 +14,53 @@ from pathlib import Path
 from typing import Any
 
 from rlmflow.graph import (
-    ActionNode,
-    ErrorNode,
     Graph,
     Node,
-    ObservationNode,
-    QueryNode,
-    ResultNode,
-    ResumeNode,
-    SupervisingNode,
+    is_done,
+    is_errored,
+    is_exec_output,
+    is_llm_output,
+    is_resumed,
+    is_supervising,
+    is_user_query,
 )
+from rlmflow.utils.export import _kind as _display_kind  # re-use one mapping
 
 try:  # pragma: no cover - optional dep
     import gradio  # noqa: F401  (re-exported for type-hint resolution)
 except ImportError:  # pragma: no cover - optional dep
     gradio = None  # type: ignore[assignment]
+
+
+# An ActionNode is "bookkeeping" when its successor in the same agent
+# is one of these observations — the observation already represents
+# the step. Used by both the figure-rendering hide rule and by the
+# viz-frame deduplication helper.
+#
+# ``exec_action`` and ``resume_action`` deliberately omit
+# ``done_output`` and ``error_output``: those are *outcomes* of the
+# action that are worth their own visible node, so the figure reads
+# as ``... → exec → done`` or ``... → resume → errored`` instead of
+# the action being silently absorbed.
+HIDDEN_ACTION_PAIRS: dict[str, set[str]] = {
+    "llm_action": {"llm_output"},
+    "exec_action": {"exec_output", "supervising_output"},
+    "resume_action": {"exec_output", "supervising_output"},
+}
+
+
+def is_bookkeeping(state: Node, successor: Node | None) -> bool:
+    """``True`` when ``state`` is an action collapsed into ``successor``.
+
+    Two surfaces use this: the figure builder hides such nodes; the
+    viz-frame deduper treats two snapshots that differ only in
+    bookkeeping states as one frame.
+    """
+    paired = HIDDEN_ACTION_PAIRS.get(state.type)
+    if paired is None or successor is None:
+        return False
+    return successor.type in paired
+
 
 ViewSource = "Any | str | Path | Graph | list[Graph] | tuple[Graph, ...]"
 
@@ -45,7 +77,7 @@ def _load_graphs_from_path(path: str | Path) -> list[Graph]:
         if _is_workspace_path(p):
             from rlmflow.workspace import Workspace
 
-            return [Workspace.open_path(p).load_graph()]
+            return Workspace.open_path(p).load_steps()
         raise ValueError(f"{p} is not a workspace directory")
 
     if not p.is_file():
@@ -61,6 +93,43 @@ def _load_graphs_from_path(path: str | Path) -> list[Graph]:
     raise ValueError(f"{p} does not look like a workspace or graph dump")
 
 
+def _visible_signature(graph: Graph) -> tuple:
+    """Per-agent display-kind fingerprint for a graph snapshot.
+
+    Two snapshots that produce the same fingerprint render to the
+    same figure under the action-collapse rule — for example a tick
+    that adds an ``llm_action`` and a tick that replaces it with the
+    paired ``llm_output`` both show one ``llm`` node per agent.
+    Used to dedupe consecutive viz frames where only bookkeeping
+    states changed.
+    """
+    sig: list[tuple[str, tuple[str, ...]]] = []
+    for sub in graph.walk():
+        next_in: dict[str, Node] = {}
+        for prev, nxt in zip(sub.states[:-1], sub.states[1:]):
+            next_in[prev.id] = nxt
+        kinds = tuple(
+            _display_kind(n)
+            for n in sub.states
+            if not is_bookkeeping(n, next_in.get(n.id))
+        )
+        sig.append((sub.agent_id, kinds))
+    return tuple(sorted(sig))
+
+
+def _dedupe_by_visible_signature(graphs: list[Graph]) -> list[Graph]:
+    """Drop consecutive snapshots whose visible figure is unchanged."""
+    out: list[Graph] = []
+    last_sig: tuple | None = None
+    for g in graphs:
+        sig = _visible_signature(g)
+        if sig == last_sig:
+            continue
+        out.append(g)
+        last_sig = sig
+    return out
+
+
 def resolve_graphs(source: ViewSource) -> list[Graph]:
     """Resolve a viewer/export source into graph snapshots.
 
@@ -70,7 +139,7 @@ def resolve_graphs(source: ViewSource) -> list[Graph]:
     from rlmflow.workspace import Workspace
 
     if isinstance(source, Workspace):
-        return [source.load_graph()]
+        return source.load_steps()
     if isinstance(source, Graph):
         return [source]
     if isinstance(source, (str, Path)):
@@ -134,31 +203,33 @@ def graph_session(graph: Graph, *, include_system: bool = False) -> str:
 
 def _render_state_transcript(state: Node, *, agent_id: str | None = None) -> str | None:
     prefix = f"[{agent_id}] " if agent_id else ""
-    if isinstance(state, QueryNode):
+    if is_user_query(state):
         body = (state.content or "").strip()
         return f"--- {prefix}query/turn ---\n{body}" if body else None
-    if isinstance(state, ActionNode) and not isinstance(state, SupervisingNode):
+    if is_llm_output(state):
         body = (state.reply or "").strip()
         return f"--- {prefix}assistant ---\n{body}" if body else None
-    if isinstance(state, SupervisingNode):
+    if is_supervising(state):
         wait_on = ", ".join(state.waiting_on or [])
         return f"--- {prefix}supervising ---\nwaiting on: {wait_on}"
-    if isinstance(state, ResultNode):
+    if is_done(state):
         body = (state.result or "").strip()
         return f"--- {prefix}result ---\n{body}"
-    if isinstance(state, ErrorNode):
+    if is_errored(state):
         body = (state.content or "").strip()
         return f"--- {prefix}error ({state.error}) ---\n{body}"
-    if isinstance(state, ResumeNode):
+    if is_resumed(state) and is_exec_output(state):
         resumed_from = ", ".join(state.resumed_from or [])
         body = f"resumed from: {resumed_from or '(none)'}"
         output = (state.output or "").strip()
         if output:
             body += f"\noutput:\n{output}"
         return f"--- {prefix}resume ---\n{body}"
-    if isinstance(state, ObservationNode):
-        body = (state.content or "").strip()
+    if is_exec_output(state):
+        body = (state.content or state.output or "").strip()
         return f"--- {prefix}observation ---\n{body}" if body else None
+    # ActionNode bookkeeping (LLMAction / ExecAction / ResumeAction):
+    # not part of a chat-log transcript.
     return None
 
 
@@ -171,17 +242,17 @@ def _short(text: str, n: int) -> str:
 
 
 def _label(s: Node) -> str:
-    t = s.type
-    if isinstance(s, SupervisingNode) and s.waiting_on:
+    t = _display_kind(s)
+    if is_supervising(s) and s.waiting_on:
         return f"{t} waiting_on={s.waiting_on}"
-    if isinstance(s, ResultNode) and s.result:
+    if is_done(s) and s.result:
         return f"{t} -> {_short(s.result, 60)}"
-    if isinstance(s, ErrorNode):
+    if is_errored(s):
         return f"{t} ({s.error or 'error'})"
-    if isinstance(s, ActionNode) and s.code:
+    if is_llm_output(s) and s.code:
         return f"{t} code={_short(s.code, 40)}"
-    if isinstance(s, ObservationNode) and s.content:
-        return f"{t} {_short(s.content, 60)}"
+    if is_exec_output(s) and (s.content or s.output):
+        return f"{t} {_short(s.content or s.output, 60)}"
     return t
 
 
@@ -202,7 +273,7 @@ def graph_tree(graph: Graph) -> str:
         state_ids = {s.id for s in g.states}
         sup_for_agent: dict[str, str] = {}
         for s in g.states:
-            if isinstance(s, SupervisingNode):
+            if is_supervising(s):
                 for aid in s.waiting_on:
                     sup_for_agent[aid] = s.id
 
@@ -233,22 +304,28 @@ def graph_tree(graph: Graph) -> str:
 
 _NODE_COLORS: dict[str, str] = {
     "query": "#58a6ff",
-    "action": "#bc8cff",
-    "observation": "#ff9e64",
+    "llm_call": "#a98a2a",
+    "llm": "#bc8cff",
+    "exec_call": "#b87650",
+    "exec": "#ff9e64",
     "supervising": "#ffd33d",
+    "resume_call": "#3a8a5d",
     "resume": "#56d4dd",
-    "result": "#56d364",
-    "error": "#ff7b72",
+    "done": "#56d364",
+    "errored": "#ff7b72",
 }
 
 _NODE_SYMBOLS: dict[str, str] = {
     "query": "circle",
-    "action": "diamond",
-    "observation": "square",
+    "llm_call": "diamond-open",
+    "llm": "diamond",
+    "exec_call": "square-open",
+    "exec": "square",
     "supervising": "star",
+    "resume_call": "triangle-right-open",
     "resume": "triangle-right",
-    "result": "hexagon",
-    "error": "x",
+    "done": "hexagon",
+    "errored": "x",
 }
 
 
@@ -258,7 +335,7 @@ _NODE_SYMBOLS: dict[str, str] = {
 def _state_hover_text(state: Node, agent: Graph) -> str:
     rows = [
         f"<b>{_esc_html(agent.agent_id or 'root')}</b>",
-        f"<i>{state.type}</i> · depth {agent.depth} · seq {state.seq}",
+        f"<i>{_display_kind(state)}</i> · depth {agent.depth} · seq {state.seq}",
     ]
     if agent.model_label:
         rows.append(f"model: {_esc_html(agent.model_label)}")
@@ -282,7 +359,7 @@ def _state_display_label(
     if agent.depth >= 2 and "." in label:
         label = label.rsplit(".", 1)[-1]
     if repeated_agent and not is_agent_entry:
-        label = state.type
+        label = _display_kind(state)
     if len(label) > limit:
         label = label[: limit - 1] + "…"
     return label
@@ -305,7 +382,17 @@ def _build_graph_figure(
     except ImportError:  # pragma: no cover - optional dep
         return None
 
-    nodes = list(graph.nodes)
+    # An ActionNode is hidden when its successor "absorbs" it — see
+    # :func:`rlmflow.graph.timeline.is_bookkeeping`. Same rule that
+    # ``retrace_steps`` uses to merge bookkeeping states into the
+    # previous tick, so the figure and the slider stay in sync.
+    next_in_agent: dict[str, Node] = {}
+    for sub in graph.walk():
+        states = sub.states
+        for prev, nxt in zip(states[:-1], states[1:]):
+            next_in_agent[prev.id] = nxt
+
+    nodes = [n for n in graph.nodes if not is_bookkeeping(n, next_in_agent.get(n.id))]
     by_id: dict[str, Node] = {n.id: n for n in nodes}
     # Two kinds of outgoing edges per node:
     #   chain_child[n]: at most one — the next state of the SAME agent (flows_to).
@@ -315,7 +402,7 @@ def _build_graph_figure(
     # readable as a vertical spine.
     #
     # We deliberately re-root spawn edges from the spawning *action* onto the
-    # matching ``SupervisingNode``. Reason: spawned children only "live" during
+    # matching ``SupervisingOutput``. Reason: spawned children only "live" during
     # the supervising state (the parent is yielded waiting on them). Visually
     # attaching them to supervising makes the action → supervising → resume
     # spine readable as a column, with the children fanning out *from* the
@@ -326,26 +413,52 @@ def _build_graph_figure(
     spawn_children: dict[str, list[str]] = {n.id: [] for n in nodes}
     parent_of: dict[str, str] = {}
 
-    # agent_id -> id of the SupervisingNode that waits on it (first wins).
+    # agent_id -> id of the SupervisingOutput that waits on it (first wins).
     sup_for_child_agent: dict[str, str] = {}
     for node in nodes:
-        if isinstance(node, SupervisingNode):
+        if is_supervising(node):
             for aid in node.waiting_on:
                 sup_for_child_agent.setdefault(aid, node.id)
 
+    # Rebuild flows_to from each agent's visible states in seq order so
+    # collapsed action nodes don't punch holes in the chain.
+    for sub in graph.walk():
+        prev_id: str | None = None
+        for s in sub.states:
+            if s.id not in by_id:
+                continue
+            if prev_id is not None:
+                chain_child[prev_id] = s.id
+                parent_of[s.id] = prev_id
+            prev_id = s.id
+
+    # When a spawning edge points at a hidden action, walk the parent
+    # agent's trajectory to find the nearest preceding visible state.
+    visible_predecessor: dict[str, str | None] = {}
+    for sub in graph.walk():
+        prev_visible: str | None = None
+        for s in sub.states:
+            visible_predecessor[s.id] = prev_visible
+            if s.id in by_id:
+                prev_visible = s.id
+
     for edge in graph.edges:
-        if edge.from_ not in by_id or edge.to not in by_id:
+        if edge.kind != "spawns":
             continue
-        if edge.to in parent_of:
+        if edge.to not in by_id or edge.to in parent_of:
             continue
-        if edge.kind == "spawns":
-            child_agent_id = by_id[edge.to].agent_id
-            attach_to = sup_for_child_agent.get(child_agent_id, edge.from_)
-            parent_of[edge.to] = attach_to
-            spawn_children[attach_to].append(edge.to)
-        else:
-            parent_of[edge.to] = edge.from_
-            chain_child[edge.from_] = edge.to
+        child_agent_id = by_id[edge.to].agent_id
+        attach_to = sup_for_child_agent.get(child_agent_id)
+        if attach_to is None:
+            attach_to = (
+                edge.from_
+                if edge.from_ in by_id
+                else visible_predecessor.get(edge.from_)
+            )
+        if attach_to is None:
+            continue
+        parent_of[edge.to] = attach_to
+        spawn_children.setdefault(attach_to, []).append(edge.to)
 
     def all_children(eid: str) -> list[str]:
         kids = list(spawn_children.get(eid, []))
@@ -467,8 +580,8 @@ def _build_graph_figure(
         )
         for n in ordered
     ]
-    colors = [_NODE_COLORS.get(n.type, "#8b949e") for n in ordered]
-    symbols = [_NODE_SYMBOLS.get(n.type, "circle") for n in ordered]
+    colors = [_NODE_COLORS.get(_display_kind(n), "#8b949e") for n in ordered]
+    symbols = [_NODE_SYMBOLS.get(_display_kind(n), "circle") for n in ordered]
     sizes = [14 for _ in ordered]
     hover = [_state_hover_text(n, graph.agents[n.agent_id]) for n in ordered]
 
@@ -509,7 +622,10 @@ def _build_graph_figure(
     )
 
     fig = go.Figure(data=[edge_trace, node_trace])
+    visible_kinds = {_display_kind(n) for n in ordered}
     for ntype, color in _NODE_COLORS.items():
+        if ntype not in visible_kinds:
+            continue
         fig.add_trace(
             go.Scatter(
                 x=[None],
@@ -802,8 +918,15 @@ def save_steps(
     margin: dict | None = None,
     title_template: str = "step {i} / {total}: {agent_id} [{type}]",
 ) -> Path:
-    """Save one image per snapshot in ``graphs`` under ``out_dir``."""
+    """Save one image per snapshot in ``graphs`` under ``out_dir``.
+
+    Consecutive snapshots that produce an identical visible figure
+    (same set of non-bookkeeping nodes after the action-collapse rule)
+    are deduplicated — only the first is written. This keeps the
+    frame count tied to *visible* progress, not raw state-appends.
+    """
     graphs = resolve_graphs(graphs)
+    graphs = _dedupe_by_visible_signature(graphs)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     if not graphs:
@@ -848,6 +971,8 @@ _HTML_STYLES = """
   --green: #3fb950;
   --purple: #bc8cff;
   --yellow: #d29922;
+  --orange: #ff9e64;
+  --red: #ff7b72;
 }
 body {
   background: var(--bg);
@@ -903,10 +1028,16 @@ code { color: var(--blue); }
   display: inline-block;
   padding: 0.1rem 0.45rem;
 }
-.kind-result { color: var(--green); border-color: var(--green); }
-.kind-supervising { color: var(--purple); border-color: var(--purple); }
-.kind-action { color: var(--yellow); border-color: var(--yellow); }
-.kind-query, .kind-observation { color: var(--blue); border-color: var(--blue); }
+.kind-done { color: var(--green); border-color: var(--green); }
+.kind-supervising { color: var(--yellow); border-color: var(--yellow); }
+.kind-llm { color: var(--purple); border-color: var(--purple); }
+.kind-llm_call { color: var(--purple); border-color: var(--purple); opacity: 0.7; }
+.kind-resume { color: var(--blue); border-color: var(--blue); }
+.kind-resume_call { color: var(--green); border-color: var(--green); opacity: 0.7; }
+.kind-errored { color: var(--red); border-color: var(--red); }
+.kind-query { color: var(--blue); border-color: var(--blue); }
+.kind-exec { color: var(--orange); border-color: var(--orange); }
+.kind-exec_call { color: var(--orange); border-color: var(--orange); opacity: 0.7; }
 .nav {
   align-items: center;
   display: flex;
@@ -969,8 +1100,8 @@ def _state_table_html(graph: Graph) -> str:
         rows.append(
             "<tr>"
             f"<td><code>{_esc_html(node.agent_id)}</code></td>"
-            f"<td><span class='pill kind-{_esc_html(node.type)}'>"
-            f"{_esc_html(node.type)}</span></td>"
+            f"<td><span class='pill kind-{_esc_html(_display_kind(node))}'>"
+            f"{_esc_html(_display_kind(node))}</span></td>"
             f"<td>{_esc_html(str(detail)[:120])}</td>"
             "</tr>"
         )
@@ -989,7 +1120,7 @@ def render_html(
     normalize_labels: bool = True,
 ) -> str:
     """Render ``graphs`` as a single self-contained HTML stepper."""
-    graphs = resolve_graphs(graphs)
+    graphs = _dedupe_by_visible_signature(resolve_graphs(graphs))
     if not graphs:
         raise ValueError("render_html() needs at least one graph")
 
@@ -1092,7 +1223,7 @@ def save_gif(
     title_template: str = "step {i} / {total}: {agent_id} [{type}]",
 ) -> Path:
     """Stitch every graph snapshot into an animated GIF."""
-    graphs = resolve_graphs(graphs)
+    graphs = _dedupe_by_visible_signature(resolve_graphs(graphs))
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     if not graphs:
@@ -1165,7 +1296,7 @@ def open_viewer(graphs: ViewSource, **launch_kwargs: Any):
     """Open the Gradio stepper over a workspace, path, graph, or graph list."""
     import gradio as gr
 
-    graphs = resolve_graphs(graphs)
+    graphs = _dedupe_by_visible_signature(resolve_graphs(graphs))
     if not graphs:
         raise ValueError("open_viewer needs at least one Graph")
 
@@ -1305,12 +1436,67 @@ _GRAPH_CSS = """
     color: #8b949e; margin-right: 4px;
 }
 .rlmflow-detail .pill.type-query       { color: #58a6ff; border-color: #58a6ff; }
-.rlmflow-detail .pill.type-action      { color: #bc8cff; border-color: #bc8cff; }
-.rlmflow-detail .pill.type-observation { color: #ff9e64; border-color: #ff9e64; }
+.rlmflow-detail .pill.type-llm         { color: #bc8cff; border-color: #bc8cff; }
+.rlmflow-detail .pill.type-exec        { color: #ff9e64; border-color: #ff9e64; }
 .rlmflow-detail .pill.type-supervising { color: #ffd33d; border-color: #ffd33d; }
 .rlmflow-detail .pill.type-resume      { color: #56d4dd; border-color: #56d4dd; }
-.rlmflow-detail .pill.type-result      { color: #56d364; border-color: #56d364; }
-.rlmflow-detail .pill.type-error       { color: #ff7b72; border-color: #ff7b72; }
+.rlmflow-detail .pill.type-done        { color: #56d364; border-color: #56d364; }
+.rlmflow-detail .pill.type-errored     { color: #ff7b72; border-color: #ff7b72; }
+.rlmflow-detail .payload-block {
+    margin: 8px 0; padding: 8px 10px;
+    background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+}
+.rlmflow-detail .payload-block pre {
+    margin-top: 6px; background: #161b22;
+}
+.rlmflow-detail .payload-label {
+    color: #8b949e; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    font-family: -apple-system, system-ui, sans-serif;
+}
+.rlmflow-detail .state-blocks {
+    display: flex; flex-direction: column; gap: 10px;
+}
+.rlmflow-detail .state-block {
+    border: 1px solid #30363d; border-left: 3px solid #30363d;
+    border-radius: 6px;
+    background: #0d1117; padding: 10px 12px;
+}
+.rlmflow-detail .state-block-query       { border-left-color: #58a6ff; background: #58a6ff0a; }
+.rlmflow-detail .state-block-llm         { border-left-color: #bc8cff; background: #bc8cff0a; }
+.rlmflow-detail .state-block-llm_call    { border-left-color: #a98a2a; background: #a98a2a0a; }
+.rlmflow-detail .state-block-exec        { border-left-color: #ff9e64; background: #ff9e640a; }
+.rlmflow-detail .state-block-exec_call   { border-left-color: #b87650; background: #b876500a; }
+.rlmflow-detail .state-block-supervising { border-left-color: #ffd33d; background: #ffd33d0a; }
+.rlmflow-detail .state-block-resume      { border-left-color: #56d4dd; background: #56d4dd0a; }
+.rlmflow-detail .state-block-resume_call { border-left-color: #3a8a5d; background: #3a8a5d0a; }
+.rlmflow-detail .state-block-done        { border-left-color: #56d364; background: #56d3640a; }
+.rlmflow-detail .state-block-errored     { border-left-color: #ff7b72; background: #ff7b720a; }
+.rlmflow-detail .state-block-selected {
+    box-shadow: 0 0 0 1px currentColor;
+    border-top-color: currentColor;
+    border-right-color: currentColor;
+    border-bottom-color: currentColor;
+}
+.rlmflow-detail .state-block-query.state-block-selected       { color: #58a6ff; }
+.rlmflow-detail .state-block-llm.state-block-selected         { color: #bc8cff; }
+.rlmflow-detail .state-block-llm_call.state-block-selected    { color: #a98a2a; }
+.rlmflow-detail .state-block-exec.state-block-selected        { color: #ff9e64; }
+.rlmflow-detail .state-block-exec_call.state-block-selected   { color: #b87650; }
+.rlmflow-detail .state-block-supervising.state-block-selected { color: #ffd33d; }
+.rlmflow-detail .state-block-resume.state-block-selected      { color: #56d4dd; }
+.rlmflow-detail .state-block-resume_call.state-block-selected { color: #3a8a5d; }
+.rlmflow-detail .state-block-done.state-block-selected        { color: #56d364; }
+.rlmflow-detail .state-block-errored.state-block-selected     { color: #ff7b72; }
+.rlmflow-detail .state-block-head {
+    display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px;
+}
+.rlmflow-detail .state-block .payload-block {
+    margin: 6px 0 0; background: #161b22;
+}
+.rlmflow-detail .payload-empty {
+    color: #6e7681; font-style: italic; font-size: 11px;
+}
 """.strip()
 
 _GRAPH_JS_ON_LOAD = r"""
@@ -1354,6 +1540,8 @@ _GRAPH_JS_ON_LOAD = r"""
                 detail.innerHTML = '<i style="color:#8b949e">loading…</i>';
                 try {
                     detail.innerHTML = await server.get_node_detail(currentStep, nid);
+                    const sel = detail.querySelector('.state-block-selected');
+                    if (sel) sel.scrollIntoView({block: 'nearest'});
                 } catch (err) {
                     detail.innerHTML =
                         '<span style="color:#f85149">error: ' + err.message + '</span>';
@@ -1384,10 +1572,73 @@ _GRAPH_JS_ON_LOAD = r"""
 # ── state detail HTML (clicked-node panel) ───────────────────────────
 
 
+# Per-node-type ordered field list. Each tuple is (attr, heading).
+# Empty values are skipped at render time.
+_DETAIL_FIELDS: dict[str, list[tuple[str, str]]] = {
+    "user_query": [("content", "query")],
+    "llm_action": [("model", "model")],
+    "llm_output": [("reply", "reply"), ("code", "code")],
+    "exec_action": [("code", "code")],
+    "exec_output": [("output", "output"), ("content", "rendered")],
+    "supervising_output": [("waiting_on", "waiting on"), ("output", "output")],
+    "error_output": [
+        ("error", "error kind"),
+        ("content", "retry message"),
+        ("output", "raw output"),
+    ],
+    "done_output": [("result", "result"), ("output", "output")],
+    "resume_action": [
+        ("resumed_from", "resumed from"),
+        ("code", "code"),
+    ],
+}
+
+
+def _render_state_block(state: Node, *, selected: bool) -> str:
+    """Render a single state as a labeled block of its typed fields."""
+    fields = _DETAIL_FIELDS.get(state.type, [])
+    body_parts: list[str] = []
+    for attr, heading in fields:
+        val = getattr(state, attr, None)
+        if val is None or val == "" or val == []:
+            continue
+        if isinstance(val, list):
+            text = "\n".join(str(x) for x in val)
+        else:
+            text = str(val)
+        if not text.strip():
+            continue
+        body_parts.append(
+            f"<div class='payload-block'>"
+            f"<div class='payload-label'>{_esc_html(heading)}</div>"
+            f"<pre>{_esc_html(text)}</pre>"
+            f"</div>"
+        )
+    if not body_parts:
+        body_parts.append("<div class='payload-block payload-empty'>(no payload)</div>")
+
+    kind = _display_kind(state)
+    pills = (
+        f"<span class='pill kind-{_esc_html(kind)}'>{_esc_html(kind)}</span>"
+        f"<span class='pill'>seq {state.seq}</span>"
+        f"<span class='pill'>{_esc_html(state.type)}</span>"
+    )
+    sel_class = " state-block-selected" if selected else ""
+    kind_class = f" state-block-{_esc_html(kind)}"
+    return (
+        f"<section class='state-block{kind_class}{sel_class}' "
+        f"id='state-block-{_esc_html(state.id)}'>"
+        f"<header class='state-block-head'>{pills}</header>"
+        f"{''.join(body_parts)}"
+        f"</section>"
+    )
+
+
 def _state_detail_html(state: Node, graph: Graph) -> str:
     agent = graph.agents[state.agent_id]
     parts: list[str] = []
-    pill = f'<span class="pill type-{_esc_html(state.type)}">{_esc_html(state.type)}</span>'
+    kind = _display_kind(state)
+    pill = f'<span class="pill type-{_esc_html(kind)}">{_esc_html(kind)}</span>'
     inp, out = agent.tokens()
     parts.append(
         f"""
@@ -1395,6 +1646,7 @@ def _state_detail_html(state: Node, graph: Graph) -> str:
   <div>
     <h4>{_esc_html(agent.agent_id or "root")} {pill}</h4>
     <div>
+      <span class="pill">type {_esc_html(state.type)}</span>
       <span class="pill">id {_esc_html(state.id)}</span>
       <span class="pill">model {_esc_html(agent.model_label)}</span>
       <span class="pill">depth {agent.depth}</span>
@@ -1407,34 +1659,14 @@ def _state_detail_html(state: Node, graph: Graph) -> str:
 """
     )
 
-    parts.append("<h5>transcript</h5>")
-    parts.append(f"<pre>{_esc_html(agent.transcript(include_system=False))}</pre>")
+    if agent.query:
+        parts.append("<h5>agent query</h5>")
+        parts.append(f"<pre>{_esc_html(agent.query)}</pre>")
 
-    fields: list[tuple[str, str]] = []
-    for label in ("reply", "code", "output", "content", "result", "error"):
-        val = getattr(state, label, None)
-        if val:
-            fields.append((label, str(val)))
-    waiting_on = getattr(state, "waiting_on", None) or []
-    if waiting_on:
-        fields.append(("waiting_on", "\n".join(waiting_on)))
-
-    if fields:
-        parts.append("<h5>raw state payload</h5>")
-        for i, (label, val) in enumerate(fields):
-            preview = val.strip().splitlines()[0][:80] if val.strip() else ""
-            preview_html = (
-                f" <span style='color:#8b949e'>{_esc_html(preview)}</span>"
-                if preview
-                else ""
-            )
-            open_attr = " open" if i == 0 else ""
-            parts.append(
-                f"<details class='payload-block'{open_attr}>"
-                f"<summary><strong>{_esc_html(label)}</strong>{preview_html}</summary>"
-                f"<pre>{_esc_html(val)}</pre>"
-                "</details>"
-            )
+    parts.append(f"<h5>states ({len(agent.states)})</h5>" "<div class='state-blocks'>")
+    for s in agent.states:
+        parts.append(_render_state_block(s, selected=s.id == state.id))
+    parts.append("</div>")
 
     return "".join(parts)
 

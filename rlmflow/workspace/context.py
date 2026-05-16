@@ -12,9 +12,11 @@ from rlmflow.workspace.store import Store, copy_workspace_paths, resolve_backend
 CONTEXT_VARIABLE_PROMPT = """
 **Context variable:**
 
-`CONTEXT` is the read-only data slot for *this* agent — always present, possibly empty.
-The query lives in your messages, not here. `CONTEXT` is just the data to operate on.
-**Size it up first**: `CONTEXT.info()["chars"] == 0` means no payload — work from the query.
+`CONTEXT` holds **information you need to complete your query** — a brief, a spec,
+raw input data, source you must read or mutate, or a sibling's transcript. Your
+*task* lives in your messages; `CONTEXT` is the *data* that is useful to complete your task.
+**Always check it first** — `CONTEXT.info()["chars"] == 0` means no payload (work
+from the query alone); anything else is required reading.
 
 API:
 - `CONTEXT.info()` / `CONTEXT.line_count()` — measure.

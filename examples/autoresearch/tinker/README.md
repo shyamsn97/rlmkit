@@ -62,17 +62,12 @@ cd /Users/shyam/Code/rlmkit
 python examples/autoresearch/autoresearch.py \
     --target examples/autoresearch/tinker \
     --budget-s 360 \
-    --rounds 8 \
-    --branches 4
+    --rounds 20
 ```
 
-The `target` directory needs to be a git checkout (the driver uses
-`git_op` for commit/reset). If it isn't already, init it:
-
-```bash
-cd examples/autoresearch/tinker
-git init && git add . && git commit -m "tinker autoresearch baseline"
-```
+No git setup is required — the agent edits `train.py` in place inside a
+disposable workspace under `runs/autoresearch/`, and every version that
+ran is archived to `history/<n>_train.py` for rollback.
 
 ## What the agent will mutate
 
@@ -90,9 +85,9 @@ contract — those are fixed.
 
 ## Cost & speed notes
 
-- Tinker is paid per experiment; an autoresearch loop with 8 rounds × 4
-  branches × 5min experiments adds up. Start with `--rounds 2 --branches 1`
-  to dry-run the loop before unleashing it.
+- Tinker is paid per experiment; 20 rounds × 5min runs adds up fast.
+  Start with `--rounds 2 --budget-s 60` to dry-run the loop before
+  unleashing it.
 - The wall-clock timeout passed via `--budget-s` is enforced by the
   driver; if Tinker queues are slow, your experiment may fail to print
   `val_bpb` before the kill — the driver handles this gracefully (returns

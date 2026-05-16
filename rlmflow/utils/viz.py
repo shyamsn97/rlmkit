@@ -13,7 +13,8 @@ from collections import Counter
 from collections.abc import Iterable, Iterator
 from typing import Any, Callable
 
-from rlmflow.graph import ErrorNode, Graph
+from rlmflow.graph import Graph, is_done, is_errored
+from rlmflow.utils.export import _kind
 
 # ── live tree ────────────────────────────────────────────────────────
 
@@ -103,7 +104,7 @@ def _gantt_per_step(graphs: list[Graph]) -> tuple[list[str], list[list[str | Non
             cur = sub.current()
             if cur is None:
                 continue
-            step_map[aid] = f"{cur.type} ({sub.model_label})"
+            step_map[aid] = f"{_kind(cur)} ({sub.model_label})"
             if aid not in seen:
                 seen.add(aid)
                 order.append(aid)
@@ -113,22 +114,28 @@ def _gantt_per_step(graphs: list[Graph]) -> tuple[list[str], list[list[str | Non
 
 _TYPE_CELL = {
     "query": ("Q", "blue"),
-    "observation": ("O", "blue"),
-    "action": ("A", "yellow"),
+    "llm_call": ("a", "yellow"),
+    "llm": ("A", "yellow"),
+    "exec_call": ("o", "blue"),
+    "exec": ("O", "blue"),
     "supervising": ("S", "magenta"),
+    "resume_call": ("r", "green"),
     "resume": ("R", "green"),
-    "error": ("E", "red"),
-    "result": ("F", "green"),
+    "errored": ("E", "red"),
+    "done": ("F", "green"),
 }
 
 _TYPE_HTML = {
     "query": "#58a6ff",
-    "observation": "#58a6ff",
-    "action": "#d29922",
+    "llm_call": "#a98a2a",
+    "llm": "#d29922",
+    "exec_call": "#b87650",
+    "exec": "#ff9e64",
     "supervising": "#bc8cff",
+    "resume_call": "#5fa067",
     "resume": "#7ee787",
-    "error": "#f85149",
-    "result": "#3fb950",
+    "errored": "#f85149",
+    "done": "#3fb950",
 }
 
 
@@ -205,8 +212,8 @@ h1 {{ font-size: 14px; color: #8b949e; font-weight: 500; margin: 0 0 12px; }}
 
 
 def error_summary(graph: Graph) -> str:
-    """Group every :class:`ErrorNode` in ``graph`` by ``error`` kind."""
-    errors = [e for e in graph.nodes if isinstance(e, ErrorNode)]
+    """Group every :class:`ErrorOutput` in ``graph`` by ``error`` kind."""
+    errors = [e for e in graph.nodes if is_errored(e)]
     if not errors:
         return "(no errors)"
     by_kind: Counter[str] = Counter()
@@ -242,21 +249,34 @@ def code_log(
     if agent_id:
         nodes = [n for n in nodes if n.agent_id == agent_id]
 
+    # Pair each ExecAction / ResumeAction with the CodeObservation that
+    # immediately follows it in the same agent's trajectory.
+    by_agent: dict[str, list] = {}
+    for n in nodes:
+        by_agent.setdefault(n.agent_id, []).append(n)
+
     out: list[str] = []
-    for node in nodes:
-        code = getattr(node, "code", None)
-        if not code:
-            continue
-        out.append(f"# [{node.agent_id}] {node.type}")
-        out.append(code.strip())
-        output = getattr(node, "output", None) or ""
-        if not output:
-            content = getattr(node, "content", None) or ""
-            if content and node.type in ("error", "observation", "resume"):
-                output = content
-        if output:
-            out.append("→ " + output.strip()[:240])
-        out.append("")
+    for aid, states in by_agent.items():
+        for i, node in enumerate(states):
+            if node.type not in ("exec_action", "resume_action"):
+                continue
+            code = getattr(node, "code", "") or ""
+            if not code:
+                continue
+            out.append(f"# [{aid}] {node.type}")
+            out.append(code.strip())
+            obs = states[i + 1] if i + 1 < len(states) else None
+            output = ""
+            if obs is not None:
+                output = (
+                    getattr(obs, "content", "")
+                    or getattr(obs, "output", "")
+                    or getattr(obs, "result", "")
+                    or ""
+                )
+            if output:
+                out.append("→ " + output.strip()[:240])
+            out.append("")
     return "\n".join(out).rstrip() or "(no code blocks)"
 
 
@@ -344,7 +364,7 @@ def report_md(
         parts.append(f"**Budget:** {budget_burndown(graphs, max_budget)}")
     current = final.current()
     parts.append(f"**Outcome:** {current.type if current else 'empty'}")
-    errors = [e for e in final.nodes if isinstance(e, ErrorNode)]
+    errors = [e for e in final.nodes if is_errored(e)]
     if errors:
         parts.append(f"**Errors:** {len(errors)}")
 
@@ -386,12 +406,12 @@ def bench_table(
         final = graphs[-1]
         agents = len(final.agents)
         tokens = final.total_tokens()
-        errors = sum(1 for e in final.nodes if isinstance(e, ErrorNode))
+        errors = sum(1 for e in final.nodes if is_errored(e))
         cur = final.current()
         outcome = (
-            "result"
-            if cur and cur.type == "result"
-            else "error" if cur and cur.type == "error" else "open"
+            "done"
+            if cur and is_done(cur)
+            else "errored" if cur and is_errored(cur) else "open"
         )
         row = [
             label,
@@ -430,7 +450,7 @@ def tee(stream: Iterable[Graph], *sinks: Callable[[Graph], Any]) -> Iterator[Gra
 
 def _webhook_payload(graph: Graph, *, title: str) -> dict[str, str]:
     inp, out = graph.tokens()
-    errors = sum(1 for e in graph.nodes if isinstance(e, ErrorNode))
+    errors = sum(1 for e in graph.nodes if is_errored(e))
     body = (
         f"*{title}*\n"
         f"agents: {len(graph.agents)}  "

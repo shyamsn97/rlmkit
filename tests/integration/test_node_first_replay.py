@@ -51,7 +51,7 @@ def test_rlmflow_records_workspace_ref_on_root_agent(tmp_path: Path):
 
     final = _run(engine, engine.start("test query"))
 
-    assert isinstance(final.current(), __import__("rlmflow").ResultNode)
+    assert __import__("rlmflow").is_done(final.current())
     workspace_ref = final.workspace
     assert workspace_ref is not None
     assert Path(workspace_ref.root) == workspace.root
