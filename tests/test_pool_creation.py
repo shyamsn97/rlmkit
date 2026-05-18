@@ -1,4 +1,4 @@
-from rlmflow.pool import CallablePool, SequentialPool, ThreadPool
+from rlmflow.utils.pool import CallablePool, SequentialPool, ThreadPool
 from rlmflow.rlm import RLMConfig, create_pool
 
 

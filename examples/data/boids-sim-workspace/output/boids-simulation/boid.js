@@ -1,79 +1,61 @@
-// Boid class: position, velocity, acceleration, color
-function randRange(a, b) { return a + Math.random() * (b - a); }
+import { vec, add, sub, div, mul, mag, normalize, limit, dist2, randRange, hueColor } from './util.js';
 
-class Boid {
-  constructor(x, y, id) {
-    this.pos = createVec(x, y);
-    // fast initial speeds for a lively simulation
-    var angle = Math.random() * Math.PI * 2;
-    this.vel = createVec(Math.cos(angle) * randRange(1.5, 3.5), Math.sin(angle) * randRange(1.5, 3.5));
-    this.acc = createVec(0, 0);
-    this.id = id || 0;
-    this.maxSpeed = randRange(3.5, 6.0); // faster boids
-    this.maxForce = 0.12;
-    // colorful hue based on id to spread colors
-    this.hue = Math.floor((this.id * 47) % 360);
-    this.size = randRange(3.5, 7.0);
-  }
-
-  update(boids, width, height) {
-    this.applyBehaviors(boids);
-    // integrate
-    this.vel = add(this.vel, this.acc);
-    this.vel = limit(this.vel, this.maxSpeed);
-    this.pos = add(this.pos, this.vel);
-    // wrap edges
-    this.pos = wrapPosition(this.pos, width, height);
-    // reset acceleration
-    this.acc = createVec(0, 0);
+export class Boid {
+  constructor(x, y, w, h, id=0) {
+    this.pos = vec(x !== undefined ? x : Math.random()*w, y !== undefined ? y : Math.random()*h);
+    // velocity randomized for fast motion
+    const ang = Math.random()*Math.PI*2;
+    this.vel = vec(Math.cos(ang)*randRange(1.5,4.0), Math.sin(ang)*randRange(1.5,4.0));
+    this.acc = vec(0,0);
+    this.id = id;
+    this.w = w;
+    this.h = h;
+    // tuned parameters for a lively, fast swarm
+    this.maxSpeed = randRange(3.0, 5.5);
+    this.maxForce = 0.05;
+    this.perception = 48;        // for alignment/cohesion
+    this.sepPerception = 26;     // for separation
+    this.hue = (id * 37) % 360;  // varying hue per boid id
   }
 
   applyForce(f) {
     this.acc = add(this.acc, f);
   }
 
-  applyBehaviors(boids) {
-    var alignment = this.align(boids);
-    var cohesion = this.cohere(boids);
-    var separation = this.separate(boids);
-    // weights tuning for fast, colorful swarm
-    alignment = mult(alignment, 1.0);
-    cohesion = mult(cohesion, 0.85);
-    separation = mult(separation, 1.5);
-
-    this.applyForce(alignment);
-    this.applyForce(cohesion);
-    this.applyForce(separation);
+  edges() {
+    // wrap-around edges
+    if (this.pos.x < 0) this.pos.x += this.w;
+    if (this.pos.y < 0) this.pos.y += this.h;
+    if (this.pos.x >= this.w) this.pos.x -= this.w;
+    if (this.pos.y >= this.h) this.pos.y -= this.h;
   }
 
-  // Steering behaviors
   align(boids) {
-    var perception = 50;
-    var steering = createVec(0, 0);
-    var total = 0;
-    for (var other of boids) {
-      var d = dist(this.pos, other.pos);
-      if (other !== this && d < perception) {
+    let steering = vec(0,0), total = 0;
+    for (let other of boids) {
+      if (other === this) continue;
+      let d2 = dist2(this.pos, other.pos);
+      if (d2 < this.perception*this.perception) {
         steering = add(steering, other.vel);
         total++;
       }
     }
     if (total > 0) {
       steering = div(steering, total);
-      steering = setMag(steering, this.maxSpeed);
+      steering = normalize(steering);
+      steering = mul(steering, this.maxSpeed);
       steering = sub(steering, this.vel);
       steering = limit(steering, this.maxForce);
     }
     return steering;
   }
 
-  cohere(boids) {
-    var perception = 60;
-    var steering = createVec(0, 0);
-    var total = 0;
-    for (var other of boids) {
-      var d = dist(this.pos, other.pos);
-      if (other !== this && d < perception) {
+  cohesion(boids) {
+    let steering = vec(0,0), total = 0;
+    for (let other of boids) {
+      if (other === this) continue;
+      let d2 = dist2(this.pos, other.pos);
+      if (d2 < this.perception*this.perception) {
         steering = add(steering, other.pos);
         total++;
       }
@@ -81,53 +63,73 @@ class Boid {
     if (total > 0) {
       steering = div(steering, total);
       steering = sub(steering, this.pos);
-      steering = setMag(steering, this.maxSpeed);
+      steering = normalize(steering);
+      steering = mul(steering, this.maxSpeed);
       steering = sub(steering, this.vel);
       steering = limit(steering, this.maxForce);
     }
     return steering;
   }
 
-  separate(boids) {
-    var perception = 28;
-    var steering = createVec(0, 0);
-    var total = 0;
-    for (var other of boids) {
-      var d = dist(this.pos, other.pos);
-      if (other !== this && d < perception && d > 0) {
-        var diff = sub(this.pos, other.pos);
-        diff = div(diff, d); // weight by distance
+  separation(boids) {
+    let steering = vec(0,0), total = 0;
+    for (let other of boids) {
+      if (other === this) continue;
+      let dx = this.pos.x - other.pos.x;
+      let dy = this.pos.y - other.pos.y;
+      let d2 = dx*dx + dy*dy;
+      if (d2 < this.sepPerception*this.sepPerception && d2 > 0) {
+        let diff = vec(dx, dy);
+        let inv = 1 / Math.sqrt(d2);
+        diff = mul(diff, inv); // normalize
+        diff = div(diff, Math.sqrt(d2)); // stronger when closer
         steering = add(steering, diff);
         total++;
       }
     }
     if (total > 0) {
       steering = div(steering, total);
-      steering = setMag(steering, this.maxSpeed);
+      steering = normalize(steering);
+      steering = mul(steering, this.maxSpeed);
       steering = sub(steering, this.vel);
       steering = limit(steering, this.maxForce * 1.5);
     }
     return steering;
   }
 
-  // draw a triangle representing the boid
+  flock(boids) {
+    // weights chosen for vivid, slightly chaotic flocking
+    const align = this.align(boids);
+    const coh = this.cohesion(boids);
+    const sep = this.separation(boids);
+    this.applyForce(mul(align, 1.0));
+    this.applyForce(mul(coh, 0.7));
+    this.applyForce(mul(sep, 1.6));
+  }
+
+  update() {
+    this.vel = add(this.vel, this.acc);
+    this.vel = limit(this.vel, this.maxSpeed);
+    this.pos = add(this.pos, this.vel);
+    this.acc = vec(0,0);
+  }
+
   draw(ctx) {
-    var theta = Math.atan2(this.vel.y, this.vel.x);
+    // Draw as a rotated triangle pointing in velocity direction
+    const angle = Math.atan2(this.vel.y, this.vel.x);
     ctx.save();
     ctx.translate(this.pos.x, this.pos.y);
-    ctx.rotate(theta);
-    // color bright and colorful
-    ctx.fillStyle = 'hsl(' + this.hue + ', 85%, 55%)';
+    ctx.rotate(angle);
+    // color reacts to speed for dynamic hues
+    const speed = mag(this.vel);
+    const hue = (this.hue + speed*18) % 360;
+    ctx.fillStyle = hueColor(hue, '75%', '55%');
     ctx.beginPath();
-    ctx.moveTo(this.size * 1.8, 0);
-    ctx.lineTo(-this.size, this.size * 0.9);
-    ctx.lineTo(-this.size, -this.size * 0.9);
+    ctx.moveTo(10, 0);
+    ctx.lineTo(-6, 4);
+    ctx.lineTo(-6, -4);
     ctx.closePath();
     ctx.fill();
-    // faint stroke for contrast
-    ctx.strokeStyle = 'rgba(0,0,0,0.15)';
-    ctx.lineWidth = 0.6;
-    ctx.stroke();
     ctx.restore();
   }
 }

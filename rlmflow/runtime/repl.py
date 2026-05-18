@@ -120,7 +120,7 @@ def _has_top_level_yield(tree: ast.AST) -> bool:
     else, meaning treat it as a plain Python generator yield" — is
     handled later in :meth:`REPL.advance`. Only ``WaitRequest``
     yields suspend; everything else is pumped past silently. See
-    ``docs/repl_yield_protocol.md`` for the full picture.
+    ``docs/internals.md`` for the full picture.
 
     Examples that wrap (return ``True``)::
 

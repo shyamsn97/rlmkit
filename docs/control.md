@@ -76,11 +76,9 @@ The engine reads from `graph.states`, appends new states through the
 session, and produces a fresh snapshot on every `step`. There is no
 in-memory node graph to keep in sync with disk.
 
-For the runtime contract around `yield wait(...)` and `ResumeAction`, see
-[`resume_semantics.md`](resume_semantics.md).
-
-For the proposed user-facing model around workspaces, loading, and viewers, see
-[`workspace_viewer_model.md`](workspace_viewer_model.md).
+For the runtime contract around `yield wait(...)` and `ResumeAction`,
+the full REPL/yield protocol, persistence layout, and engine
+extension surface, see [`internals.md`](internals.md).
 
 ## Custom runtime
 

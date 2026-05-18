@@ -1,6 +1,6 @@
 """REPL yield protocol — only `yield wait(...)` suspends.
 
-Covers the matrix in `docs/repl_yield_protocol.md`. The engine must:
+Covers the REPL yield protocol matrix in `docs/internals.md`. The engine must:
 
 1. Suspend (and surface ``WaitRequest.agent_ids``) only when the
    block does ``yield wait(...)`` at top level.

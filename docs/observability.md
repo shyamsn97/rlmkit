@@ -85,22 +85,10 @@ graph.edges.spawns()                           # list[Edge] — cross-agent dele
 graph.edges.flows_to()                         # list[Edge] — same-agent continuity
 ```
 
-## Workspace Persistence
-
-A workspace is the durable run. It stores per-agent state logs, context
-payloads, and the graph manifest. Reopen it directly:
-
-```python
-from rlmflow import Workspace
-
-workspace = Workspace.open_path("runs/deep_research")
-graph = workspace.load_graph()
-```
-
 ## Workspace persistence
 
-`Workspace` separates per-agent state logs, the graph manifest, and
-task payloads:
+A workspace is the durable run. It separates per-agent state logs,
+the graph manifest, and task payloads:
 
 ```text
 workspace/
@@ -119,9 +107,11 @@ workspace/
     root.child/context.txt
 ```
 
-`Workspace.load_graph()` rehydrates the persisted state as the same `Graph`
-shape the engine emits — `flows_to` edges are derived from state order,
-`spawns` edges come straight from `graph.json`.
+`Workspace.open_path(...).load_graph()` rehydrates the persisted state
+as the same `Graph` shape the engine emits — `flows_to` edges are
+derived from state order, `spawns` edges come straight from
+`graph.json`. See [`internals.md`](internals.md#persistence) for the
+full session/transcript/context layout.
 
 ## Live terminal
 

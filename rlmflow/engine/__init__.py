@@ -10,6 +10,9 @@ state of their own.
   projection ``Graph -> ActionPlan`` (:func:`act_one` / :func:`act`).
 - :mod:`~rlmflow.engine.replay` — cold-start replay-of-one for
   rebuilding a suspended generator after a fork or process restart.
+- :mod:`~rlmflow.engine.scheduler` — :class:`NodeScheduler`: pick the
+  agents that can take a step right now (pure top-down walk over a
+  :class:`~rlmflow.graph.Graph`).
 - :mod:`~rlmflow.engine.seq` — tiny pure helpers (sequence numbers,
   iteration counts, budget checks, output truncation/formatting, the
   pool factory).

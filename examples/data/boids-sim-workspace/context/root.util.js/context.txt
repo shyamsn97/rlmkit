@@ -1,0 +1,38 @@
+
+Project: Boids simulation split into files. Write files under ./output/boids-simulation/ exactly.
+
+Files to produce (each child writes its assigned file path):
+1) ./output/boids-simulation/index.html
+   - Minimal, runnable HTML page.
+   - Include <canvas id="canvas"></canvas>.
+   - Link to "styles.css" and load "script.js" as an ES module: <script type="module" src="./script.js"></script>.
+   - Provide small UI: play/pause button, slider for boid count, and FPS / count display area (can be simple).
+   - Title: "Boids Simulation".
+
+2) ./output/boids-simulation/styles.css
+   - Styles for body, canvas (full-window), and simple controls panel.
+
+3) ./output/boids-simulation/util.js
+   - Export utility functions for 2D vectors and helpers:
+     - export function vec(x,y), add, sub, mul, div, mag, normalize, limit, dist2, randRange, clamp, hueColor(h)
+   - Keep code concise and well-commented for clarity.
+
+4) ./output/boids-simulation/boid.js
+   - Export a Boid class: export class Boid { constructor(...); update(); applyForce(); edges(); align(); cohesion(); separation(); flock(boids); draw(ctx); }
+   - Implement common boids rules with tunable parameters (perception radii, weights, maxSpeed, maxForce).
+   - Color each boid using HSL; colors can vary by hue or speed for a colorful result.
+
+5) ./output/boids-simulation/script.js
+   - type=module entry module that imports {Boid} from './boid.js' and helpers from './util.js'.
+   - Create hundreds of boids (default ~400), set them moving fast.
+   - Resize canvas to window size, animate using requestAnimationFrame.
+   - Hook up UI: play/pause, boid count slider that respawns to new count, update FPS and count displays.
+   - Use efficient loop but plain O(n^2) neighbor checks are acceptable for this task.
+
+Shared invariants:
+ - All files must live only under ./output/boids-simulation/
+ - index.html must reference styles.css and script.js relative to its location.
+ - script.js must be a module and import boid.js and util.js using relative paths.
+ - util.js and boid.js must use ES module exports (export ...).
+
+Child instruction: read this CONTRACT and write the assigned file path with final content. Return exactly a short confirmation string like "WROTE <path>".

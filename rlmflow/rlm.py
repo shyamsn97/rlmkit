@@ -90,7 +90,7 @@ from rlmflow.prompts.messages import (
     TRUNCATION_SUMMARY,
 )
 from rlmflow.runtime import LocalRuntime, Runtime
-from rlmflow.scheduler import NodeScheduler
+from rlmflow.engine.scheduler import NodeScheduler
 from rlmflow.tools.builtins import make_delegate, make_done, make_wait
 from rlmflow.utils import OrphanedDelegatesError, check_yield_errors, find_code_blocks
 from rlmflow.workspace import (

@@ -42,7 +42,8 @@ whole run as one recursive type:
     `SupervisingOutput`, `ErrorOutput`, `DoneOutput`.
   - Actions: `LLMAction`, `ExecAction`, `ResumeAction`.
 
-For example, this RLM code:
+For example, an agent that delegates two children and combines their
+results writes one REPL block like this:
 
 ```python
 h1 = delegate("search", "Find evidence", context=chunk_a)
@@ -51,7 +52,41 @@ results = yield wait(h1, h2)
 done(combine(results))
 ```
 
-becomes this execution graph (one obs/action pair per step):
+`yield wait(...)` is a real Python generator suspension point. Each
+REPL block is wrapped in a synthetic generator and driven by the
+engine via `send()`:
+
+```python
+def __rlm_gen__():
+    h1 = delegate("search", "...", context=chunk_a)
+    h2 = delegate("verify", "...", context=chunk_b)
+    results = yield wait(h1, h2)   # ← suspend here
+    done(combine(results))
+```
+
+The engine's loop, roughly:
+
+```python
+out = gen.send(None)               # run until the yield
+# out is a WaitRequest([h1, h2]) → suspend the parent, run children
+results = [c.result() for c in children]
+gen.send(results)                  # resume; `results` is now the list
+```
+
+The REPL is stateful across blocks, so the next LLM turn can still
+see `h1`, `h2`, `results`. Only `yield wait(...)` is special — any
+other top-level yield is pumped through and ignored:
+
+```python
+yield wait(h)        # suspend, then resume with children's results
+yield 42             # discarded, immediately resumed
+yield handle         # discarded (forgot to wrap in wait()? no result)
+```
+
+See [`docs/internals.md`](docs/internals.md) for the full protocol.
+
+The block above becomes this execution graph (one obs/action pair
+per step):
 
 ```text
 UserQuery(root)
@@ -544,24 +579,33 @@ scaling / label-normalization flags (`--marker-mult`, `--text-mult`,
 
 
 ## Docs
-- [Blog post](docs/blog.md): the long-form pitch — why recursive
-  language models, why graphs over flat traces, full needle-in-a-haystack
+
+The top-level docs are short, user-facing guides. The deep dive lives
+in [`docs/internals.md`](docs/internals.md).
+
+- [**Internals**](docs/internals.md): deep reference — engine
+  architecture, step lifecycle (`act` → `apply_one`), the REPL `yield`
+  protocol, resume semantics, cold-start replay, persistence, and the
+  full `RLMFlow` override surface. Start here if you want to subclass
+  the engine.
+- [Blog post](docs/blog.md): long-form pitch — why recursive language
+  models, why graphs over flat traces, full needle-in-a-haystack
   walkthrough with the same exports the CLI ships.
-- [Positioning](docs/positioning.md): when to use rlmflow vs rlm-minimal,
-  ypi, LangGraph, CrewAI, AutoGen, SWE-agent, Aider — decision matrix and
-  per-framework comparisons.
-- [Observability](docs/observability.md): the `Graph` data model, state
-  fields and types, querying the graph, workspace persistence, export
-  helpers, live tree, gantt, topology exports, Gradio viewer, CLI.
-- [Control](docs/control.md): step loop, workspace resume, rewind, workspace forks,
-  `CONTEXT.read()` / slices, `delegate(name, query, context)`,
-  inline-first strategy, custom prompts, runtimes, tools.
+- [Positioning](docs/positioning.md): when to use rlmflow vs
+  rlm-minimal, ypi, LangGraph, CrewAI, AutoGen, SWE-agent, Aider.
+- [Control](docs/control.md): step loop, workspace resume, rewind,
+  forks, `CONTEXT.read()` / slices, `delegate(name, query, context)`,
+  inline-first strategy, custom tools.
+- [Observability](docs/observability.md): querying the `Graph`,
+  workspace layout, export helpers, live tree, gantt, topology
+  exports, Gradio viewer, CLI.
 - [Runtimes](docs/runtimes.md): `Runtime` protocol, shipped runtimes
   (Local / Subprocess / Docker / Modal), writing your own.
+- [Prompt customization](docs/prompt_customization.md): `PromptBuilder`
+  sections, deriving from the default prompt, full replacement.
 - [Security](docs/security.md): trust model, Docker isolation knobs,
   engine-level caps, proxied tools, approval gates.
-- [Changelog](CHANGELOG.md): release-by-release changes, including the
-  upcoming `delegate(...)` mandatory-`context` break.
+- [Changelog](CHANGELOG.md): release-by-release changes.
 
 ## References
 

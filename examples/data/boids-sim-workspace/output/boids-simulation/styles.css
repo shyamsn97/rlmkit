@@ -1,0 +1,41 @@
+/* Basic fullscreen canvas and simple control panel */
+html,body {
+  height: 100%;
+  margin: 0;
+  background: #08121a;
+  color: #eee;
+  font-family: system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+}
+#canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+#controls {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  background: rgba(0,0,0,0.35);
+  color: #fff;
+  padding: 8px 10px;
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  z-index: 10;
+}
+#controls input[type="range"] {
+  width: 220px;
+}
+button {
+  background: linear-gradient(180deg,#2d9cdb,#1b6fa0);
+  color: white;
+  border: none;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+button:active { transform: translateY(1px); }
+label { font-size: 14px; }
+#fps { margin-left: 8px; font-size: 13px; opacity: 0.95; }
