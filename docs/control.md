@@ -16,6 +16,16 @@ while not graph.finished:
 `agent.chat(messages)` is the `LLMClient` interface — same loop, last
 user message becomes the query.
 
+Each `step(graph)` advances **one observation-to-observation
+transition** for every agent that is ready to move. A single
+"reasoning turn" of an agent (call the LLM, then run the code it
+emitted) is therefore two `step()` rounds: an LLM half
+(`obs → LLMAction → LLMOutput`) and an exec half
+(`LLMOutput → ExecAction → CodeObservation`). This is the
+finest-grained reproducible step the engine exposes — see
+[`internal/node_model.md`](internal/node_model.md) for the full
+state-machine spec and worked simulations.
+
 ## Workspace Resume
 
 ```python
@@ -66,7 +76,7 @@ The engine reads from `graph.states`, appends new states through the
 session, and produces a fresh snapshot on every `step`. There is no
 in-memory node graph to keep in sync with disk.
 
-For the runtime contract around `yield wait(...)` and `ResumeNode`, see
+For the runtime contract around `yield wait(...)` and `ResumeAction`, see
 [`resume_semantics.md`](resume_semantics.md).
 
 For the proposed user-facing model around workspaces, loading, and viewers, see
@@ -108,8 +118,10 @@ agent = RLMFlow(..., prompt_builder=(
 ))
 ```
 
-Or subclass `RLMFlow` and override `build_system_prompt`, `build_messages`,
-`extract_code`, `step_observation`, `step_action`, or `delegate_for_step`.
+Or subclass `RLMFlow` and override `build_system_prompt`,
+`build_messages`, `extract_code`, or `step` (which is the public
+`act + apply_one` entry point — see
+[`internal/act_apply.md`](internal/act_apply.md)).
 
 ## Session And Context
 

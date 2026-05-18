@@ -117,7 +117,11 @@ def test_supervising_state_lists_waiting_children():
         config=RLMConfig(max_depth=2),
     )
 
-    graph = agent.step(agent.start("control-supervise"))
+    # Two ``step``s: the LLM half then the exec half (which yields,
+    # producing the SupervisingOutput).
+    graph = agent.start("control-supervise")
+    graph = agent.step(graph)
+    graph = agent.step(graph)
     assert is_supervising(graph.current())
     assert graph.current().waiting_on == ["root.child"]
 

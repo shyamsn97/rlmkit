@@ -32,21 +32,42 @@ except ImportError:  # pragma: no cover - optional dep
     gradio = None  # type: ignore[assignment]
 
 
-# An ActionNode is "bookkeeping" when its successor in the same agent
-# is one of these observations — the observation already represents
-# the step. Used by both the figure-rendering hide rule and by the
-# viz-frame deduplication helper.
+# An ActionNode is "bookkeeping" when its successor in the same
+# agent is one of these observations — the observation already
+# represents the step, so the action is hidden in figures and in
+# deduper sigs.
 #
-# ``exec_action`` and ``resume_action`` deliberately omit
-# ``done_output`` and ``error_output``: those are *outcomes* of the
-# action that are worth their own visible node, so the figure reads
-# as ``... → exec → done`` or ``... → resume → errored`` instead of
-# the action being silently absorbed.
+# Engine writes ``(action, observation)`` atomically per
+# ``apply_one`` call (one obs-to-obs transition), so the action
+# is always paired with its observation in any persisted snapshot.
+# The viewer collapses each pair into the single observation
+# node, except for the meaningful exec/resume *outcomes* —
+# ``done_output`` and ``error_output`` keep their predecessor
+# action visible so the figure reads as ``... → exec → done`` or
+# ``... → resume → errored``.
 HIDDEN_ACTION_PAIRS: dict[str, set[str]] = {
     "llm_action": {"llm_output"},
     "exec_action": {"exec_output", "supervising_output"},
     "resume_action": {"exec_output", "supervising_output"},
 }
+
+# Vertical multiplier applied to the depth-based Y coordinate when laying
+# out the graph figure. The figure no longer renders per-node state
+# labels (``llm`` / ``exec`` / ``done`` / …) because the legend already
+# explains them via colour and symbol — only agent-name annotations
+# remain. With state labels gone, rows can sit closer together; 1.4
+# leaves comfortable space for the agent annotations above each
+# agent-entry marker.
+_Y_SPACING = 1.4
+
+# Distinct color for the "agent name" annotation attached to the first
+# visible node of each agent.
+_AGENT_LABEL_COLOR = "#3fb950"
+
+# Pixel offset between an agent-entry marker and its annotation label.
+# Plotly annotations apply ``yshift`` in screen pixels regardless of the
+# figure's data-coordinate range, so this is a stable visual gap.
+_AGENT_LABEL_YSHIFT = 10
 
 
 def is_bookkeeping(state: Node, successor: Node | None) -> bool:
@@ -345,21 +366,14 @@ def _state_hover_text(state: Node, agent: Graph) -> str:
     return "<br>".join(rows)
 
 
-def _state_display_label(
-    state: Node,
-    agent: Graph,
-    *,
-    repeated_agent: bool,
-    is_agent_entry: bool,
-    limit: int = 22,
-) -> str:
-    label = agent.agent_id or state.id[:8]
+def _agent_display_label(agent: Graph, *, limit: int = 22) -> str:
+    """Short label for an agent's column. Used only for agent-entry
+    annotations; the figure does not render any per-state labels."""
+    label = agent.agent_id or ""
     if label.startswith("root."):
         label = label[len("root.") :]
     if agent.depth >= 2 and "." in label:
         label = label.rsplit(".", 1)[-1]
-    if repeated_agent and not is_agent_entry:
-        label = _display_kind(state)
     if len(label) > limit:
         label = label[: limit - 1] + "…"
     return label
@@ -488,7 +502,7 @@ def _build_graph_figure(
             return
         seen.add(eid)
         center_x = (left + right) / 2
-        pos[eid] = (center_x, -float(depth))
+        pos[eid] = (center_x, -float(depth) * _Y_SPACING)
         kids = all_children(eid)
         if not kids:
             return
@@ -571,43 +585,16 @@ def _build_graph_figure(
     agent_first_id: dict[str, str] = {}
     for node in ordered:
         agent_first_id.setdefault(node.agent_id, node.id)
-    labels = [
-        _state_display_label(
-            n,
-            graph.agents[n.agent_id],
-            repeated_agent=agent_counts.get(n.agent_id, 0) > 1,
-            is_agent_entry=agent_first_id.get(n.agent_id) == n.id,
-        )
-        for n in ordered
-    ]
+    is_agent_entry = [agent_first_id.get(n.agent_id) == n.id for n in ordered]
     colors = [_NODE_COLORS.get(_display_kind(n), "#8b949e") for n in ordered]
     symbols = [_NODE_SYMBOLS.get(_display_kind(n), "circle") for n in ordered]
     sizes = [14 for _ in ordered]
     hover = [_state_hover_text(n, graph.agents[n.agent_id]) for n in ordered]
 
-    def text_position(node: Node) -> str:
-        parent = parent_of.get(node.id)
-        siblings = all_children(parent) if parent is not None else []
-        is_leaf = not all_children(node.id)
-        if len(siblings) > 1 and node.id in siblings and is_leaf:
-            midpoint = (len(siblings) - 1) / 2
-            idx = siblings.index(node.id)
-            return "bottom left" if idx < midpoint else "bottom right"
-        return (
-            "top center" if graph.agents[node.agent_id].depth % 2 else "bottom center"
-        )
-
     node_trace = go.Scatter(
         x=node_x,
         y=node_y,
-        mode="markers+text",
-        text=labels,
-        textposition=[text_position(n) for n in ordered],
-        textfont={
-            "color": "#c9d1d9",
-            "family": "ui-monospace, SFMono-Regular, Menlo, monospace",
-            "size": 10,
-        },
+        mode="markers",
         hovertext=hover,
         hoverinfo="text",
         customdata=[n.id for n in ordered],
@@ -622,6 +609,33 @@ def _build_graph_figure(
     )
 
     fig = go.Figure(data=[edge_trace, node_trace])
+
+    # Agent-name headers are emitted as Plotly annotations rather than
+    # part of the marker text so we can offset them by a fixed pixel
+    # amount (``yshift``) regardless of zoom or data range. The label
+    # always floats a stable pixel distance above each agent's first
+    # marker — never overlapping the marker, never colliding with the
+    # parent's terminal / supervising marker that may sit directly
+    # above it. State kinds are conveyed by the legend (color +
+    # symbol), so no per-state text is rendered.
+    for node, entry in zip(ordered, is_agent_entry):
+        if not entry:
+            continue
+        x, y = pos[node.id]
+        fig.add_annotation(
+            x=x,
+            y=y,
+            text=_agent_display_label(graph.agents[node.agent_id]),
+            showarrow=False,
+            xanchor="center",
+            yanchor="bottom",
+            yshift=_AGENT_LABEL_YSHIFT,
+            font={
+                "color": _AGENT_LABEL_COLOR,
+                "family": "ui-monospace, SFMono-Regular, Menlo, monospace",
+                "size": 11,
+            },
+        )
     visible_kinds = {_display_kind(n) for n in ordered}
     for ntype, color in _NODE_COLORS.items():
         if ntype not in visible_kinds:
@@ -731,6 +745,12 @@ def _scale_figure_elements(
         layout.legend.font.size = layout.legend.font.size * text_mult
     if layout.font and layout.font.size:
         layout.font.size = layout.font.size * text_mult
+    # Agent-name labels live in annotations now, so ``text_mult`` has
+    # to scale those too.
+    for ann in getattr(layout, "annotations", ()) or ():
+        font = getattr(ann, "font", None)
+        if font is not None and getattr(font, "size", None) is not None:
+            font.size = font.size * text_mult
 
 
 def _normalize_label_positions(fig: Any) -> None:

@@ -1,8 +1,8 @@
 {
   "agent_id": "root",
-  "latest_node_id": "n_990a2df89784",
+  "latest_node_id": "n_fba165b22234",
   "seq": 10,
   "type": "done_output",
   "terminal": true,
-  "result": "WROTE and verified files in output/boids-simulation/: index.html, style.css, utils.js, boid.js, flock.js, main.js"
+  "result": "Wrote boids simulation to ./output/boids-simulation/ \u2014 files: index.html, style.css, src/utils.js, src/boid.js, src/main.js. Open ./output/boids-simulation/index.html in a browser to run. If file:// causes issues, serve the folder with a static server."
 }

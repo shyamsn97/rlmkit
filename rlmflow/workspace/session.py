@@ -12,6 +12,38 @@ Layout::
       session/<aid>/agent.json                  # per-agent invariants (one-shot)
       session/<aid>/session.jsonl               # state log (append-only)
       session/<aid>/latest.json                 # latest-state summary
+      session/<aid>/transcript.json             # exact LLM I/O, flat & merged
+
+``transcript.json`` is a *single* document per agent that grows
+turn-by-turn. ``messages`` is the flat conversation as the LLM
+saw it across all turns combined — every turn appends only the
+new entries (the user nudge, if any, plus the assistant reply).
+``metadata`` is a parallel list with one entry per message;
+all entries are ``{}`` except each assistant message, which
+carries the call-specific fields::
+
+    {
+      "agent_id": <aid>,
+      "messages": [
+        {"role": "system",    "content": "..."},
+        {"role": "user",      "content": "..."},
+        {"role": "assistant", "content": "..."},
+        {"role": "user",      "content": "..."},
+        {"role": "assistant", "content": "..."}
+      ],
+      "metadata": [
+        {}, {},
+        {ts, model, force_final, input_tokens, output_tokens,
+         elapsed_s, after_node_id, after_seq},
+        {},
+        {ts, model, force_final, input_tokens, output_tokens,
+         elapsed_s, after_node_id, after_seq}
+      ]
+    }
+
+The transcript is the ground truth for "what did the LLM
+actually see?" — useful for debugging prompt issues, replaying
+a turn under a different model, or auditing context bloat.
 """
 
 from __future__ import annotations
@@ -61,6 +93,12 @@ class Session(ABC):
     def write_state(self, state: Node) -> None: ...
 
     @abstractmethod
+    def read_transcript(self, agent_id: str) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def write_transcript(self, agent_id: str, transcript: dict[str, Any]) -> None: ...
+
+    @abstractmethod
     def load_graph(self) -> Graph: ...
 
     @abstractmethod
@@ -89,6 +127,16 @@ class FileSession(Session):
         path = f"session/{_safe_name(state.agent_id)}/session.jsonl"
         self.store.append_jsonl(path, state)
         self._write_latest(state)
+
+    def read_transcript(self, agent_id: str) -> dict[str, Any] | None:
+        path = f"session/{_safe_name(agent_id)}/transcript.json"
+        if not self.store.exists(path):
+            return None
+        return self.store.read_json(path)
+
+    def write_transcript(self, agent_id: str, transcript: dict[str, Any]) -> None:
+        path = f"session/{_safe_name(agent_id)}/transcript.json"
+        self.store.write_json(path, transcript)
 
     # ── reads ────────────────────────────────────────────────────────
 
@@ -163,6 +211,7 @@ class InMemorySession(Session):
     def __init__(self) -> None:
         self.agent_dicts: dict[str, dict[str, Any]] = {}
         self.agent_states: dict[str, list[Node]] = {}
+        self.agent_transcripts: dict[str, dict[str, Any]] = {}
         self.root_agent_id: str = "root"
 
     def write_agent(self, graph: Graph) -> None:
@@ -170,9 +219,21 @@ class InMemorySession(Session):
             self.root_agent_id = graph.agent_id
         self.agent_dicts[graph.agent_id] = graph.meta_dict()
         self.agent_states.setdefault(graph.agent_id, [])
+        self.agent_transcripts.setdefault(graph.agent_id, {})
 
     def write_state(self, state: Node) -> None:
         self.agent_states.setdefault(state.agent_id, []).append(state)
+
+    def read_transcript(self, agent_id: str) -> dict[str, Any] | None:
+        existing = self.agent_transcripts.get(agent_id)
+        if not existing:
+            return None
+        return {k: list(v) if isinstance(v, list) else v for k, v in existing.items()}
+
+    def write_transcript(self, agent_id: str, transcript: dict[str, Any]) -> None:
+        self.agent_transcripts[agent_id] = {
+            k: list(v) if isinstance(v, list) else v for k, v in transcript.items()
+        }
 
     def load_graph(self) -> Graph:
         return _build_graph(
@@ -186,6 +247,10 @@ class InMemorySession(Session):
         out = InMemorySession()
         out.agent_dicts = {aid: dict(d) for aid, d in self.agent_dicts.items()}
         out.agent_states = {aid: list(s) for aid, s in self.agent_states.items()}
+        out.agent_transcripts = {
+            aid: {k: list(v) if isinstance(v, list) else v for k, v in t.items()}
+            for aid, t in self.agent_transcripts.items()
+        }
         out.root_agent_id = self.root_agent_id
         return out
 

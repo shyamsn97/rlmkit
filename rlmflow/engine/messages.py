@@ -7,13 +7,18 @@ Two responsibilities:
 2. :func:`build_system_prompt` (and helpers) — render the system
    prompt from the configured prompt builder, including the tools
    section and the depth/status section.
+
+Every function takes only the concrete dependencies it actually
+reads (config fields, the prompt builder, the runtime root for
+tool defs, etc.) — no engine class, nothing is imported from
+:mod:`rlmflow.rlm`.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from rlmflow.engine.seq import iteration_count
+from rlmflow.engine.config import RLMConfig
 from rlmflow.graph import (
     Graph,
     is_errored,
@@ -32,28 +37,36 @@ from rlmflow.prompts.messages import (
     TRUNCATION_SESSION_HINT,
     TRUNCATION_SUMMARY,
 )
-
-if TYPE_CHECKING:
-    from rlmflow.rlm import RLMFlow
+from rlmflow.runtime import Runtime
+from rlmflow.workspace import Context
 
 
 def build_messages(
-    engine: "RLMFlow",
     graph: Graph,
     *,
     force_final: bool = False,
+    context: Context,
+    config: RLMConfig,
+    runtime: Runtime,
+    llm_clients: dict[str, Any],
+    model_descriptions: dict[str, str],
+    prompt_builder: Any,
 ) -> list[dict[str, str]]:
     """Render ``graph``'s trajectory as a chat-message list for the LLM."""
     system_content = graph.system_prompt or build_system_prompt_for(
-        engine,
         query=graph.query,
         agent_id=graph.agent_id,
         depth=graph.depth,
+        config=config,
+        runtime=runtime,
+        llm_clients=llm_clients,
+        model_descriptions=model_descriptions,
+        prompt_builder=prompt_builder,
     )
     system = {"role": "system", "content": system_content}
 
     try:
-        payload = engine.context.read("context", agent_id=graph.agent_id)
+        payload = context.read("context", agent_id=graph.agent_id)
     except KeyError:
         payload = ""
     context_hint = CONTEXT_HINT_PRESENT if payload else CONTEXT_HINT_ABSENT
@@ -71,7 +84,7 @@ def build_messages(
         # SupervisingOutput, DoneOutput, and every ActionNode are
         # engine bookkeeping — not part of the LLM projection.
 
-    cap = engine.config.max_messages
+    cap = config.max_messages
     if cap and len(msgs) > cap:
         msgs = [
             {
@@ -85,9 +98,17 @@ def build_messages(
             }
         ] + msgs[-cap:]
 
+    # Gate on LLMOutput count — not LLMAction count — so we don't
+    # double up the user prompt on the very first turn. The
+    # transition writes the paired ``LLMAction`` *before* calling
+    # ``build_messages``, so the action for the in-progress turn is
+    # already in ``graph.states`` here. ``LLMOutput``s only exist
+    # for *completed* prior turns, which is what "should we nudge
+    # with CONTINUE_ACTION?" actually wants to know.
+    has_prior_turn = any(is_llm_output(s) for s in graph.states)
     if force_final:
         msgs.append({"role": "user", "content": FINAL_ANSWER_ACTION})
-    elif iteration_count(graph) > 0:
+    elif has_prior_turn:
         msgs.append(
             {
                 "role": "user",
@@ -103,80 +124,111 @@ def build_messages(
 
 
 def build_system_prompt_for(
-    engine: "RLMFlow",
     *,
     query: str,
     agent_id: str,
     depth: int,
-    config: dict[str, Any] | None = None,
+    config: RLMConfig,
+    runtime: Runtime,
+    llm_clients: dict[str, Any],
+    model_descriptions: dict[str, str],
+    prompt_builder: Any,
+    sub_config: dict[str, Any] | None = None,
 ) -> str:
+    """Render the system prompt for a (possibly not-yet-instantiated) agent."""
     stub = Graph(
         agent_id=agent_id,
         depth=depth,
         query=query,
-        config=config or node_config(engine),
+        config=sub_config or node_config(config),
     )
-    return build_system_prompt(engine, stub)
+    return build_system_prompt(
+        stub,
+        config=config,
+        runtime=runtime,
+        llm_clients=llm_clients,
+        model_descriptions=model_descriptions,
+        prompt_builder=prompt_builder,
+    )
 
 
-def build_system_prompt(engine: "RLMFlow", graph: Graph) -> str:
+def build_system_prompt(
+    graph: Graph,
+    *,
+    config: RLMConfig,
+    runtime: Runtime,
+    llm_clients: dict[str, Any],
+    model_descriptions: dict[str, str],
+    prompt_builder: Any,
+) -> str:
     """Render the system prompt for the agent rooted in ``graph``."""
-    if engine.config.system_prompt:
-        return engine.config.system_prompt
-    return engine.prompt_builder.build(
-        tools=build_tools_section(engine),
-        status=build_status_section(engine, graph),
+    if config.system_prompt:
+        return config.system_prompt
+    return prompt_builder.build(
+        tools=build_tools_section(
+            runtime=runtime,
+            max_depth=config.max_depth,
+            llm_clients=llm_clients,
+            model_descriptions=model_descriptions,
+        ),
+        status=build_status_section(graph, max_depth=config.max_depth),
     )
 
 
-def build_tools_section(engine: "RLMFlow") -> str:
-    baseline = engine.config.max_depth == 0
-    tool_defs = engine.runtime.get_tool_defs()
+def build_tools_section(
+    *,
+    runtime: Runtime,
+    max_depth: int,
+    llm_clients: dict[str, Any],
+    model_descriptions: dict[str, str],
+) -> str:
+    baseline = max_depth == 0
+    tool_defs = runtime.get_tool_defs()
     if baseline:
         tool_defs = [t for t in tool_defs if t.name not in ("delegate", "wait")]
     lines = [
         f"- `{tool_def.name}{tool_def.signature}`: {tool_def.description}"
         for tool_def in tool_defs
     ]
-    if len(engine.llm_clients) > 1 and not baseline:
+    if len(llm_clients) > 1 and not baseline:
         lines.append("\nAvailable models for `delegate(model=...)`:")
-        for key in sorted(engine.llm_clients):
-            desc = engine.model_descriptions.get(key)
+        for key in sorted(llm_clients):
+            desc = model_descriptions.get(key)
             lines.append(f"- `{key}`: {desc}" if desc else f"- `{key}`")
-    modules = engine.runtime.available_modules()
+    modules = runtime.available_modules()
     if modules:
         lines.append(f"\nPre-imported: `{'`, `'.join(modules)}`")
     return "\n".join(lines)
 
 
-def build_status_section(engine: "RLMFlow", graph: Graph) -> str:
-    max_depth = graph.config.get("max_depth", engine.config.max_depth)
-    if max_depth == 0:
+def build_status_section(graph: Graph, *, max_depth: int) -> str:
+    effective_max = graph.config.get("max_depth", max_depth)
+    if effective_max == 0:
         return (
             "Baseline mode: no sub-agents available. Do all work directly "
             "in this REPL."
         )
-    note = f"You are at recursion depth **{graph.depth}** of max **{max_depth}**."
+    note = f"You are at recursion depth **{graph.depth}** of max **{effective_max}**."
     if graph.depth == 0:
         note += STATUS_DEPTH_ROOT
-    elif graph.depth >= max_depth - 1:
+    elif graph.depth >= effective_max - 1:
         note += STATUS_DEPTH_NEAR_MAX
     elif graph.depth > 0:
         note += STATUS_DEPTH_MID
     return note
 
 
-def node_config(engine: "RLMFlow") -> dict[str, Any]:
+def node_config(config: RLMConfig) -> dict[str, Any]:
     """The default config dict written onto every fresh :class:`Graph`."""
     return {
         "model": "default",
-        "max_depth": engine.config.max_depth,
-        "max_iterations": engine.config.max_iterations,
-        "max_output_length": engine.config.max_output_length,
-        "max_messages": engine.config.max_messages,
-        "child_max_iterations": engine.config.child_max_iterations,
-        "single_block": engine.config.single_block,
-        "max_budget": engine.config.max_budget,
+        "max_depth": config.max_depth,
+        "max_iterations": config.max_iterations,
+        "max_output_length": config.max_output_length,
+        "max_messages": config.max_messages,
+        "child_max_iterations": config.child_max_iterations,
+        "single_block": config.single_block,
+        "max_budget": config.max_budget,
     }
 
 

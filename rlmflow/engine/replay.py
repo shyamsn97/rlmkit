@@ -9,13 +9,11 @@ code with ``delegate`` in *replay mode* (returning existing child
 handles instead of spawning new ones) so the generator pauses again
 at the same yield. The regular resume path then takes over.
 
-Functions here all take ``engine`` as their first arg so the engine
-class itself stays slim.
+All public functions take only the explicit dependencies they
+need; nothing in this module imports :class:`~rlmflow.rlm.RLMFlow`.
 """
 
 from __future__ import annotations
-
-from typing import TYPE_CHECKING
 
 from rlmflow.graph import (
     Graph,
@@ -28,9 +26,6 @@ from rlmflow.graph import (
     is_supervising,
 )
 from rlmflow.runtime import Runtime
-
-if TYPE_CHECKING:
-    from rlmflow.rlm import RLMFlow
 
 
 def can_resume(graph: Graph, supervising: SupervisingOutput) -> bool:
@@ -104,7 +99,6 @@ def supervise_history(
 
 
 def replay_to_yield(
-    engine: "RLMFlow",
     graph: Graph,
     target: SupervisingOutput,
     runtime: Runtime,

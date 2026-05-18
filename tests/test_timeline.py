@@ -1,8 +1,10 @@
 """Tests for :func:`rlmflow.graph.retrace_steps` and ``Workspace.load_steps``.
 
-Focus: each successive snapshot adds exactly one state, dependency
-order is respected, and concurrent siblings are interleaved
-round-robin (not drained one-at-a-time).
+Focus: each successive snapshot reflects one round of ``engine.step()``
+(i.e. each ready agent advances by one obs-to-obs ``apply_one`` —
+1 state on spawn (``UserQuery``) or 2 states per LLM/exec/resume
+half-turn ``(action, observation)`` pair), dependency order is
+respected, and concurrent siblings advance in lockstep.
 """
 
 from __future__ import annotations
@@ -180,8 +182,11 @@ def test_retrace_steps_resume_waits_for_all_children(tmp_path):
 
 def test_retrace_steps_advances_concurrent_siblings_in_lockstep(tmp_path):
     """Parallel-tick semantics: while all three siblings are alive,
-    every tick advances all three by exactly one state. No tick should
-    advance a strict subset of the still-running siblings."""
+    every tick advances all three by the *same* number of states
+    (because they're all at the same kind of state-machine position).
+    No tick should advance a strict subset of the still-running
+    siblings, and no tick should advance two siblings by different
+    amounts."""
     _, graph = _final_parallel(tmp_path)
     steps = retrace_steps(graph)
 
@@ -201,11 +206,16 @@ def test_retrace_steps_advances_concurrent_siblings_in_lockstep(tmp_path):
             alive = [
                 aid for aid in child_ids if prev[aid] < final_counts[aid]
             ]
-            for aid in alive:
-                assert delta[aid] == 1, (
-                    f"sibling {aid!r} advanced by {delta[aid]} while siblings "
-                    f"{alive!r} were all still alive"
-                )
+            alive_deltas = {aid: delta[aid] for aid in alive}
+            # Every alive sibling advanced the same amount (1 / 4 / 2).
+            assert len(set(alive_deltas.values())) == 1, (
+                f"siblings advanced by uneven amounts in one tick: "
+                f"{alive_deltas!r}"
+            )
+            assert all(d > 0 for d in alive_deltas.values()), (
+                f"alive sibling stalled while another advanced: "
+                f"{alive_deltas!r}"
+            )
             parallel_ticks += 1
         prev = cur
 
@@ -257,8 +267,8 @@ def test_all_siblings_user_query_appears_in_one_tick(tmp_path):
 def test_critical_path_equals_longest_child_not_sum(tmp_path):
     """Under unbounded parallelism, the number of ticks between a
     parent's ``supervising_output`` and its resume equals the LONGEST
-    child's state count — not the sum across all children. That's the
-    whole point of full concurrency."""
+    child's tick-count (steps the child took) — not the sum across
+    all children. That's the whole point of full concurrency."""
     _, graph = _final_parallel(tmp_path)
     ticks = _execution_ticks(graph)
 
@@ -278,16 +288,25 @@ def test_critical_path_equals_longest_child_not_sum(tmp_path):
     )
 
     intervening = resume_tick_idx - sup_tick_idx - 1
-    longest = max(len(c.states) for c in graph.children.values())
-    summed = sum(len(c.states) for c in graph.children.values())
+    # Tick-count per child = number of distinct ticks the child
+    # appears in (each tick may emit multiple states for one child
+    # under the atomic-step model, so dedupe per tick).
+    ticks_per_child = {aid: 0 for aid in graph.children}
+    for tick in ticks[sup_tick_idx + 1 : resume_tick_idx]:
+        agents_this_tick = {aid for aid, _ in tick}
+        for aid in agents_this_tick:
+            if aid in ticks_per_child:
+                ticks_per_child[aid] += 1
+    longest = max(ticks_per_child.values())
+    summed = sum(ticks_per_child.values())
 
     assert intervening == longest, (
         f"expected critical path {longest} ticks (longest child); "
         f"got {intervening}"
     )
     assert intervening < summed, (
-        "critical path matched the SUM of child lengths — children "
-        "are running sequentially, not in parallel"
+        "critical path matched the SUM of child tick-counts — "
+        "children are running sequentially, not in parallel"
     )
 
 
@@ -302,13 +321,19 @@ def test_no_idle_ticks_when_agents_are_ready(tmp_path):
 
 
 def test_mismatched_sibling_lengths_run_in_parallel():
-    """Hand-construct a graph where children have very different state
-    counts (1 vs 5) and confirm the parent doesn't "wait" for the long
-    one before the short one starts — both spawn on the same tick, the
-    short one finishes early, the long one ticks alone afterwards."""
+    """Hand-construct a graph where children take a different number
+    of ``apply_one`` turns and confirm the parent doesn't "wait" for
+    the long one before the short one starts — both spawn on the same
+    tick, the short one finishes early, the long one ticks alone
+    afterwards.
+
+    Short = UserQuery + one full turn (5 states, 2 ticks).
+    Long  = UserQuery + two full turns (9 states, 3 ticks).
+    """
     from rlmflow import (
         DoneOutput,
         ExecAction,
+        ExecOutput,
         Graph as G,
         LLMAction,
         LLMOutput,
@@ -328,19 +353,16 @@ def test_mismatched_sibling_lengths_run_in_parallel():
     long = G(agent_id="root.long", depth=1)
     long.states = [
         UserQuery(agent_id="root.long", seq=0, content="task long"),
+        # Turn 1 — produces an ExecOutput, agent loops.
         LLMAction(agent_id="root.long", seq=1, model="x"),
         LLMOutput(agent_id="root.long", seq=2, code="x=1"),
         ExecAction(agent_id="root.long", seq=3, code="x=1"),
-        # Imagine an exec_output here, then more LLM rounds — we stub
-        # 5 more states so total = 10.
-        DoneOutput(agent_id="root.long", seq=4, result="lo1"),
-    ]
-    # Stretch ``long`` to 10 states by re-using the LLM/Exec cycle.
-    long.states = long.states[:4] + [
-        LLMAction(agent_id="root.long", seq=4, model="x"),
-        LLMOutput(agent_id="root.long", seq=5, code="done('lo')"),
-        ExecAction(agent_id="root.long", seq=6, code="done('lo')"),
-        DoneOutput(agent_id="root.long", seq=7, result="lo"),
+        ExecOutput(agent_id="root.long", seq=4, output="ok"),
+        # Turn 2 — closes with done().
+        LLMAction(agent_id="root.long", seq=5, model="x"),
+        LLMOutput(agent_id="root.long", seq=6, code="done('lo')"),
+        ExecAction(agent_id="root.long", seq=7, code="done('lo')"),
+        DoneOutput(agent_id="root.long", seq=8, result="lo"),
     ]
 
     root = G(agent_id="root", depth=0)
@@ -371,26 +393,28 @@ def test_mismatched_sibling_lengths_run_in_parallel():
     spawned = {aid for aid, _ in spawn_tick}
     assert spawned == {"root.short", "root.long"}
 
-    # Up through the short child's terminal (state 4 = 5 states), it
-    # advances in lockstep with long. After short finishes, long
-    # continues solo for the remaining 3 states.
-    short_len = len(short.states)
-    long_len = len(long.states)
-    assert short_len == 5 and long_len == 8
-
-    # Critical path between supervising and the next root state is
-    # max(short, long) = 8.
-    # Resume tick: first root state with seq > 4. None exist here
-    # because we didn't model the resume — but we can still verify the
-    # tick count between sup_tick and the end is exactly long_len.
+    # Tick-counts per child under the action-split model:
+    #   short = UQ + dispatch + done                     = 3 ticks
+    #   long  = UQ + dispatch + result + dispatch + done = 5 ticks
     post_sup_ticks = ticks[sup_tick + 1 :]
-    assert len(post_sup_ticks) == long_len
+    assert len(post_sup_ticks) == 5, (
+        f"expected 5 post-supervising ticks (= longest child); "
+        f"got {len(post_sup_ticks)}"
+    )
 
-    # First 5 of those ticks have BOTH children advancing; remaining 3
-    # have only ``long`` advancing.
+    short_ticks = sum(
+        1 for tick in post_sup_ticks if any(aid == "root.short" for aid, _ in tick)
+    )
+    long_ticks = sum(
+        1 for tick in post_sup_ticks if any(aid == "root.long" for aid, _ in tick)
+    )
+    assert short_ticks == 3 and long_ticks == 5
+
+    # Ticks 0–1 have BOTH children advancing in lockstep; tick 2 is
+    # long-only (short already terminal).
     for i, tick in enumerate(post_sup_ticks):
         agents_in_tick = {aid for aid, _ in tick}
-        if i < short_len:
+        if i < short_ticks:
             assert agents_in_tick == {"root.short", "root.long"}, (
                 f"tick {i} should have both children advancing, got {agents_in_tick}"
             )

@@ -33,8 +33,14 @@ whole run as one recursive type:
   and a `children: dict[str, Graph]` of sub-agents. Cross-agent
   navigation is `graph[other_aid]`; subtree views are `graph.agents`,
   `graph.nodes`, `graph.edges`.
-- **`Node`** — one immutable state in an agent's trajectory (query, action,
-  observation, supervising, resume, result, error).
+- **`Node`** — one immutable state in an agent's trajectory. The
+  trajectory is a strict alternation of **observations** (inputs the
+  system received) and **actions** (work the system did). Nine leaf
+  types under four base classes — see
+  [`docs/internal/node_model.md`](docs/internal/node_model.md):
+  - Observations: `UserQuery`, `LLMOutput`, `ExecOutput`,
+    `SupervisingOutput`, `ErrorOutput`, `DoneOutput`.
+  - Actions: `LLMAction`, `ExecAction`, `ResumeAction`.
 
 For example, this RLM code:
 
@@ -45,18 +51,17 @@ results = yield wait(h1, h2)
 done(combine(results))
 ```
 
-becomes this execution graph:
+becomes this execution graph (one obs/action pair per step):
 
 ```text
-Query(root)
-  -> Action(root: delegate search + verify)
-  -> Supervising(root: waiting on search, verify)
-      -> Query(root.search)
-      -> Result(root.search)
-      -> Query(root.verify)
-      -> Result(root.verify)
-  -> Resume(root: parent resumed after waiting)
-  -> Result(root)
+UserQuery(root)
+  -> LLMAction -> LLMOutput(code="delegate(search) + delegate(verify); wait(...)")
+  -> ExecAction -> SupervisingOutput(waiting_on=[root.search, root.verify])
+      -> UserQuery(root.search)  -> ... -> DoneOutput(root.search)
+      -> UserQuery(root.verify)  -> ... -> DoneOutput(root.verify)
+  -> ResumeAction -> ExecOutput(resumed_from=[root.search, root.verify])
+  -> LLMAction -> LLMOutput(code="done(combine(...))")
+  -> ExecAction -> DoneOutput(root)
 ```
 
 ## Install
@@ -164,17 +169,21 @@ root [supervising] {default}
 └── root.scanner_db   [result] {fast} -> No issues found
 ```
 
-Every transition follows the same shape:
+Every transition follows the same obs → action → obs shape:
 
 ```text
-Observation -> LLM -> Action -> Runtime -> Observation     (REPL output)
-                              -> done()  -> Result          (terminal answer)
-                              -> wait()  -> Supervising     (waiting on children)
-Supervising -> children done -> Resume   -> LLM  -> ...
+LLMOutput  -> ExecAction -> ExecOutput          (REPL output, normal continuation)
+                         -> DoneOutput          (code called done())
+                         -> ErrorOutput         (code raised / no code block)
+                         -> SupervisingOutput   (code yielded — waiting on children)
+SupervisingOutput -> ResumeAction -> ExecOutput / Done / Error / Supervising
+                                                (children settled — supervisor unpaused)
+ExecOutput -> LLMAction -> LLMOutput            (back to the LLM for the next turn)
 ```
 
-`Observation`, `Action`, `Supervising`, `Resume`, and `Result` are all
-typed Pydantic states. The graph is queryable in plain Python:
+Action nodes carry the work the engine did; observation nodes carry
+what was returned. Every action is followed by exactly one
+observation. The graph is queryable in plain Python:
 
 ```python
 graph.tree()                                  # ASCII render
@@ -182,10 +191,11 @@ graph["root.scanner_api"]                     # sub-Graph rooted at that agent /
 graph.agents["root.scanner_api"].states       # state trajectory for one agent
 graph.children                                # list[Graph] for child agents
 graph.nodes.find("n_abc...")                  # bare Node lookup by id
-graph.nodes.errors()                          # every ErrorNode across agents
-graph.nodes.results()                         # every ResultNode across agents
-graph.nodes.where(type="action", agent_id="root")  # kwargs match Node attrs
-graph.nodes.where(lambda n: n.type == "action")    # or pass a predicate
+graph.nodes.errors()                          # every ErrorOutput across agents
+graph.nodes.results()                         # every DoneOutput across agents
+graph.nodes.supervising()                     # every SupervisingOutput across agents
+graph.nodes.where(type="llm_output", agent_id="root")  # kwargs match Node attrs
+graph.nodes.where(lambda n: n.type == "exec_output")    # or pass a predicate
 graph.to_dict()                               # full JSON-serializable payload
 ```
 
@@ -270,7 +280,7 @@ tree · ascii-boxes  # text trees
 gantt-html          # standalone HTML swimlane
 report-md           # full Markdown summary (tree + cost + result + errors)
 code-log            # every code block paired with its observation
-error-summary       # ErrorNode counts grouped by kind
+error-summary       # ErrorOutput counts grouped by kind
 tokens              # one-line ASCII sparkline of cumulative tokens
 html                # self-contained interactive stepper, one slide per snapshot
 image               # single PNG/SVG/PDF of the topology snapshot
@@ -315,7 +325,7 @@ from rlmflow.utils.viz import (
 from rlmflow.utils.tracing import json_logs
 
 print(token_sparkline(graphs))          # ▁▂▅█▂   15820 tok over 7 steps
-print(error_summary(graph))             # ErrorNode counts grouped by kind
+print(error_summary(graph))             # ErrorOutput counts grouped by kind
 print(message_stream("root.boid_js", graph))     # rendered transcript for one agent
 print(report_md(graphs, title="run"))   # full Markdown report
 gantt_html(graphs, "run.html")          # standalone HTML swimlane

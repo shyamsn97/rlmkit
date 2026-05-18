@@ -12,6 +12,7 @@ import ast
 import inspect
 import os
 import shutil
+import threading
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +24,20 @@ from rlmflow.runtime.repl import deserialize, serialize
 from rlmflow.tools import get_tool_metadata
 from rlmflow.tools import tool as tool_decorator
 from rlmflow.tools.builtins import DoneSignal
+
+# Process-global lock guarding ``os.chdir`` in :meth:`Runtime._in_workspace`.
+#
+# ``os.chdir`` mutates a process-wide piece of state. With more than one
+# runtime active at a time (e.g. ``max_concurrency > 1`` driving several
+# child agents in parallel), naive try/finally chdir is racy: thread A
+# captures ``prev = getcwd()`` and chdirs into the workspace; thread B
+# then captures ``prev = workspace`` (because A has already chdir'd) and
+# also chdirs into the workspace; A's finally restores the original cwd;
+# B's finally restores… the workspace. The host process is now stuck on
+# the workspace cwd. Serializing the chdir + body with this lock prevents
+# the interleaving. The body is short (file I/O or one REPL ``run``
+# message) so the perf impact is negligible in practice.
+_CWD_LOCK = threading.Lock()
 
 DEFAULT_MODULES: list[str] = [
     "re",
@@ -145,13 +160,20 @@ class Runtime(ABC):
 
     @contextmanager
     def _in_workspace(self):
-        """Temporarily chdir into ``self.workspace`` for a proxy call."""
-        prev = os.getcwd()
-        try:
-            os.chdir(self.workspace)
-            yield
-        finally:
-            os.chdir(prev)
+        """Temporarily chdir into ``self.workspace`` for a proxy call.
+
+        Serialized via the module-level :data:`_CWD_LOCK` because
+        ``os.chdir`` is process-global; concurrent runtimes (parallel
+        children under a non-trivial ``max_concurrency``) would
+        otherwise race and leak the workspace cwd back to the caller.
+        """
+        with _CWD_LOCK:
+            prev = os.getcwd()
+            try:
+                os.chdir(self.workspace)
+                yield
+            finally:
+                os.chdir(prev)
 
     def execute(self, code: str) -> str:
         """Run ``code`` and return captured stdout."""

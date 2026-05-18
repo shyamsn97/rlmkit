@@ -33,17 +33,26 @@ graph.tree()       # ASCII per-agent timeline
 
 `Node` carries only what changes per turn — the state payload
 (`content`, `code`, `output`, `reply`, `result`, `error`, token
-deltas) — and is tagged by its `type`:
+deltas) — and is tagged by its `type`. Trajectories strictly
+alternate **observation** and **action** nodes; every action is
+followed by exactly one observation. Nine concrete leaf classes
+under four base classes (full spec:
+[`docs/internal/node_model.md`](internal/node_model.md)):
 
-| State type        | Subclass            | What it carries                                       |
-|-------------------|---------------------|-------------------------------------------------------|
-| `query`           | `QueryNode`         | original task content                                 |
-| `action`          | `ActionNode`        | raw LLM reply, extracted REPL code, token deltas      |
-| `observation`     | `ObservationNode`   | runtime stdout/stderr                                 |
-| `supervising`     | `SupervisingNode`   | action suspended on `yield wait(...)` — `waiting_on`  |
-| `resume`          | `ResumeNode`        | trace/UI marker for parent code resumed after wait    |
-| `error`           | `ErrorNode`         | failure observation                                   |
-| `result`          | `ResultNode`        | terminal answer from `done(...)`                      |
+| `type`                | Class                | Base                   | Carries                                                           |
+|-----------------------|----------------------|------------------------|-------------------------------------------------------------------|
+| `user_query`          | `UserQuery`          | `ObservationNode`      | initial task content (root user query / spawn prompt for a child) |
+| `llm_action`          | `LLMAction`          | `ActionNode`           | "called the LLM" — model name + call metadata                     |
+| `llm_output`          | `LLMOutput`          | `ObservationNode`      | reply, extracted REPL code, token deltas                          |
+| `exec_action`         | `ExecAction`         | `ActionNode`           | "ran fresh code" — optional code echo                             |
+| `exec_output`         | `ExecOutput`         | `CodeObservation` (obs)| runtime stdout/stderr                                             |
+| `supervising_output`  | `SupervisingOutput`  | `CodeObservation` (obs)| code yielded; `waiting_on` lists pending children                 |
+| `error_output`        | `ErrorOutput`        | `CodeObservation` (obs)| failure observation                                               |
+| `done_output`         | `DoneOutput`         | `CodeObservation` (obs)| terminal answer from `done(...)`                                  |
+| `resume_action`       | `ResumeAction`       | `ActionNode`           | "supervisor resumed paused code" — produces a `CodeObservation`   |
+
+Use `isinstance(n, CodeObservation)` for "any code result"
+(`ExecOutput`, `SupervisingOutput`, `ErrorOutput`, `DoneOutput`).
 
 ## Querying the graph
 
@@ -61,16 +70,16 @@ graph.children                                 # list[Graph] of spawned children
 graph.parent_id                                # str | None — id of the spawning agent
 
 graph.agents[aid].states                       # ordered list[Node] for one agent
-graph.agents[aid].result()                     # the latest ResultNode payload
+graph.agents[aid].result()                     # the latest DoneOutput payload
 graph.agents[aid].tokens()                     # (in, out) for that subtree
 
 graph.nodes                                    # iterate every node (agent then seq)
 graph.nodes.find("n_abc...")                   # bare Node lookup by id
-graph.nodes.errors()                           # list[ErrorNode]
-graph.nodes.results()                          # list[ResultNode]
-graph.nodes.supervising()                      # list[SupervisingNode]
-graph.nodes.where(type="action", agent_id="root")    # kwargs match attrs
-graph.nodes.where(lambda n: n.type == "error")       # or pass a predicate
+graph.nodes.errors()                           # list[ErrorOutput]
+graph.nodes.results()                          # list[DoneOutput]
+graph.nodes.supervising()                      # list[SupervisingOutput]
+graph.nodes.where(type="llm_output", agent_id="root")  # kwargs match attrs
+graph.nodes.where(lambda n: n.type == "error_output")  # or pass a predicate
 
 graph.edges.spawns()                           # list[Edge] — cross-agent delegation
 graph.edges.flows_to()                         # list[Edge] — same-agent continuity

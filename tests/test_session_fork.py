@@ -201,7 +201,14 @@ def test_rlm_start_seeds_context_and_persists_files(tmp_path: Path):
         workspace=workspace,
         config=RLMConfig(max_iterations=2),
     )
-    engine.step(engine.start("Use the seeded context.", context="one\ntwo\nthree\n"))
+    # Engine semantics are obs-to-obs — one ``step`` advances by a
+    # single obs→obs transition, so the LLM half writes
+    # ``LLMAction → LLMOutput``; we need a second step for the exec
+    # half (``ExecAction → CodeObservation``) to actually inject
+    # ``CONTEXT`` into the runtime's REPL namespace.
+    graph = engine.start("Use the seeded context.", context="one\ntwo\nthree\n")
+    graph = engine.step(graph)  # LLM half
+    engine.step(graph)          # exec half — runs code, injects CONTEXT
 
     assert workspace.context.list_contexts(agent_id="root") == ["context"]
     assert "CONTEXT" in engine.runtime.repl.namespace

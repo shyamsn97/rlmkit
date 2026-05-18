@@ -212,12 +212,33 @@ def test_graph_save_html_shorthand_writes_single_slide(tmp_path):
 
 
 def _marker_text_sizes(fig):
+    """Return (marker.size, annotation_font_size) for the node trace.
+
+    The figure renders nodes as a markers-only Scatter (state kinds are
+    in the legend, not on the markers) and agent-name labels as
+    layout annotations. ``text_mult`` therefore scales annotation
+    fonts, not trace text.
+    """
+    sizes = None
     for trace in fig.data:
         mode = getattr(trace, "mode", "") or ""
-        if "markers" in mode and "text" in mode and trace.marker.size is not None:
-            font = getattr(trace, "textfont", None)
-            return trace.marker.size, getattr(font, "size", None)
-    return None, None
+        marker = getattr(trace, "marker", None)
+        if (
+            "markers" in mode
+            and marker is not None
+            and getattr(marker, "size", None) is not None
+            and getattr(trace, "showlegend", True) is False
+        ):
+            sizes = marker.size
+            break
+    annotations = getattr(fig.layout, "annotations", ()) or ()
+    font_size = None
+    for ann in annotations:
+        font = getattr(ann, "font", None)
+        if font is not None and getattr(font, "size", None) is not None:
+            font_size = font.size
+            break
+    return sizes, font_size
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")

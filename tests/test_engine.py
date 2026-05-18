@@ -106,8 +106,13 @@ def test_start_records_query_node_at_seq_zero():
 
 
 def test_step_drives_one_shot_to_result():
+    """A trivial one-turn agent reaches ``done`` in two ``step``s
+    (the obs→obs split: LLM half, then exec half)."""
     agent = _agent()
-    graph = agent.step(agent.start("say ok"))
+    graph = agent.start("say ok")
+    graph = agent.step(graph)  # LLM half — writes LLMAction + LLMOutput
+    assert graph.current().type == "llm_output"
+    graph = agent.step(graph)  # exec half — writes ExecAction + DoneOutput
     assert is_done(graph.current())
     assert graph.result() == "ok"
     assert _types(graph) == ["user_query", "llm_action", "llm_output", "exec_action", "done_output"]
@@ -586,7 +591,11 @@ def test_terminate_marks_every_running_agent():
             )
 
     agent = RLMFlow(_DelegatingThenStalling(), runtime=LocalRuntime(), config=RLMConfig(max_depth=2, max_iterations=10))
-    g = agent.step(agent.start("kickoff"))
+    # Obs→obs split: LLM half, then exec half (which spawns the
+    # child and yields, producing the SupervisingOutput).
+    g = agent.start("kickoff")
+    g = agent.step(g)
+    g = agent.step(g)
     assert is_supervising(g.current())
     g = agent.terminate(g)
     assert {"root", "root.child"} <= agent.terminate_requested

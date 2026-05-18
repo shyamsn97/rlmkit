@@ -1,23 +1,13 @@
-"""Engine-level configuration."""
+"""Backwards-compatible re-export of :class:`RLMConfig`.
+
+The canonical home is :mod:`rlmflow.engine.config` — engine helpers
+import it from there so they never need to reach back into
+:mod:`rlmflow.rlm` for typing. This shim keeps existing
+``from rlmflow.config import RLMConfig`` imports working.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass
-class RLMConfig:
-    """Engine-level knobs."""
-
-    max_depth: int = 5
-    max_iterations: int = 30
-    max_output_length: int = 12000
-    max_messages: int | None = None
-    max_concurrency: int | None = None
-    child_max_iterations: int | None = None
-    single_block: bool = True
-    system_prompt: str | None = None
-    max_budget: int | None = None
-
+from rlmflow.engine.config import RLMConfig
 
 __all__ = ["RLMConfig"]

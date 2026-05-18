@@ -8,8 +8,79 @@ each one is called out under **Breaking** below.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-agent LLM transcript log.** Every workspace now writes
+  `session/<aid>/transcript.json` — a *single* document per agent
+  that grows turn-by-turn. `messages` is the flat conversation as
+  the LLM saw it across every turn so far
+  (`[{role: system|user|assistant, content: ...}, ...]`);
+  `metadata` is a parallel list with one dict per message. Each
+  call appends only the new entries (any user nudges plus the
+  assistant reply) — no duplicated prefix. Per-assistant metadata:
+  `{ts, model, force_final, input_tokens, output_tokens,
+  elapsed_s, after_node_id, after_seq}`. Every other message gets
+  `{}`. Exact ground truth for "what did the LLM see?" — useful
+  for debugging prompt issues, replaying a turn under a different
+  model, or auditing context bloat. The `Session` ABC gains
+  `read_transcript(agent_id)` and `write_transcript(agent_id,
+  transcript)`; `FileSession` round-trips through `transcript.json`,
+  `InMemorySession` keeps it in `agent_transcripts`. Transcript
+  read/write failures are swallowed so persistence issues never
+  break a run.
+
 ### Breaking
 
+- **Node taxonomy expanded to a 9-leaf, 4-base-class hierarchy with
+  strict obs → action alternation.** Every action is now followed by
+  exactly one observation; outputs no longer share a node with the
+  action that produced them. New leaf classes (and wire-format
+  `type` tags): `UserQuery`, `LLMAction`, `LLMOutput`, `ExecAction`,
+  `ExecOutput`, `SupervisingOutput`, `ErrorOutput`, `DoneOutput`,
+  `ResumeAction`. Base classes (Python-only — not on the wire):
+  `Node`, `ObservationNode`, `ActionNode`, `CodeObservation`. The
+  old `outcome=` enum on `ExecAction`, the unified `ActionNode`
+  (LLM-call) shape, and `SeedAction` / `ResultNode` / `ErrorNode` /
+  `QueryNode` / `SupervisingNode` / `ResumeNode` are gone. Predicates
+  follow the new taxonomy: `is_user_query`, `is_llm_output`,
+  `is_llm_action`, `is_exec_output`, `is_exec_action`,
+  `is_supervising`, `is_errored`, `is_done`, `is_resume_action`,
+  `is_resumed`, `is_observation`, `is_action`, `is_code_observation`.
+  `LLMOutput.code` is the source of truth for executed code;
+  `ExecAction` / `ResumeAction` carry an optional echo only.
+  Full spec: [`docs/internal/node_model.md`](docs/internal/node_model.md).
+- **`ErrorOutput` (formerly `ErrorNode`) now distinguishes runtime
+  exceptions from normal `ExecOutput`.** The REPL protocol surfaces
+  an `errored` flag; `engine/transitions.py` writes `ErrorOutput`
+  whenever the runtime reports an exception (including `SyntaxError`
+  and the synthetic "no code block" case), instead of mixing
+  tracebacks into `ExecOutput`.
+- **LLM clients retry transient failures via `tenacity`.** The
+  `chat` and `stream` methods on `OpenAIClient` and
+  `AnthropicClient` retry on transient HTTP / protocol errors. The
+  module-level `_`-prefixed helpers and constants in `rlmflow/llm.py`
+  are now public.
+- **Workspace step retracing.** `Workspace.load_steps()` returns the
+  full history as a list of progressive `Graph` snapshots. The
+  retrace simulates **unbounded `max_concurrency`**: every tick
+  advances all currently ready agents in lockstep, producing one
+  snapshot per tick. The viewer / `save_steps` / `save_gif` /
+  `save_html` / `open_viewer` deduplicate consecutive frames that
+  collapse to the same visualization (e.g. action nodes hidden by
+  their paired observation), so the resulting slider/animation
+  shows only visually distinct steps.
+- **Viewer renames + node collapsing.** "Yielded" is now
+  "supervising" everywhere in display surfaces. By default the
+  figure renderer hides bookkeeping action nodes whose paired
+  observation has already been written: `llm_action` collapses
+  into `llm_output`, `exec_action` / `resume_action` collapse into
+  `exec_output` or `supervising_output`. Terminal outcomes
+  (`done_output`, `error_output`) are **never** collapsed — the
+  preceding action stays visible so `... → exec → done` and
+  `... → resume → errored` read explicitly. Action nodes that are
+  the latest state on an agent also stay visible so progress is
+  observable. The state-detail panel in `open_viewer` renders each
+  state as a distinct, color-coded, type-labeled block.
 - **Data model is now one recursive class.** `AgentMeta` is gone — its
   fields are flat on `Graph` itself (`graph.query`, `graph.config`,
   `graph.runtime`, `graph.workspace`, `graph.depth`, `graph.model`,

@@ -4,8 +4,12 @@ The :class:`~rlmflow.rlm.RLMFlow` class in ``rlmflow/rlm.py`` is the
 public orchestrator. The modules in this package implement its
 mechanics:
 
-- ``transitions`` — per-current-node-kind step functions plus the
-  ``step_agent`` dispatch.
+- ``transitions`` — the ``Action`` union, the pure ``act`` /
+  ``act_one`` projection (``Graph -> ActionPlan``), the
+  side-effectful ``apply_one`` dispatcher, and the three
+  obs-to-obs handlers (``step_llm`` / ``step_exec`` /
+  ``step_after_supervising``). See
+  :doc:`docs/internal/act_apply.md`.
 - ``code`` — calling the LLM, extracting code, recording an
   :class:`~rlmflow.graph.ActionNode`, and running / resuming code.
 - ``replay`` — replay-of-one for cold-starting a suspended generator

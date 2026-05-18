@@ -101,6 +101,68 @@ def _strip_name_annotations(stmt: ast.stmt) -> ast.stmt | None:
     return _AnnotationStripper().visit(stmt)
 
 
+def _has_top_level_yield(tree: ast.AST) -> bool:
+    """True iff ``tree`` has any ``yield`` / ``yield from`` at the
+    block's top level (i.e. outside every nested function / async
+    function / lambda / generator expression / class body).
+
+    Why "any", not "yield wait(...)"? Because this question is purely
+    about Python *compilation*, not about the agent suspension
+    protocol. ``yield`` at module level is a ``SyntaxError`` in
+    plain Python — it has to live inside a function. So if the
+    block contains any top-level yield, we must wrap the whole
+    thing in a synthetic ``def __rlm_gen__():`` for ``compile()`` to
+    accept it. If there is no top-level yield, we exec the code
+    directly. That's the only thing this function decides.
+
+    The separate question — "did the block yield a ``wait(*handles)``
+    request, meaning suspend the agent, or did it yield something
+    else, meaning treat it as a plain Python generator yield" — is
+    handled later in :meth:`REPL.advance`. Only ``WaitRequest``
+    yields suspend; everything else is pumped past silently. See
+    ``docs/repl_yield_protocol.md`` for the full picture.
+
+    Examples that wrap (return ``True``)::
+
+        yield                  # bare yield at top level
+        yield 1                # any value at top level
+        yield wait(h)          # the engine-suspension case
+        x = yield 5            # yield as expression
+        for h in hs: yield h   # inside top-level control flow
+
+    Examples that don't wrap (return ``False``) because the yield
+    belongs to a nested scope, which is itself a perfectly valid
+    Python generator/function definition the block can use::
+
+        def squares(n):                   # ordinary helper generator
+            yield n*n
+        xs = list(i*i for i in range(3))  # generator expression
+        f = lambda: (yield 1)             # lambda body
+        class C:                          # method body
+            def __iter__(self):
+                yield 1
+
+    Why we walk the AST instead of using ``ast.walk``: ``ast.walk``
+    descends into nested function bodies, so it would flag the
+    ``def squares`` cases as having a yield and we'd wrap them. The
+    wrap would then fail to behave as a generator (``__rlm_gen__``
+    has no actual top-level yield) and return ``None`` from
+    ``__rlm_gen__()``, which would later crash
+    ``REPL.advance`` on ``None.agent_ids``.
+    """
+    boundary = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    stack: list[ast.AST] = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return True
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, boundary):
+                continue
+            stack.append(child)
+    return False
+
+
 # ── thread-safe stdout capture ────────────────────────────────────────
 
 _capture = threading.local()
@@ -177,14 +239,32 @@ class REPL:
 
     @contextmanager
     def captured(self):
-        """Activate the thread-local buffer for stdout capture."""
+        """Activate the thread-local buffer for stdout capture.
+
+        Catches three classes of bubble-up:
+
+        * :class:`DoneSignal` — terminal control flow from ``done()``;
+          the engine reads ``DONE_RESULT`` from ``runtime.env`` after.
+        * :class:`Exception` — any normal runtime error from agent code
+          becomes a captured traceback + ``errored=True`` for the next
+          turn to read.
+        * :class:`SystemExit` / :class:`KeyboardInterrupt` — these
+          inherit from ``BaseException`` (not ``Exception``), so a
+          stray ``raise SystemExit(...)`` or ``sys.exit(...)`` inside
+          an agent's REPL would escape the engine and **exit the host
+          process**. We treat them like any other agent error: format
+          a traceback, set ``errored``, and resume the engine.
+          ``BaseException`` itself is *not* caught — that would also
+          swallow ``GeneratorExit`` etc., which we want to bubble.
+        """
         _capture.buf = self.buf
         try:
             yield
         except DoneSignal:
-            # ``done()`` is terminal control flow, not an execution error.
-            # The engine reads DONE_RESULT from runtime.env after this returns.
             pass
+        except (SystemExit, KeyboardInterrupt) as exc:
+            self.buf.write("\n" + _format_repl_traceback(exc))
+            self.errored = True
         except Exception as exc:
             self.buf.write("\n" + _format_repl_traceback(exc))
             self.errored = True
@@ -263,9 +343,7 @@ class REPL:
             self.errored = True
             return False, self.buf.getvalue().strip()
 
-        has_yield = any(
-            isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(tree)
-        )
+        has_yield = _has_top_level_yield(tree)
         filename = self._source_filename(code)
 
         if not has_yield:
@@ -284,10 +362,24 @@ class REPL:
         return self.advance(send_value)
 
     def advance(self, send_value=None) -> tuple[bool, object]:
-        """Drive the generator one step. Yield → suspend, StopIteration → done."""
+        """Drive the generator. Suspend only on ``WaitRequest`` yields.
+
+        The REPL only treats a yield as suspension when its value is a
+        :class:`WaitRequest` (returned by ``wait(*handles)``). Any other
+        yielded value is treated like a normal Python generator yield —
+        the engine just pumps the generator forward by sending ``None``
+        back. This keeps generic ``yield`` usage in REPL code working
+        (data pipelines, generator helpers consumed at top level, etc.)
+        and only intercepts the specific delegate→wait protocol the
+        engine knows how to schedule.
+        """
         with self.captured():
             try:
                 request = self.gen.send(send_value)
+                while not isinstance(request, WaitRequest):
+                    # Non-Wait top-level yield: behave like a plain
+                    # Python generator — discard the value, resume.
+                    request = self.gen.send(None)
                 pre_output = strip_ansi(self.buf.getvalue().strip())
                 return True, (request, pre_output)
             except StopIteration:

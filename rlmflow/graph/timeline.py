@@ -12,12 +12,28 @@ just walk the recorded states and emit truncated copies of the graph
 
 Snapshots are produced **one per parallel tick** under unbounded
 ``max_concurrency`` semantics: every agent whose dependencies are
-satisfied advances by one state in lockstep, and the snapshot taken
-afterwards shows all of them at the new level simultaneously. Six
-sibling children spawned by the same :class:`SupervisingOutput` will
-therefore advance from ``llm`` to ``exec`` in *one* snapshot — not
-six snapshots that happen to ripple through them in alphabetical
-order.
+satisfied advances by one engine step (one ``apply_one`` call) in
+lockstep, and the snapshot taken afterwards shows all of them at
+the new level simultaneously.
+
+Engine semantics are obs-to-obs: ``new_obs = act(obs)``. Each
+``apply_one`` call takes the agent from one observation to the
+next, persisting ``(action, new_obs)`` atomically. So every leaf
+of every snapshot is an observation. Stable types are exactly
+the observations:
+
+* :class:`UserQuery` — initial state on spawn.
+* :class:`LLMOutput` — LLM replied; next step runs its code.
+* :class:`ExecOutput` / :class:`SupervisingOutput` /
+  :class:`ErrorOutput` / :class:`DoneOutput` — code finished.
+
+A typical agent turn shows up as two ticks: one at
+:class:`LLMOutput` ("LLM replied with this code"), then one at
+the matching :class:`CodeObservation` ("code finished with this
+result"). Action nodes (:class:`LLMAction`, :class:`ExecAction`,
+:class:`ResumeAction`) never become the latest state — they're
+always part of the same tick that ends at their paired
+observation.
 
 Ordering rules per tick:
 
@@ -25,23 +41,38 @@ Ordering rules per tick:
   order.
 * A child agent's first state cannot appear before the parent's
   :class:`SupervisingOutput` that spawned it.
-* A parent's resume (the state immediately following a
-  :class:`SupervisingOutput`) cannot appear until every child the
-  supervising was waiting on has reached its final state.
+* A parent's resume cannot fire until every child the supervising
+  was waiting on has reached its final state.
 """
 
 from __future__ import annotations
 
 from rlmflow.graph.graph import Graph
 
+# Types where an agent rests between engine steps. Each tick
+# advances forward until it lands on (and includes) a state of
+# one of these types, so action / intermediate-output nodes never
+# appear as the latest state in a snapshot.
+_STABLE_TYPES: frozenset[str] = frozenset(
+    {
+        "user_query",
+        "llm_output",
+        "exec_output",
+        "supervising_output",
+        "error_output",
+        "done_output",
+    }
+)
+
 
 def retrace_steps(graph: Graph) -> list[Graph]:
     """Return one :class:`Graph` snapshot per parallel tick, in order.
 
-    Every tick advances *all* currently-unblocked agents by one state
-    simultaneously. The first snapshot reflects whatever the very
-    first tick produced (typically just the root's :class:`UserQuery`);
-    each subsequent snapshot reflects one further tick. The final
+    Every tick advances *all* currently-unblocked agents by one
+    obs-to-obs ``apply_one`` call simultaneously. The first
+    snapshot is just the root's :class:`UserQuery`; each subsequent
+    snapshot adds one more obs-to-obs step (i.e. one
+    ``(action, observation)`` pair) per ready agent. The final
     snapshot equals ``graph``.
     """
     ticks = _execution_ticks(graph)
@@ -65,9 +96,11 @@ def _execution_ticks(graph: Graph) -> list[list[tuple[str, int]]]:
     """Return execution events grouped into parallel ticks.
 
     Each tick is a list of ``(agent_id, state_index)`` pairs that
-    became ready at the same logical moment. All agents listed in a
-    single tick advance by one state simultaneously — that's the
-    "infinite ``max_concurrency``" interleaving.
+    became ready at the same logical moment. All ready agents
+    advance by one ``apply_one``-call's worth of states in the
+    same tick — that's the "infinite ``max_concurrency``"
+    interleaving where every runnable agent runs its next step in
+    parallel.
     """
     states = {aid: list(sub.states) for aid, sub in graph.agents.items()}
 
@@ -106,13 +139,39 @@ def _execution_ticks(graph: Graph) -> list[list[tuple[str, int]]]:
                     return False
         return True
 
+    def step_count(aid: str) -> int:
+        """How many states this agent advances in one tick.
+
+        Mirrors one ``apply_one`` call's writes — always the
+        ``(action, observation)`` pair from the obs-to-obs
+        transition. UserQuery (1 state, on spawn) and any other
+        observation followed directly by its action+result pair
+        (2 states). Consume forward until landing on (and
+        including) the next observation.
+        """
+        i = pos[aid]
+        agent_states = states[aid]
+        n = len(agent_states)
+        j = i
+        while j < n:
+            if agent_states[j].type in _STABLE_TYPES:
+                return j - i + 1
+            j += 1
+        # Trailing intermediate states with no closing observation
+        # (incomplete / mid-write). Emit whatever is left as the
+        # final tick for this agent.
+        return max(1, n - i)
+
     while True:
         ready = sorted(aid for aid in pos if is_ready(aid))
         if not ready:
             break
-        tick = [(aid, pos[aid]) for aid in ready]
+        tick: list[tuple[str, int]] = []
         for aid in ready:
-            pos[aid] += 1
+            count = step_count(aid)
+            for _ in range(count):
+                tick.append((aid, pos[aid]))
+                pos[aid] += 1
         ticks.append(tick)
 
     # Anything still pending (cycles / dangling deps) — flush as a

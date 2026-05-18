@@ -16,7 +16,7 @@ from rlmflow.prompts.messages import EXECUTION_OUTPUT
 from rlmflow.workspace import Session
 
 if TYPE_CHECKING:
-    from rlmflow.config import RLMConfig
+    from rlmflow.engine.config import RLMConfig
 
 ROOT_RUNTIME_ID = "root"
 

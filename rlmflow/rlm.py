@@ -23,8 +23,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from rlmflow.config import RLMConfig
 from rlmflow.engine.code import call_llm, extract_code, llm_client_for
+from rlmflow.engine.config import RLMConfig
 from rlmflow.engine.messages import (
     build_messages,
     build_status_section,
@@ -46,7 +46,7 @@ from rlmflow.engine.sessions import (
     register_tools,
     runtime_for,
 )
-from rlmflow.engine.transitions import step_agent
+from rlmflow.engine.transitions import act, apply_one
 from rlmflow.graph import ChildHandle, Graph, Node, RuntimeRef, UserQuery
 from rlmflow.llm import LLMClient
 from rlmflow.prompts.default import BASELINE_BUILDER, DEFAULT_BUILDER
@@ -149,7 +149,43 @@ class RLMFlow(LLMClient):
 
         self.runtime_sessions: dict[str, Runtime] = {ROOT_RUNTIME_ID: runtime}
         self.terminate_requested: set[str] = set()
+        self.last_usage = None
         self.register_tools(runtime)
+
+    # ── engine-helper kwargs ─────────────────────────────────────────
+    #
+    # Helpers in ``rlmflow.engine.*`` take only the concrete deps
+    # they need — no engine class, no context bag. These two methods
+    # build the kwarg dicts that get spread into those calls so
+    # individual call sites stay tidy.
+
+    def _prompt_kwargs(self) -> dict[str, Any]:
+        """Kwargs needed by message/system-prompt builders."""
+        return {
+            "config": self.config,
+            "runtime": self.runtime,
+            "llm_clients": self.llm_clients,
+            "model_descriptions": self.model_descriptions,
+            "prompt_builder": self.prompt_builder,
+        }
+
+    def _apply_kwargs(self) -> dict[str, Any]:
+        """Kwargs needed by :func:`rlmflow.engine.transitions.apply_one`."""
+        return {
+            "session": self.session,
+            "context": self.context,
+            "config": self.config,
+            "runtime": self.runtime,
+            "llm_client": self.llm_client,
+            "llm_clients": self.llm_clients,
+            "model_descriptions": self.model_descriptions,
+            "prompt_builder": self.prompt_builder,
+            "inject_env": self.inject_env,
+            "record_usage": self._record_usage,
+        }
+
+    def _record_usage(self, usage: Any) -> None:
+        self.last_usage = usage
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -180,9 +216,12 @@ class RLMFlow(LLMClient):
             depth=0,
             query=query,
             system_prompt=build_system_prompt_for(
-                self, query=query, agent_id=agent_id, depth=0
+                query=query,
+                agent_id=agent_id,
+                depth=0,
+                **self._prompt_kwargs(),
             ),
-            config=node_config(self),
+            config=node_config(self.config),
             workspace=self.workspace.ref() if self.workspace else None,
             runtime=RuntimeRef(id=ROOT_RUNTIME_ID),
         )
@@ -216,14 +255,34 @@ class RLMFlow(LLMClient):
     def step(self, graph: Graph) -> Graph:
         """Advance the run by one synchronized batch.
 
-        All currently-runnable agents are stepped (in parallel if a
-        :class:`Pool` is configured). Returns a freshly-loaded
-        :class:`Graph` snapshot.
+        Two phases:
+
+        1. **Plan** — :func:`rlmflow.engine.policy.act` projects
+           every runnable agent's current observation into an
+           :class:`~rlmflow.engine.policy.Action` (pure, no I/O).
+        2. **Apply** — every action is materialized in parallel
+           via :func:`rlmflow.engine.transitions.apply_one`, which
+           writes the resulting ``(ActionNode, ObservationNode)``
+           pair through the session.
+
+        Returns a freshly-loaded :class:`Graph` snapshot.
         """
         runnable = self.node_scheduler.runnable_agents(graph)
         if not runnable:
             return graph
-        tasks = [(aid, (lambda aid=aid: step_agent(self, aid))) for aid in runnable]
+        plan = act(
+            graph,
+            config=self.config,
+            runnable=runnable,
+            terminate_requested=self.terminate_requested,
+        )
+        if not plan:
+            return graph
+        kwargs = self._apply_kwargs()
+        tasks = [
+            (aid, (lambda action=action: apply_one(action, **kwargs)))
+            for aid, action in plan.items()
+        ]
         self.pool.execute(tasks)
         return self.session.load_graph()
 
@@ -353,19 +412,22 @@ class RLMFlow(LLMClient):
 
     # ── prompts / messages / LLM ─────────────────────────────────────
     #
-    # These functions still take ``engine`` as their first arg because
-    # each one touches several engine attributes (config, runtime,
-    # llm_clients, model_descriptions, prompt_builder, …) — flattening
-    # them would balloon their signatures past ten parameters. The
-    # methods below pull the engine forward.
+    # Thin wrappers that build an :class:`EngineCtx` and forward to
+    # the flat helpers in :mod:`rlmflow.engine.messages` /
+    # :mod:`rlmflow.engine.code`.
 
     def build_messages(
         self, graph: Graph, *, force_final: bool = False
     ) -> list[dict[str, str]]:
-        return build_messages(self, graph, force_final=force_final)
+        return build_messages(
+            graph,
+            force_final=force_final,
+            context=self.context,
+            **self._prompt_kwargs(),
+        )
 
     def build_system_prompt(self, graph: Graph) -> str:
-        return build_system_prompt(self, graph)
+        return build_system_prompt(graph, **self._prompt_kwargs())
 
     def build_system_prompt_for(
         self,
@@ -376,17 +438,26 @@ class RLMFlow(LLMClient):
         config: dict[str, Any] | None = None,
     ) -> str:
         return build_system_prompt_for(
-            self, query=query, agent_id=agent_id, depth=depth, config=config
+            query=query,
+            agent_id=agent_id,
+            depth=depth,
+            sub_config=config,
+            **self._prompt_kwargs(),
         )
 
     def build_tools_section(self) -> str:
-        return build_tools_section(self)
+        return build_tools_section(
+            runtime=self.runtime,
+            max_depth=self.config.max_depth,
+            llm_clients=self.llm_clients,
+            model_descriptions=self.model_descriptions,
+        )
 
     def build_status_section(self, graph: Graph) -> str:
-        return build_status_section(self, graph)
+        return build_status_section(graph, max_depth=self.config.max_depth)
 
     def node_config(self) -> dict[str, Any]:
-        return node_config(self)
+        return node_config(self.config)
 
     def call_llm(
         self,
@@ -394,13 +465,20 @@ class RLMFlow(LLMClient):
         *,
         client: LLMClient | None = None,
     ) -> str:
-        return call_llm(self, messages, client=client)
+        active = client or self.llm_client
+        text, usage = call_llm(messages, client=active)
+        self.last_usage = usage
+        return text
 
     def llm_client_for(self, graph: Graph) -> LLMClient:
-        return llm_client_for(self, graph)
+        return llm_client_for(
+            graph,
+            llm_clients=self.llm_clients,
+            default=self.llm_client,
+        )
 
     def extract_code(self, text: str) -> str | None:
-        return extract_code(self, text)
+        return extract_code(text, single_block=self.config.single_block)
 
     def format_exec_output(self, output: str) -> str:
         return format_exec_output(output)
