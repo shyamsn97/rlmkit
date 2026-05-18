@@ -558,12 +558,14 @@ def main() -> None:
         graph = flow.start(query)
         for node in graph.nodes:
             if node.id not in seen:
-                _print_event(node, t0); seen.add(node.id)
+                _print_event(node, t0)
+                seen.add(node.id)
         while not graph.finished:
             graph = flow.step(graph)
             for node in graph.nodes:
                 if node.id not in seen:
-                    _print_event(node, t0); seen.add(node.id)
+                    _print_event(node, t0)
+                    seen.add(node.id)
     else:
         with LiveView() as live:
             graph = flow.start(query)
