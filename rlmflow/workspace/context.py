@@ -7,18 +7,16 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from rlmflow.workspace.store import (
-    Store,
-    copy_workspace_paths,
-    resolve_backend,
-)
+from rlmflow.workspace.store import Store, copy_workspace_paths, resolve_backend
 
 CONTEXT_VARIABLE_PROMPT = """
 **Context variable:**
 
-`CONTEXT` is the read-only data slot for *this* agent — always present, possibly empty.
-The query lives in your messages, not here. `CONTEXT` is just the data to operate on.
-**Size it up first**: `CONTEXT.info()["chars"] == 0` means no payload — work from the query.
+`CONTEXT` holds **information you need to complete your query** — a brief, a spec,
+raw input data, source you must read or mutate, or a sibling's transcript. Your
+*task* lives in your messages; `CONTEXT` is the *data* that is useful to complete your task.
+**Always check it first** — `CONTEXT.info()["chars"] == 0` means no payload (work
+from the query alone); anything else is required reading.
 
 API:
 - `CONTEXT.info()` / `CONTEXT.line_count()` — measure.
@@ -26,8 +24,8 @@ API:
 - `CONTEXT.lines(start=0, end=None)` — line slice.
 - `CONTEXT.grep(pattern, max_results=50)` — regex; returns `lineno:line` rows.
 
-For long `CONTEXT`, don't `print` it whole (output is truncated). Sample, chunk,
-delegate one sub-agent per chunk with a structured reply, aggregate in the parent.
+For long `CONTEXT`, don't `print` it whole (output is truncated). Sample, chunk, or
+aggregate before passing it anywhere.
 """
 
 

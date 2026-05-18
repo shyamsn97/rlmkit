@@ -34,6 +34,16 @@ python examples/coding-agent/agent.py --workspace ./proj --docker-image rlmflow:
 The host workspace is bind-mounted at `/workspace` inside the container, so
 the standard `FILE_TOOLS` work identically in both modes.
 
+Each compute example writes its durable run state into its workspace. Reopen or
+export it with:
+
+```bash
+rlmflow view path/to/workspace
+rlmflow render path/to/workspace -f html -o viewer.html
+```
+
+The workspace is the saved run.
+
 For fully locked-down runs, `DockerRuntime` takes the usual Docker knobs
 directly when built by hand:
 
@@ -54,5 +64,5 @@ runtime = DockerRuntime(
 
 - `drop_in_llm.py` — shows that `RLMFlow` satisfies `LLMClient`, so you can nest
   agents or swap an agent in anywhere a plain LLM is accepted. No CLI flags.
-- `view_demo.py` — builds a fake trace and opens the state viewer. No LLM or
+- `view_demo.py` — builds fake graph snapshots and opens the state viewer. No LLM or
   runtime needed.

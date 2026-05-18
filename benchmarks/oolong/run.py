@@ -72,7 +72,7 @@ from scoring import (  # noqa: E402
 )
 
 from rlmflow.llm import AnthropicClient, LLMClient, LLMUsage, OpenAIClient  # noqa: E402
-from rlmflow.node import Node  # noqa: E402
+from rlmflow.graph import Node  # noqa: E402
 from rlmflow.rlm import RLMConfig, RLMFlow  # noqa: E402
 from rlmflow.runtime.docker import DockerRuntime  # noqa: E402
 from rlmflow.runtime.local import LocalRuntime  # noqa: E402

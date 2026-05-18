@@ -14,7 +14,7 @@ It gives an LLM a REPL and recursive delegation tools, then persists every query
 |----------------|-----|
 | Build a recursive agent where sub-agents spawn sub-agents | **rlmflow** |
 | Inspect the actual execution graph produced by an RLM | **rlmflow** |
-| Checkpoint/fork/rewind agent execution mid-run | **rlmflow** |
+| Persist/fork/rewind agent execution mid-run | **rlmflow** |
 | Run a one-off coding task from your terminal | Codex CLI, Claude Code, Aider |
 | Build a graph of heterogeneous agents with complex routing | LangGraph |
 | Assemble a team of role-based agents (researcher + writer + reviewer) | CrewAI |
@@ -32,9 +32,9 @@ It gives an LLM a REPL and recursive delegation tools, then persists every query
 
 **Choose rlmflow** when you need:
 - Step-level control (pause, inspect, resume)
-- Typed graph state with checkpoint/fork/time-travel
+- Typed graph state with workspace persistence, fork, and time-travel
 - Parallel child execution with a thread pool
-- `session/` persistence for node/message history
+- `session/` persistence for the agent / state log
 - `context/` payloads exposed as `CONTEXT`
 - Interactive visualization (Gradio viewer)
 - Token tracking and budgets
@@ -112,5 +112,5 @@ These are task-specific harnesses for coding agents with Docker sandboxes and be
 
 - **Researchers** studying recursive/hierarchical agent architectures who want inspectable, replayable execution traces.
 - **Engineers** building agents that naturally decompose work (code gen, search, summarization) and want step-level control.
-- **Teams** that need checkpoint/fork/replay for debugging complex multi-agent runs.
+- **Teams** that need workspace persistence, fork, and replay for debugging complex multi-agent runs.
 - **RL practitioners** who want a gym-style `step()` loop over agent execution.

@@ -77,10 +77,10 @@ def run_branch(root: Path, idx: int) -> tuple[str, int, dict[str, str], int]:
         workspace=workspace,
         config=RLMConfig(max_depth=1, max_iterations=10),
     )
-    node = engine.start(QUERY)
-    while not node.finished:
-        node = engine.step(node)
-    result = getattr(node, "result", "") or ""
+    graph = engine.start(QUERY)
+    while not graph.finished:
+        graph = engine.step(graph)
+    result = graph.result()
     correct, preds = score(result)
     return result, correct, preds, llm.call_count
 

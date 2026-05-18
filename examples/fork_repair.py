@@ -111,11 +111,11 @@ def run_branch(root: Path, name: str, implementation: str, label: str):
         config=RLMConfig(max_depth=0, max_iterations=3),
     )
     engine.runtime.register_tools(FILE_TOOLS)
-    node = engine.start(TASK)
-    while not node.finished:
-        node = engine.step(node)
+    graph = engine.start(TASK)
+    while not graph.finished:
+        graph = engine.step(graph)
     passed, output = run_tests(workspace.path())
-    return workspace, node, passed, output
+    return workspace, graph, passed, output
 
 
 def main() -> None:
@@ -139,13 +139,13 @@ def main() -> None:
 
     results = []
     for name, implementation, label in branches:
-        workspace, node, passed, output = run_branch(root, name, implementation, label)
-        results.append((passed, workspace, node, output))
-        print(f"{name}: tests={'PASS' if passed else 'FAIL'} result={node.get_result()!r}")
+        workspace, graph, passed, output = run_branch(root, name, implementation, label)
+        results.append((passed, workspace, graph, output))
+        print(f"{name}: tests={'PASS' if passed else 'FAIL'} result={graph.result()!r}")
         print("  " + brief_test_output(output).replace("\n", "\n  "))
 
     winner = next((item for item in results if item[0]), results[0])
-    _passed, workspace, _node, _output = winner
+    _passed, workspace, _graph, _output = winner
     print(f"\n[best] {workspace.branch_id} workspace={workspace.root}")
 
 

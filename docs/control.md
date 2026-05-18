@@ -1,71 +1,86 @@
 # Control
 
-`step(node) -> node'` is the core transition. Nodes are immutable, so
-checkpoint, rewind, and intervention are explicit graph operations.
+`step(graph) -> graph'` is the core transition. `Graph` snapshots are
+immutable, so stepping, rewind, and forking are explicit graph/workspace
+operations.
 
 ## Step loop
 
 ```python
-node = agent.start(query)
-while not node.finished:
-    node = agent.step(node)
+graph = agent.start(query)
+while not graph.finished:
+    graph = agent.step(graph)
 ```
 
-`agent.run(query)` does the same thing and returns `node.get_result()`.
+`agent.run(query)` does the same thing and returns `graph.result()`.
 `agent.chat(messages)` is the `LLMClient` interface — same loop, last
 user message becomes the query.
 
-## Checkpoint / resume
+Each `step(graph)` advances **one observation-to-observation
+transition** for every agent that is ready to move. A single
+"reasoning turn" of an agent (call the LLM, then run the code it
+emitted) is therefore two `step()` rounds: an LLM half
+(`obs → LLMAction → LLMOutput`) and an exec half
+(`LLMOutput → ExecAction → CodeObservation`). This is the
+finest-grained reproducible step the engine exposes — see
+[`internal/node_model.md`](internal/node_model.md) for the full
+state-machine spec and worked simulations.
+
+## Workspace Resume
 
 ```python
-from rlmflow import Node
+from rlmflow import Workspace
 
-node.save("ckpt.json")
-
-node = Node.load("ckpt.json")
-while not node.finished:
-    node = agent.step(node)
+workspace = Workspace.open_path("runs/deep_research")
+graph = workspace.load_graph()
+while not graph.finished:
+    graph = agent.step(graph)
 ```
+
+The workspace session is the saved-run state.
 
 ## Rewind
 
-Keep every node snapshot in a list and resume any one of them:
+Keep every `Graph` snapshot in a list and resume any one of them:
 
 ```python
 history = [agent.start(query)]
 while not history[-1].finished:
     history.append(agent.step(history[-1]))
 
-node = history[-5]
-while not node.finished:
-    node = agent.step(node)
+graph = history[-5]
+while not graph.finished:
+    graph = agent.step(graph)
 ```
 
-## Branch Workspaces
+## Branch workspaces
 
-Use `Workspace.fork(...)` when a branch needs isolated files, session, and
-context stores:
+Use `Workspace.fork(...)` when a branch needs isolated files, session,
+and context stores:
 
 ```python
 branch = workspace.fork(new_branch_id="repair", new_dir="./repair-workspace")
 ```
 
-## Intervene
+## Replay
 
-Between steps, patch node fields with `node.update(**changes)` or replace
-subtrees with `node.replace_many(...)`:
+A persisted workspace can be rehydrated into a `Graph` and resumed:
 
 ```python
-node = node.update(
-    children=[
-        child for child in node.children
-        if getattr(child, "agent_id", "") != "root.bad_branch"
-    ],
-)
+graph = workspace.session.load_graph()
+while not graph.finished:
+    graph = agent.step(graph)
 ```
 
-Use this to remove runaway children, adjust config, request termination, or
-replace a leaf with a manually constructed `ResultNode`.
+The engine reads from `graph.states`, appends new states through the
+session, and produces a fresh snapshot on every `step`. There is no
+in-memory node graph to keep in sync with disk.
+
+For the runtime contract around `yield wait(...)` and `ResumeAction`, see
+[`resume_semantics.md`](resume_semantics.md).
+
+For the proposed user-facing model around workspaces, loading, and viewers, see
+[`workspace_viewer_model.md`](workspace_viewer_model.md).
 
 ## Custom runtime
 
@@ -103,24 +118,30 @@ agent = RLMFlow(..., prompt_builder=(
 ))
 ```
 
-Or subclass `RLMFlow` and override `build_system_prompt`, `build_messages`,
-`extract_code`, `step_observation`, `step_action`, or `delegate_for_step`.
+Or subclass `RLMFlow` and override `build_system_prompt`,
+`build_messages`, `extract_code`, or `step` (which is the public
+`act + apply_one` entry point — see
+[`internal/act_apply.md`](internal/act_apply.md)).
 
 ## Session And Context
 
-`Workspace.session` stores the typed node/message graph:
+`Workspace.session` stores the per-agent state log and the graph manifest.
+The convenience `workspace.load_graph()` is the normal way to reopen the
+current snapshot:
 
 ```python
-nodes = workspace.session.load()
-chain = workspace.session.chain_to(node)
+graph = workspace.load_graph()
+sub = graph["root.boid_js"]
+print(sub.transcript())
 ```
 
-On disk, the workspace keeps per-call session logs under `session/<agent-id>/`
-and a compact graph manifest at `graph.json`:
+On disk, the workspace keeps per-agent session logs under
+`session/<agent-id>/` and a compact graph manifest at `graph.json`:
 
 ```text
 workspace/
-  graph.json
+  graph.json                  # agent list + spawns edges
+  session/root/agent.json
   session/root/session.jsonl
   session/root/latest.json
 ```
@@ -129,7 +150,7 @@ workspace/
 `CONTEXT`. The root agent's payload is keyword-only and optional:
 
 ```python
-node = agent.start("answer from the payload", context=large_text)
+graph = agent.start("answer from the payload", context=large_text)
 ```
 
 Payloads live beside the session views under `context/<agent-id>/`:
@@ -180,11 +201,11 @@ mode; inlining sidesteps it entirely.
 ## Walkthroughs
 
 - [`examples/showcase.py`](../examples/showcase.py) — runnable
-  walkthrough of stepping, checkpointing, intervention, and rewind.
+  walkthrough of stepping, workspace persistence, session reads, time travel,
+  and gym-style stepping.
 - [`examples/notebooks/coding_agent.ipynb`](../examples/notebooks/coding_agent.ipynb)
-  — generates the canonical trace under
-  `examples/data/notebook-coding-agent/`.
+  — live LLM run that produces a real workspace.
 - [`examples/notebooks/node_basics.ipynb`](../examples/notebooks/node_basics.ipynb)
-  — querying that trace via the typed node API.
+  — querying the `Graph` API on the deterministic fixture.
 - [`examples/notebooks/viz_walkthrough.ipynb`](../examples/notebooks/viz_walkthrough.ipynb)
-  — every visualization helper against the same trace.
+  — every visualization helper against the same fixture.

@@ -1,9 +1,0 @@
-{
-  "agent_id": "root.entities_js",
-  "latest_leaf_id": "n_9cdb010ec368",
-  "branch_id": "main",
-  "depth": 1,
-  "type": "result",
-  "terminal": true,
-  "result": "output/sidescrolling-platformer/js/entities.js"
-}

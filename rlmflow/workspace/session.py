@@ -1,4 +1,50 @@
-"""Session store — durable node/message history for an RLMFlow run."""
+"""Session — persistent per-agent invariants + per-turn state log.
+
+Each agent owns one append-only ``session.jsonl`` of state snapshots and
+one ``agent.json`` of its run-invariants (query, depth, config, system
+prompt, refs to workspace + runtime). Cross-agent topology is recovered
+from each agent's ``parent_agent_id`` field; no edges are stored.
+
+Layout::
+
+    <workspace>/
+      graph.json                                # workspace manifest (root + agent list)
+      session/<aid>/agent.json                  # per-agent invariants (one-shot)
+      session/<aid>/session.jsonl               # state log (append-only)
+      session/<aid>/latest.json                 # latest-state summary
+      session/<aid>/transcript.json             # exact LLM I/O, flat & merged
+
+``transcript.json`` is a *single* document per agent that grows
+turn-by-turn. ``messages`` is the flat conversation as the LLM
+saw it across all turns combined — every turn appends only the
+new entries (the user nudge, if any, plus the assistant reply).
+``metadata`` is a parallel list with one entry per message;
+all entries are ``{}`` except each assistant message, which
+carries the call-specific fields::
+
+    {
+      "agent_id": <aid>,
+      "messages": [
+        {"role": "system",    "content": "..."},
+        {"role": "user",      "content": "..."},
+        {"role": "assistant", "content": "..."},
+        {"role": "user",      "content": "..."},
+        {"role": "assistant", "content": "..."}
+      ],
+      "metadata": [
+        {}, {},
+        {ts, model, force_final, input_tokens, output_tokens,
+         elapsed_s, after_node_id, after_seq},
+        {},
+        {ts, model, force_final, input_tokens, output_tokens,
+         elapsed_s, after_node_id, after_seq}
+      ]
+    }
+
+The transcript is the ground truth for "what did the LLM
+actually see?" — useful for debugging prompt issues, replaying
+a turn under a different model, or auditing context bloat.
+"""
 
 from __future__ import annotations
 
@@ -7,25 +53,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from rlmflow.node import Node, parse_node_obj
-from rlmflow.workspace.store import (
-    Store,
-    copy_workspace_paths,
-    resolve_backend,
-)
-
-# Terminal-first ordering. Used when an agent has multiple persisted nodes
-# and we want the most-evolved one as the chain endpoint.
-_NODE_TERMINALITY: dict[str, int] = {
-    "result": 0,
-    "error": 1,
-    "supervising": 2,
-    "observation": 3,
-    "resume": 4,
-    "action": 5,
-    "query": 6,
-}
-
+from rlmflow.graph import Graph, Node, is_done, is_observation, parse_node_obj
+from rlmflow.workspace.store import Store, copy_workspace_paths, resolve_backend
 
 SESSION_VARIABLE_PROMPT = """
 **Session variable:** read-only view of every *other* agent in this recursive tree.
@@ -46,203 +75,122 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "root"
 
 
+# ── Session ABC ──────────────────────────────────────────────────────
+
+
 class Session(ABC):
-    """Persist typed graph nodes and reconstruct per-agent message chains."""
+    """Persist per-agent invariants + per-turn state logs.
+
+    Engine surface is narrow: register an agent (its per-run invariants)
+    at spawn, append a state per turn, and rebuild the recursive
+    :class:`Graph` from the persisted layout on every read.
+    """
 
     @abstractmethod
-    def write(self, node: Node) -> None:
-        """Append or store a typed node."""
+    def write_agent(self, graph: Graph) -> None: ...
 
     @abstractmethod
-    def load(self) -> dict[str, Node]:
-        """Load latest nodes keyed by id."""
+    def write_state(self, state: Node) -> None: ...
 
     @abstractmethod
-    def fork(self, new_location: object) -> Session:
-        """Return a deep copy of this session."""
+    def read_transcript(self, agent_id: str) -> dict[str, Any] | None: ...
 
-    def chain_to(self, node: Node) -> list[Node]:
-        """Return the single-agent chain ending at ``node``."""
-        nodes = self.load()
-        nodes[node.id] = node
+    @abstractmethod
+    def write_transcript(self, agent_id: str, transcript: dict[str, Any]) -> None: ...
 
-        # Multiple candidates can list the same child id — e.g. a supervising
-        # parent agent's node and the sub-agent's own predecessor both claim
-        # the result node. Prefer same-agent parents so we walk inside the
-        # agent's chain rather than jumping out of it on the first lookup.
-        parents_by_child: dict[str, list[Node]] = {}
-        for candidate in nodes.values():
-            for child in candidate.children:
-                child_id = child.id if isinstance(child, Node) else str(child)
-                parents_by_child.setdefault(child_id, []).append(candidate)
+    @abstractmethod
+    def load_graph(self) -> Graph: ...
 
-        chain = [node]
-        current = node
-        seen = {node.id}
-        while True:
-            candidates = parents_by_child.get(current.id, [])
-            parent = next(
-                (c for c in candidates if c.agent_id == node.agent_id),
-                None,
-            )
-            if parent is None or parent.id in seen:
-                break
-            chain.append(parent)
-            seen.add(parent.id)
-            current = parent
-        return list(reversed(chain))
+    @abstractmethod
+    def fork(self, new_location: object) -> Session: ...
+
+
+# ── FileSession ──────────────────────────────────────────────────────
 
 
 class FileSession(Session):
-    """Store-backed session persistence.
-
-    - ``graph.json``
-    - ``session/<agent-id>/session.jsonl``
-    - ``session/<agent-id>/latest.json``
-    """
+    """Filesystem-backed :class:`Session`."""
 
     def __init__(self, root: Store | str | Path) -> None:
         self.store, self.root = resolve_backend(root)
 
-    def write(self, node: Node) -> None:
-        session_path = self._session_path(node.agent_id)
-        event_index = len(self.store.read_jsonl(session_path))
-        self.store.append_jsonl(session_path, node)
-        self.write_graph_view(node, session_path=session_path, event_index=event_index)
-        self.write_agent_view(node)
+    # ── writes ───────────────────────────────────────────────────────
 
-    def _session_path(self, agent_id: str) -> str:
-        return f"session/{_safe_name(agent_id)}/session.jsonl"
+    def write_agent(self, graph: Graph) -> None:
+        self.store.write_json(
+            f"session/{_safe_name(graph.agent_id)}/agent.json",
+            graph.meta_dict(),
+        )
+        self._touch_graph_agent(graph.agent_id)
 
-    def _graph(self) -> dict[str, Any]:
-        if self.store.exists("graph.json"):
-            graph = self.store.read_json("graph.json")
-        else:
-            graph = {}
-        graph.setdefault("version", 1)
-        graph.setdefault("roots", [])
-        graph.setdefault("nodes", {})
-        graph.setdefault("edges", [])
-        graph.setdefault("event_order", [])
-        return graph
+    def write_state(self, state: Node) -> None:
+        path = f"session/{_safe_name(state.agent_id)}/session.jsonl"
+        self.store.append_jsonl(path, state)
+        self._write_latest(state)
 
-    @staticmethod
-    def _child_id(child: Node | object) -> str:
-        return child.id if isinstance(child, Node) else str(child)
+    def read_transcript(self, agent_id: str) -> dict[str, Any] | None:
+        path = f"session/{_safe_name(agent_id)}/transcript.json"
+        if not self.store.exists(path):
+            return None
+        return self.store.read_json(path)
 
-    def write_graph_view(
-        self,
-        node: Node,
-        *,
-        session_path: str,
-        event_index: int,
-    ) -> None:
-        graph = self._graph()
-        nodes: dict[str, dict[str, Any]] = graph["nodes"]
-        edges: list[dict[str, str]] = graph["edges"]
+    def write_transcript(self, agent_id: str, transcript: dict[str, Any]) -> None:
+        path = f"session/{_safe_name(agent_id)}/transcript.json"
+        self.store.write_json(path, transcript)
 
-        child_ids = [self._child_id(child) for child in node.children]
-        nodes[node.id] = {
-            "id": node.id,
-            "agent_id": node.agent_id,
-            "branch_id": node.branch_id,
-            "type": node.type,
-            "depth": node.depth,
-            "session": session_path,
-            "event_index": event_index,
-            "children": child_ids,
-        }
+    # ── reads ────────────────────────────────────────────────────────
 
-        edge_keys = {(edge["from"], edge["to"]) for edge in edges}
-        for child in node.children:
-            child_id = self._child_id(child)
-            if (node.id, child_id) in edge_keys:
+    def load_graph(self) -> Graph:
+        manifest = self._load_manifest()
+        agent_dicts: dict[str, dict[str, Any]] = {}
+        agent_states: dict[str, tuple[Node, ...]] = {}
+        for aid in manifest["agents"]:
+            meta_path = f"session/{_safe_name(aid)}/agent.json"
+            if not self.store.exists(meta_path):
                 continue
-            child_agent_id = (
-                child.agent_id
-                if isinstance(child, Node)
-                else nodes.get(child_id, {}).get("agent_id")
+            agent_dicts[aid] = self.store.read_json(meta_path)
+            session_path = f"session/{_safe_name(aid)}/session.jsonl"
+            agent_states[aid] = tuple(
+                parse_node_obj(line) for line in self.store.read_jsonl(session_path)
             )
-            kind = (
-                "delegate"
-                if child_agent_id and child_agent_id != node.agent_id
-                else "successor"
-            )
-            edges.append({"from": node.id, "to": child_id, "kind": kind})
-            edge_keys.add((node.id, child_id))
-
-        child_targets = {edge["to"] for edge in edges}
-        graph["roots"] = sorted(
-            node_id for node_id in nodes if node_id not in child_targets
+        return _build_graph(
+            root_agent_id=manifest["root_agent_id"],
+            agent_dicts=agent_dicts,
+            agent_states=agent_states,
         )
-        graph["event_order"].append(
-            {
-                "node_id": node.id,
-                "agent_id": node.agent_id,
-                "session": session_path,
-                "event_index": event_index,
-            }
-        )
-        self.store.write_json("graph.json", graph)
 
-    def write_agent_view(self, node: Node) -> None:
-        view = {
-            "agent_id": node.agent_id,
-            "latest_leaf_id": node.id,
-            "branch_id": node.branch_id,
-            "depth": node.depth,
-            "type": node.type,
-            "terminal": node.terminal,
-            "result": getattr(node, "result", None),
+    # ── helpers ──────────────────────────────────────────────────────
+
+    def _load_manifest(self) -> dict[str, Any]:
+        if self.store.exists("graph.json"):
+            return self.store.read_json("graph.json")
+        return {"root_agent_id": "root", "agents": []}
+
+    def _touch_graph_agent(self, agent_id: str) -> None:
+        manifest = self._load_manifest()
+        dirty = False
+        if not manifest["agents"]:
+            # First write into a fresh workspace: this agent becomes the root.
+            manifest["root_agent_id"] = agent_id
+            dirty = True
+        if agent_id not in manifest["agents"]:
+            manifest["agents"].append(agent_id)
+            dirty = True
+        if dirty:
+            self.store.write_json("graph.json", manifest)
+
+    def _write_latest(self, state: Node) -> None:
+        summary = {
+            "agent_id": state.agent_id,
+            "latest_node_id": state.id,
+            "seq": state.seq,
+            "type": state.type,
+            "terminal": state.terminal,
+            "result": getattr(state, "result", None),
         }
-        self.store.write_json(f"session/{_safe_name(node.agent_id)}/latest.json", view)
-
-    def load(self) -> dict[str, Node]:
-        nodes: dict[str, Node] = {}
-        for node in self.events():
-            nodes[node.id] = node
-        return nodes
-
-    def event_paths(self) -> list[str]:
-        if self.store.exists("graph.json"):
-            graph = self.store.read_json("graph.json")
-            paths = {
-                event["session"]
-                for event in graph.get("event_order", [])
-                if isinstance(event, dict) and "session" in event
-            }
-            if paths:
-                return sorted(paths)
-        paths: list[str] = []
-        paths.extend(
-            path
-            for path in self.store.list("session")
-            if path.endswith("/session.jsonl")
+        self.store.write_json(
+            f"session/{_safe_name(state.agent_id)}/latest.json", summary
         )
-        return sorted(dict.fromkeys(paths))
-
-    def events(self) -> list[Node]:
-        out: list[Node] = []
-        if self.store.exists("graph.json"):
-            graph = self.store.read_json("graph.json")
-            for event in graph.get("event_order", []):
-                if not isinstance(event, dict):
-                    continue
-                session_path = event.get("session")
-                event_index = event.get("event_index")
-                if not isinstance(session_path, str) or not isinstance(
-                    event_index, int
-                ):
-                    continue
-                records = self.store.read_jsonl(session_path)
-                if 0 <= event_index < len(records):
-                    out.append(parse_node_obj(records[event_index]))
-            if out:
-                return out
-
-        for path in self.event_paths():
-            out.extend(parse_node_obj(obj) for obj in self.store.read_jsonl(path))
-        return out
 
     def fork(self, new_location: object) -> Session:
         return FileSession(
@@ -254,32 +202,101 @@ class FileSession(Session):
         )
 
 
+# ── InMemorySession ──────────────────────────────────────────────────
+
+
 class InMemorySession(Session):
     """Process-local session for runs without a Workspace."""
 
     def __init__(self) -> None:
-        self.nodes: dict[str, Node] = {}
+        self.agent_dicts: dict[str, dict[str, Any]] = {}
+        self.agent_states: dict[str, list[Node]] = {}
+        self.agent_transcripts: dict[str, dict[str, Any]] = {}
+        self.root_agent_id: str = "root"
 
-    def write(self, node: Node) -> None:
-        self.nodes[node.id] = node
+    def write_agent(self, graph: Graph) -> None:
+        if not self.agent_dicts:
+            self.root_agent_id = graph.agent_id
+        self.agent_dicts[graph.agent_id] = graph.meta_dict()
+        self.agent_states.setdefault(graph.agent_id, [])
+        self.agent_transcripts.setdefault(graph.agent_id, {})
 
-    def load(self) -> dict[str, Node]:
-        return dict(self.nodes)
+    def write_state(self, state: Node) -> None:
+        self.agent_states.setdefault(state.agent_id, []).append(state)
+
+    def read_transcript(self, agent_id: str) -> dict[str, Any] | None:
+        existing = self.agent_transcripts.get(agent_id)
+        if not existing:
+            return None
+        return {k: list(v) if isinstance(v, list) else v for k, v in existing.items()}
+
+    def write_transcript(self, agent_id: str, transcript: dict[str, Any]) -> None:
+        self.agent_transcripts[agent_id] = {
+            k: list(v) if isinstance(v, list) else v for k, v in transcript.items()
+        }
+
+    def load_graph(self) -> Graph:
+        return _build_graph(
+            root_agent_id=self.root_agent_id,
+            agent_dicts=self.agent_dicts,
+            agent_states={aid: tuple(s) for aid, s in self.agent_states.items()},
+        )
 
     def fork(self, new_location: object) -> Session:
         del new_location
         out = InMemorySession()
-        out.nodes = dict(self.nodes)
+        out.agent_dicts = {aid: dict(d) for aid, d in self.agent_dicts.items()}
+        out.agent_states = {aid: list(s) for aid, s in self.agent_states.items()}
+        out.agent_transcripts = {
+            aid: {k: list(v) if isinstance(v, list) else v for k, v in t.items()}
+            for aid, t in self.agent_transcripts.items()
+        }
+        out.root_agent_id = self.root_agent_id
         return out
+
+
+# ── recursive Graph builder ──────────────────────────────────────────
+
+
+def _build_graph(
+    *,
+    root_agent_id: str,
+    agent_dicts: dict[str, dict[str, Any]],
+    agent_states: dict[str, tuple[Node, ...]],
+) -> Graph:
+    """Recover the recursive :class:`Graph` from flat per-agent dicts.
+
+    Orphan agents (non-root with no ``parent_agent_id``) are attached
+    to the root so nothing is silently dropped.
+    """
+    children_by_parent: dict[str, list[str]] = {}
+    for aid, data in agent_dicts.items():
+        if aid == root_agent_id:
+            continue
+        parent = data.get("parent_agent_id") or root_agent_id
+        children_by_parent.setdefault(parent, []).append(aid)
+
+    def build(aid: str) -> Graph:
+        data = agent_dicts.get(aid, {"agent_id": aid})
+        states = agent_states.get(aid, ())
+        children = {
+            child_aid: build(child_aid) for child_aid in children_by_parent.get(aid, [])
+        }
+        return Graph.from_meta_dict(data, states=states, children=children)
+
+    if root_agent_id not in agent_dicts:
+        return Graph(agent_id=root_agent_id)
+    return build(root_agent_id)
+
+
+# ── SessionVariable ──────────────────────────────────────────────────
 
 
 class SessionVariable:
     """REPL handle giving an agent read-only access to every other agent's
     session in the same recursive tree.
 
-    The cross-agent analog of :class:`ContextVariable`. Methods mirror ypi's
-    ``rlm_sessions`` (list / read / grep) and operate over the same
-    :class:`Session` the engine is already writing to.
+    Lazily loads a :class:`Graph` from the underlying session on each call.
     """
 
     def __init__(
@@ -295,76 +312,25 @@ class SessionVariable:
         self.node_id = node_id
         self.branch_id = branch_id
 
-    # ── sibling discovery ─────────────────────────────────────────────
-
-    def _agents(self, *, include_self: bool = False) -> dict[str, list[Node]]:
-        groups: dict[str, list[Node]] = {}
-        for n in self.store.load().values():
-            if not include_self and n.agent_id == self.agent_id:
-                continue
-            groups.setdefault(n.agent_id, []).append(n)
-        return groups
-
-    @staticmethod
-    def _terminal_node(nodes: list[Node]) -> Node:
-        return min(nodes, key=lambda n: _NODE_TERMINALITY.get(n.type, 99))
+    def _graph(self) -> Graph:
+        return self.store.load_graph()
 
     def list_agents(self) -> list[dict[str, Any]]:
         """Summarize every other agent in the session."""
-        return self._summarize(self._agents())
-
-    # ── transcript ────────────────────────────────────────────────────
+        return _summarize(self._graph(), exclude={self.agent_id})
 
     def read(self, agent_id: str) -> str:
-        """Render the named agent's chain as a clean transcript.
-
-        Includes the system prompt, original query, each assistant turn
-        (with the ```repl``` block intact), each observation, and the
-        terminal result / error.
-        """
-        nodes = self._agents(include_self=True).get(agent_id, [])
-        if not nodes:
+        """Render the named agent's transcript."""
+        graph = self._graph()
+        if agent_id not in graph.agents:
             return f"(no nodes for agent {agent_id!r})"
-        chain = self.store.chain_to(self._terminal_node(nodes))
+        from rlmflow.utils.viewer import agent_transcript
 
-        parts: list[str] = []
-        if chain and chain[0].system_prompt:
-            parts.append(f"--- system ---\n{chain[0].system_prompt.strip()}")
-        for node in chain:
-            if node.type == "query":
-                parts.append(f"--- query ---\n{(node.query or '').strip()}")
-            elif node.type == "action":
-                parts.append(
-                    f"--- assistant ---\n{(getattr(node, 'reply', '') or '').strip()}"
-                )
-            elif node.type == "observation":
-                parts.append(
-                    f"--- observation ---\n{(getattr(node, 'content', '') or '').strip()}"
-                )
-            elif node.type == "supervising":
-                wait_on = ", ".join(getattr(node, "waiting_on", []) or [])
-                parts.append(f"--- supervising ---\nwaiting on: {wait_on}")
-            elif node.type == "resume":
-                parts.append(
-                    f"--- resume ---\n{(getattr(node, 'content', '') or '').strip()}"
-                )
-            elif node.type == "error":
-                parts.append(
-                    f"--- error ({getattr(node, 'error', '')}) ---\n"
-                    f"{(getattr(node, 'content', '') or '').strip()}"
-                )
-            elif node.type == "result":
-                parts.append(
-                    f"--- result ---\n{(getattr(node, 'result', '') or '').strip()}"
-                )
-        return "\n\n".join(parts)
-
-    # ── search ────────────────────────────────────────────────────────
+        return agent_transcript(graph[agent_id], include_system=True)
 
     _SEARCH_FIELDS: tuple[str, ...] = (
-        "query",
-        "reply",
         "content",
+        "reply",
         "output",
         "result",
         "error",
@@ -374,149 +340,108 @@ class SessionVariable:
         """Regex-search across every message field of every other agent."""
         compiled = re.compile(pattern, re.IGNORECASE)
         matches: list[str] = []
-        for agent_id, nodes in self._agents().items():
-            for n in nodes:
+        for agent in self._graph().walk():
+            if agent.agent_id == self.agent_id:
+                continue
+            if agent.query:
+                for line in agent.query.splitlines():
+                    if compiled.search(line):
+                        matches.append(f"{agent.agent_id}:query:{line.strip()[:160]}")
+                        if len(matches) >= max_results:
+                            return "\n".join(matches)
+            for state in agent.states:
                 for field in self._SEARCH_FIELDS:
-                    text = getattr(n, field, "") or ""
+                    text = getattr(state, field, "") or ""
                     if not text:
                         continue
                     for line in text.splitlines():
                         if compiled.search(line):
-                            matches.append(f"{agent_id}:{n.type}:{line.strip()[:160]}")
+                            matches.append(
+                                f"{agent.agent_id}:{state.type}:{line.strip()[:160]}"
+                            )
                             if len(matches) >= max_results:
                                 return "\n".join(matches)
         return "\n".join(matches)
 
-    # ── recursive-tree navigation ─────────────────────────────────────
-    #
-    # Parent-of-agent is derived from the actual cross-agent edges that
-    # already live in the session: when a node in agent A has a child
-    # node in agent B (e.g. A's ``SupervisingNode`` listing B's
-    # ``QueryNode`` as a child), B's parent agent is A. We don't parse
-    # dots in agent ids — that breaks the moment an agent name contains
-    # a dot (``root.script.js`` is a single child of ``root``, not nested).
-
-    def _agent_parents(self) -> dict[str, str | None]:
-        """Map ``agent_id -> parent agent_id`` (``None`` for roots)."""
-        all_nodes = list(self.store.load().values())
-        by_id = {n.id: n for n in all_nodes}
-        parents: dict[str, str | None] = {}
-        for n in all_nodes:
-            for child in n.children:
-                child_id = child.id if isinstance(child, Node) else str(child)
-                child_node = by_id.get(child_id)
-                if child_node and child_node.agent_id != n.agent_id:
-                    parents.setdefault(child_node.agent_id, n.agent_id)
-        for n in all_nodes:
-            parents.setdefault(n.agent_id, None)
-        return parents
-
     def parent(self, agent_id: str | None = None) -> str | None:
-        """Parent ``agent_id`` of ``agent_id`` (defaults to self). ``None`` at root."""
-        return self._agent_parents().get(agent_id or self.agent_id)
+        graph = self._graph()
+        target = agent_id or self.agent_id
+        if target not in graph.agents:
+            return None
+        return graph[target].parent_id
 
     def ancestors(self, agent_id: str | None = None) -> list[str]:
-        """Agent ids walking root-ward, root first, excluding ``agent_id`` itself."""
-        parents = self._agent_parents()
+        graph = self._graph()
         out: list[str] = []
-        seen: set[str] = set()
-        cur = parents.get(agent_id or self.agent_id)
-        while cur and cur not in seen:
-            out.append(cur)
-            seen.add(cur)
-            cur = parents.get(cur)
+        target = agent_id or self.agent_id
+        while target in graph.agents:
+            parent = graph[target].parent_id
+            if not parent:
+                break
+            out.append(parent)
+            target = parent
         return list(reversed(out))
 
     def children(self, agent_id: str | None = None) -> list[str]:
-        """Direct child agent ids of ``agent_id`` (defaults to self)."""
-        aid = agent_id or self.agent_id
-        return sorted(
-            child
-            for child, parent_id in self._agent_parents().items()
-            if parent_id == aid
-        )
+        graph = self._graph()
+        target = agent_id or self.agent_id
+        if target not in graph.agents:
+            return []
+        return sorted(graph[target].children.keys())
 
     def subtree(self, agent_id: str | None = None) -> list[dict[str, Any]]:
-        """Every descendant agent under ``agent_id``, summarized like ``list_agents``."""
-        aid = agent_id or self.agent_id
-        parents = self._agent_parents()
-        descendants: set[str] = set()
-        frontier = [aid]
-        while frontier:
-            current = frontier.pop()
-            for child, parent_id in parents.items():
-                if parent_id == current and child not in descendants:
-                    descendants.add(child)
-                    frontier.append(child)
-        groups = self._agents(include_self=True)
-        return self._summarize({a: groups[a] for a in descendants if a in groups})
+        graph = self._graph()
+        target = agent_id or self.agent_id
+        if target not in graph.agents:
+            return []
+        ids = {sub.agent_id for sub in graph[target].walk()} - {target}
+        return _summarize(graph, include=ids)
 
     def tree(self) -> str:
-        """ASCII rendering of the full recursive agent tree.
+        return self._graph().tree()
 
-        Each line is ``agent_id [type] result_preview``. Depth-first,
-        alphabetical within siblings.
-        """
-        groups = self._agents(include_self=True)
-        if not groups:
-            return ""
 
-        parents = self._agent_parents()
-        labels: dict[str, str] = {}
-        kids: dict[str, list[str]] = {aid: [] for aid in groups}
-        roots: list[str] = []
+# ── shared summarization ─────────────────────────────────────────────
 
-        for aid, nodes in groups.items():
-            tip = self._terminal_node(nodes)
-            preview = (getattr(tip, "result", None) or "").strip().split("\n", 1)[0]
-            label = f"{aid} [{tip.type}]"
-            if preview:
-                label += f" {preview[:60]}"
-            labels[aid] = label
-            parent_id = parents.get(aid)
-            if parent_id and parent_id in groups:
-                kids[parent_id].append(aid)
-            else:
-                roots.append(aid)
 
-        for siblings in kids.values():
-            siblings.sort()
-        roots.sort()
-
-        lines: list[str] = []
-
-        def walk(aid: str, indent: str) -> None:
-            for i, child in enumerate(kids.get(aid, [])):
-                last = i == len(kids[aid]) - 1
-                connector = "└── " if last else "├── "
-                lines.append(f"{indent}{connector}{labels[child]}")
-                walk(child, indent + ("    " if last else "│   "))
-
-        for root in roots:
-            lines.append(labels[root])
-            walk(root, "")
-        return "\n".join(lines)
-
-    # ── shared summarization (used by list_agents and subtree) ────────
-
-    @staticmethod
-    def _summarize(groups: dict[str, list[Node]]) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for agent_id, nodes in groups.items():
-            tip = SessionVariable._terminal_node(nodes)
-            preview = (getattr(tip, "result", None) or "").strip().replace("\n", " ")
-            out.append(
-                {
-                    "agent_id": agent_id,
-                    "type": tip.type,
-                    "depth": tip.depth or 0,
-                    "terminal": bool(tip.terminal),
-                    "result_preview": preview[:120]
-                    + ("…" if len(preview) > 120 else ""),
-                }
+def _summarize(
+    graph: Graph,
+    *,
+    include: set[str] | None = None,
+    exclude: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for agent in graph.walk():
+        aid = agent.agent_id
+        if include is not None and aid not in include:
+            continue
+        if exclude is not None and aid in exclude:
+            continue
+        tip = agent.current()
+        if tip is None:
+            continue
+        preview_src = ""
+        if is_done(tip):
+            preview_src = tip.result or ""
+        elif is_observation(tip):
+            preview_src = (
+                getattr(tip, "content", "")
+                or getattr(tip, "output", "")
+                or getattr(tip, "reply", "")
+                or ""
             )
-        out.sort(key=lambda r: (r["depth"], r["agent_id"]))
-        return out
+        preview = " ".join(preview_src.split())
+        out.append(
+            {
+                "agent_id": aid,
+                "type": tip.type,
+                "depth": agent.depth,
+                "terminal": bool(tip.terminal),
+                "result_preview": preview[:120] + ("…" if len(preview) > 120 else ""),
+            }
+        )
+    out.sort(key=lambda r: (r["depth"], r["agent_id"]))
+    return out
 
 
 __all__ = [

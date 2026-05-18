@@ -1,9 +1,0 @@
-{
-  "agent_id": "root.sim_js",
-  "latest_leaf_id": "n_b5bc43f4ea82",
-  "branch_id": "main",
-  "depth": 1,
-  "type": "result",
-  "terminal": true,
-  "result": "Wrote and verified output/boids-simulation/js/sim.js"
-}

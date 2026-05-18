@@ -10,6 +10,7 @@ Commands:
   - ``{"cmd": "inject",              "name": N, "value": expr}``       bind ``N = eval(expr)``
   - ``{"cmd": "inject_proxy",        "name": N}``                      bind ``N`` as proxy fn
   - ``{"cmd": "inject_object_proxy", "name": N, "methods": [...]}``    bind ``N`` with each method as a proxy fn
+  - ``{"cmd": "read",                "name": N}``                      returns ``{"value": namespace.get(N)}``
   - ``{"cmd": "run",                 "code": src}``                    exec; may suspend
   - ``{"cmd": "resume",              "value": v}``                     resume suspended gen
 
@@ -22,21 +23,53 @@ from __future__ import annotations
 import argparse
 import ast
 import io
+import itertools
 import json
+import linecache
+import os
 import re
 import sys
 import threading
+import traceback
 import types
 from contextlib import contextmanager
 from typing import Any, TextIO
 
-from rlmflow.node import ChildHandle, WaitRequest
+from rlmflow.graph import ChildHandle, WaitRequest
+from rlmflow.tools.builtins import DoneSignal
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_THIS_FILE = os.path.normpath(__file__)
+_REPL_ID_COUNTER = itertools.count(1)
 
 
 def strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
+
+
+def _register_source(filename: str, code: str) -> None:
+    """Register `code` under `filename` so traceback can render source lines.
+
+    `linecache.cache` is the same hook real Python files use; once a frame's
+    filename is in there, ``traceback.format_exception`` will include the
+    actual source line for each frame (e.g. ``    return x['key']``).
+    """
+    lines = code.splitlines(keepends=True)
+    linecache.cache[filename] = (len(code), None, lines, filename)
+
+
+def _format_repl_traceback(exc: BaseException) -> str:
+    """Format `exc`'s traceback, hiding `repl.py`'s own machinery frames.
+
+    The agent only cares about frames in its own code (``<rlm:...>``) and in
+    tool implementations. Frames from ``rlmflow/runtime/repl.py`` itself
+    (``self.gen.send(...)``, ``exec(...)``) are pure noise — strip them.
+    """
+    te = traceback.TracebackException.from_exception(exc)
+    te.stack = traceback.StackSummary.from_list(
+        [frame for frame in te.stack if os.path.normpath(frame.filename) != _THIS_FILE]
+    )
+    return "".join(te.format()).rstrip()
 
 
 class _AnnotationStripper(ast.NodeTransformer):
@@ -66,6 +99,68 @@ class _AnnotationStripper(ast.NodeTransformer):
 
 def _strip_name_annotations(stmt: ast.stmt) -> ast.stmt | None:
     return _AnnotationStripper().visit(stmt)
+
+
+def _has_top_level_yield(tree: ast.AST) -> bool:
+    """True iff ``tree`` has any ``yield`` / ``yield from`` at the
+    block's top level (i.e. outside every nested function / async
+    function / lambda / generator expression / class body).
+
+    Why "any", not "yield wait(...)"? Because this question is purely
+    about Python *compilation*, not about the agent suspension
+    protocol. ``yield`` at module level is a ``SyntaxError`` in
+    plain Python — it has to live inside a function. So if the
+    block contains any top-level yield, we must wrap the whole
+    thing in a synthetic ``def __rlm_gen__():`` for ``compile()`` to
+    accept it. If there is no top-level yield, we exec the code
+    directly. That's the only thing this function decides.
+
+    The separate question — "did the block yield a ``wait(*handles)``
+    request, meaning suspend the agent, or did it yield something
+    else, meaning treat it as a plain Python generator yield" — is
+    handled later in :meth:`REPL.advance`. Only ``WaitRequest``
+    yields suspend; everything else is pumped past silently. See
+    ``docs/repl_yield_protocol.md`` for the full picture.
+
+    Examples that wrap (return ``True``)::
+
+        yield                  # bare yield at top level
+        yield 1                # any value at top level
+        yield wait(h)          # the engine-suspension case
+        x = yield 5            # yield as expression
+        for h in hs: yield h   # inside top-level control flow
+
+    Examples that don't wrap (return ``False``) because the yield
+    belongs to a nested scope, which is itself a perfectly valid
+    Python generator/function definition the block can use::
+
+        def squares(n):                   # ordinary helper generator
+            yield n*n
+        xs = list(i*i for i in range(3))  # generator expression
+        f = lambda: (yield 1)             # lambda body
+        class C:                          # method body
+            def __iter__(self):
+                yield 1
+
+    Why we walk the AST instead of using ``ast.walk``: ``ast.walk``
+    descends into nested function bodies, so it would flag the
+    ``def squares`` cases as having a yield and we'd wrap them. The
+    wrap would then fail to behave as a generator (``__rlm_gen__``
+    has no actual top-level yield) and return ``None`` from
+    ``__rlm_gen__()``, which would later crash
+    ``REPL.advance`` on ``None.agent_ids``.
+    """
+    boundary = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    stack: list[ast.AST] = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return True
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, boundary):
+                continue
+            stack.append(child)
+    return False
 
 
 # ── thread-safe stdout capture ────────────────────────────────────────
@@ -134,6 +229,9 @@ class REPL:
         self.protocol_out = protocol_out or sys.stdout
         self.gen = None
         self.buf: io.StringIO | None = None
+        self.errored: bool = False
+        self._repl_id = next(_REPL_ID_COUNTER)
+        self._src_counter = 0
         if not isinstance(sys.stdout, _StdoutProxy):
             sys.stdout = _StdoutProxy(sys.stdout)
 
@@ -141,25 +239,56 @@ class REPL:
 
     @contextmanager
     def captured(self):
-        """Activate the thread-local buffer for stdout capture."""
+        """Activate the thread-local buffer for stdout capture.
+
+        Catches three classes of bubble-up:
+
+        * :class:`DoneSignal` — terminal control flow from ``done()``;
+          the engine reads ``DONE_RESULT`` from ``runtime.env`` after.
+        * :class:`Exception` — any normal runtime error from agent code
+          becomes a captured traceback + ``errored=True`` for the next
+          turn to read.
+        * :class:`SystemExit` / :class:`KeyboardInterrupt` — these
+          inherit from ``BaseException`` (not ``Exception``), so a
+          stray ``raise SystemExit(...)`` or ``sys.exit(...)`` inside
+          an agent's REPL would escape the engine and **exit the host
+          process**. We treat them like any other agent error: format
+          a traceback, set ``errored``, and resume the engine.
+          ``BaseException`` itself is *not* caught — that would also
+          swallow ``GeneratorExit`` etc., which we want to bubble.
+        """
         _capture.buf = self.buf
         try:
             yield
+        except DoneSignal:
+            pass
+        except (SystemExit, KeyboardInterrupt) as exc:
+            self.buf.write("\n" + _format_repl_traceback(exc))
+            self.errored = True
         except Exception as exc:
-            self.buf.write(f"\n{type(exc).__name__}: {exc}")
+            self.buf.write("\n" + _format_repl_traceback(exc))
+            self.errored = True
         finally:
             _capture.buf = None
+
+    def _source_filename(self, code: str) -> str:
+        """Stable per-call filename so traceback frames show the right source."""
+        self._src_counter += 1
+        filename = f"<rlm-{self._repl_id}.{self._src_counter}>"
+        _register_source(filename, code)
+        return filename
 
     def execute(self, code: str) -> str:
         """Execute code without generator support. Returns stdout."""
         self.buf = io.StringIO()
+        filename = self._source_filename(code)
         with self.captured():
-            exec(code, self.namespace)
+            exec(compile(code, filename, "exec"), self.namespace)
         return strip_ansi(self.buf.getvalue().strip())
 
-    def _wrap_generator(self, code: str, tree: ast.Module):
-        """Wrap ``code`` in a generator fn; ``global`` every assigned name so
-        variables persist in ``self.namespace`` across yields.
+    def _wrap_generator(self, tree: ast.Module, filename: str):
+        """Wrap parsed ``tree`` in a generator fn; ``global`` every assigned
+        name so variables persist in ``self.namespace`` across yields.
 
         ``from X import *`` is illegal inside functions, so any such
         statements are hoisted out and exec'd at module level first;
@@ -184,7 +313,7 @@ class REPL:
         if star_imports:
             imports_mod = ast.Module(body=star_imports, type_ignores=[])
             ast.fix_missing_locations(imports_mod)
-            exec(compile(imports_mod, "<rlm-imports>", "exec"), self.namespace)
+            exec(compile(imports_mod, filename, "exec"), self.namespace)
 
         assigned = {
             node.id
@@ -200,41 +329,57 @@ class REPL:
         func.body = body
         module = ast.Module(body=[func], type_ignores=[])
         ast.fix_missing_locations(module)
-        exec(compile(module, "<rlm>", "exec"), self.namespace)
+        exec(compile(module, filename, "exec"), self.namespace)
         return self.namespace.pop("__rlm_gen__")
 
     def start(self, code: str) -> tuple[bool, object]:
         """Execute ``code``. Returns ``(True, yielded)`` or ``(False, stdout)``."""
         self.buf = io.StringIO()
+        self.errored = False
         try:
             tree = ast.parse(code)
         except SyntaxError as exc:
             self.buf.write(f"\nSyntaxError: {exc}")
+            self.errored = True
             return False, self.buf.getvalue().strip()
 
-        has_yield = any(
-            isinstance(n, (ast.Yield, ast.YieldFrom)) for n in ast.walk(tree)
-        )
+        has_yield = _has_top_level_yield(tree)
+        filename = self._source_filename(code)
 
         if not has_yield:
             with self.captured():
-                exec(code, self.namespace)
+                exec(compile(code, filename, "exec"), self.namespace)
             return False, strip_ansi(self.buf.getvalue().strip())
 
-        fn = self._wrap_generator(code, tree)
+        fn = self._wrap_generator(tree, filename)
         self.gen = fn()
         return self.advance()
 
     def resume(self, send_value=None) -> tuple[bool, object]:
         """Resume a suspended generator. Same return convention as :meth:`start`."""
         self.buf = io.StringIO()
+        self.errored = False
         return self.advance(send_value)
 
     def advance(self, send_value=None) -> tuple[bool, object]:
-        """Drive the generator one step. Yield → suspend, StopIteration → done."""
+        """Drive the generator. Suspend only on ``WaitRequest`` yields.
+
+        The REPL only treats a yield as suspension when its value is a
+        :class:`WaitRequest` (returned by ``wait(*handles)``). Any other
+        yielded value is treated like a normal Python generator yield —
+        the engine just pumps the generator forward by sending ``None``
+        back. This keeps generic ``yield`` usage in REPL code working
+        (data pipelines, generator helpers consumed at top level, etc.)
+        and only intercepts the specific delegate→wait protocol the
+        engine knows how to schedule.
+        """
         with self.captured():
             try:
                 request = self.gen.send(send_value)
+                while not isinstance(request, WaitRequest):
+                    # Non-Wait top-level yield: behave like a plain
+                    # Python generator — discard the value, resume.
+                    request = self.gen.send(None)
                 pre_output = strip_ansi(self.buf.getvalue().strip())
                 return True, (request, pre_output)
             except StopIteration:
@@ -261,6 +406,8 @@ class REPL:
             protocol_out.flush()
             line = sys.stdin.readline()
             resp = json.loads(line)
+            if resp.get("done"):
+                raise DoneSignal()
             if "error" in resp:
                 raise RuntimeError(resp["error"])
             return deserialize(resp["value"])
@@ -273,8 +420,13 @@ class REPL:
             resp = {"suspended": True, "agent_ids": request.agent_ids}
             if pre_output:
                 resp["pre_output"] = pre_output
+            if self.errored:
+                resp["errored"] = True
             return resp
-        return {"suspended": False, "output": result}
+        resp = {"suspended": False, "output": result}
+        if self.errored:
+            resp["errored"] = True
+        return resp
 
     def handle(self, msg: dict) -> dict:
         """Process a single command and return the response dict."""
@@ -283,6 +435,8 @@ class REPL:
             return self.format_result(*self.start(msg["code"]))
         if cmd == "resume":
             return self.format_result(*self.resume(send_value=msg.get("value")))
+        if cmd == "read":
+            return {"value": serialize(self.namespace.get(msg["name"]))}
         if cmd == "inject":
             self.namespace[msg["name"]] = eval(msg["value"], self.namespace)
         elif cmd == "inject_proxy":

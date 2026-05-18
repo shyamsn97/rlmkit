@@ -1,9 +1,0 @@
-{
-  "agent_id": "root",
-  "latest_leaf_id": "n_60ed71c2624f",
-  "branch_id": "main",
-  "depth": 0,
-  "type": "result",
-  "terminal": true,
-  "result": "{\"path\": \"output/sidescrolling-platformer\", \"files\": [\"output/sidescrolling-platformer/index.html\", \"output/sidescrolling-platformer/core.js\", \"output/sidescrolling-platformer/input.js\", \"output/sidescrolling-platformer/player.js\", \"output/sidescrolling-platformer/coin.js\", \"output/sidescrolling-platformer/enemy.js\", \"output/sidescrolling-platformer/level.js\", \"output/sidescrolling-platformer/game.js\"], \"verified\": true, \"node\": \"skipped\"}"
-}

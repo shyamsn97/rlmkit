@@ -41,3 +41,7 @@ class LocalRuntime(Runtime):
     def inject(self, name: str, value: Any) -> None:
         # In-process: bind directly, skip the proxy protocol entirely.
         self.repl.namespace[name] = value
+
+    def read(self, name: str) -> Any:
+        # In-process: dict lookup, skip the JSON round-trip.
+        return self.repl.namespace.get(name)

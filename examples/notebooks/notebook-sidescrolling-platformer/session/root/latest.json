@@ -1,9 +1,0 @@
-{
-  "agent_id": "root",
-  "latest_leaf_id": "n_759edf8add41",
-  "branch_id": "main",
-  "depth": 0,
-  "type": "result",
-  "terminal": true,
-  "result": "{\"status\": \"ok\", \"entry\": \"output/sidescrolling-platformer/index.html\", \"files\": [\"output/sidescrolling-platformer/index.html\", \"output/sidescrolling-platformer/style.css\", \"output/sidescrolling-platformer/js/input.js\", \"output/sidescrolling-platformer/js/level.js\", \"output/sidescrolling-platformer/js/entities.js\", \"output/sidescrolling-platformer/js/game.js\", \"output/sidescrolling-platformer/js/main.js\"], \"sizes\": {\"output/sidescrolling-platformer/index.html\": 705, \"output/sidescrolling-platformer/style.css\": 443, \"output/sidescrolling-platformer/js/input.js\": 1242, \"output/sidescrolling-platformer/js/level.js\": 2035, \"output/sidescrolling-platformer/js/entities.js\": 5771, \"output/sidescrolling-platformer/js/game.js\": 4658, \"output/sidescrolling-platformer/js/main.js\": 494}, \"how_to_run\": \"Open output/sidescrolling-platformer/index.html in a browser.\"}"
-}

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Boids Simulation</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="overlay">
+    <div id="stats">
+      <span id="fps">FPS: --</span>
+      <span id="count">Boids: --</span>
+    </div>
+  </div>
+
+  <!-- Scripts: utils first, then boid, flock, main -->
+  <script src="utils.js"></script>
+  <script src="boid.js"></script>
+  <script src="flock.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

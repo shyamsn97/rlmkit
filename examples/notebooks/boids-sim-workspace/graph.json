@@ -1,0 +1,11 @@
+{
+  "root_agent_id": "root",
+  "agents": [
+    "root",
+    "root.index.html",
+    "root.styles.css",
+    "root.util.js",
+    "root.boid.js",
+    "root.script.js"
+  ]
+}

@@ -1,178 +1,193 @@
 # Observability
 
-Everything you need to debug a run lives in the typed node graph.
+Everything you need to debug a run lives in the immutable :class:`Graph` snapshot returned by every `start` / `step` call.
 
-## Node Fields
+## Data model
 
-```python
-node.id
-node.type                 # query | action | observation | supervising | resume | result | error
-node.agent_id             # "root", "root.search_0", ...
-node.depth                # root = 0, children = 1, ...
-node.children             # successor ids or live child nodes
-node.query                # original task for this agent
-node.system_prompt        # prompt snapshot for this agent
-node.config               # node-local max_depth, max_iterations, model, ...
-node.workspace            # serializable WorkspaceRef
-node.runtime              # RuntimeRef for REPL continuity
-node.total_input_tokens
-node.total_output_tokens
-node.tree_usage()         # (in, out) across the subtree
-node.tree_tokens          # subtree total
-node.tree()               # ASCII tree render
-```
-
-Action nodes additionally store `reply`, `code`, `model`, and turn token usage.
-Result nodes store `result`. Supervising nodes store `waiting_on` and child
-leaves.
-
-## Node Types
-
-Each `step()` returns a new node:
-
-| Node | Meaning |
-|---|---|
-| `QueryNode` | First user/task input for an agent. |
-| `ActionNode` | Raw LLM reply plus extracted REPL code. |
-| `ObservationNode` | REPL output after code execution. |
-| `SupervisingNode` | Action suspended on `yield wait(...)`. |
-| `ResumeNode` | Parent resumed after children finished. |
-| `ErrorNode` | Failure observation. |
-| `ResultNode` | Terminal answer from `done(...)`. |
-
-## Save & load
-
-A single node checkpoint — save, load, and continue later:
+A `Graph` is a recursive structure: it represents **one agent**, and
+`graph[other_aid]` returns the `Graph` rooted at any descendant agent.
+Per-agent invariants live as flat fields on `Graph` itself; sub-agents
+live in `graph.children`; trajectory lives in `graph.states`.
 
 ```python
-node.save("checkpoint.json")
-node = Node.load("checkpoint.json")
+graph.agent_id     # str — this agent's id
+graph.depth        # int — recursion depth
+graph.query        # str — original task
+graph.system_prompt
+graph.config       # dict — engine knobs at spawn
+graph.workspace    # WorkspaceRef | None
+graph.runtime      # RuntimeRef | None
+graph.model        # str | None — concrete model name (if set)
+graph.parent_agent_id / graph.parent_node_id
+
+graph.states       # tuple[Node, ...] — this agent's trajectory (seq order)
+graph.children     # dict[str, Graph] — direct sub-agents
+
+# subtree views (every agent / node / edge in the recursion)
+graph.agents       # Mapping[agent_id, Graph]
+graph.nodes        # every Node in the subtree (iterable, queryable)
+graph.edges        # derived flows_to / spawns edges
+
+graph.tree()       # ASCII per-agent timeline
 ```
 
-A full run — every step in order:
+`Node` carries only what changes per turn — the state payload
+(`content`, `code`, `output`, `reply`, `result`, `error`, token
+deltas) — and is tagged by its `type`. Trajectories strictly
+alternate **observation** and **action** nodes; every action is
+followed by exactly one observation. Nine concrete leaf classes
+under four base classes (full spec:
+[`docs/internal/node_model.md`](internal/node_model.md)):
+
+| `type`                | Class                | Base                   | Carries                                                           |
+|-----------------------|----------------------|------------------------|-------------------------------------------------------------------|
+| `user_query`          | `UserQuery`          | `ObservationNode`      | initial task content (root user query / spawn prompt for a child) |
+| `llm_action`          | `LLMAction`          | `ActionNode`           | "called the LLM" — model name + call metadata                     |
+| `llm_output`          | `LLMOutput`          | `ObservationNode`      | reply, extracted REPL code, token deltas                          |
+| `exec_action`         | `ExecAction`         | `ActionNode`           | "ran fresh code" — optional code echo                             |
+| `exec_output`         | `ExecOutput`         | `CodeObservation` (obs)| runtime stdout/stderr                                             |
+| `supervising_output`  | `SupervisingOutput`  | `CodeObservation` (obs)| code yielded; `waiting_on` lists pending children                 |
+| `error_output`        | `ErrorOutput`        | `CodeObservation` (obs)| failure observation                                               |
+| `done_output`         | `DoneOutput`         | `CodeObservation` (obs)| terminal answer from `done(...)`                                  |
+| `resume_action`       | `ResumeAction`       | `ActionNode`           | "supervisor resumed paused code" — produces a `CodeObservation`   |
+
+Use `isinstance(n, CodeObservation)` for "any code result"
+(`ExecOutput`, `SupervisingOutput`, `ErrorOutput`, `DoneOutput`).
+
+## Querying the graph
 
 ```python
-from rlmflow.utils.trace import save_trace, load_trace
+graph.tree()                                   # ASCII render
+graph.current()                                # latest state on the root agent
+graph.result()                                 # terminal answer
+graph.finished                                 # root agent's current state is terminal
+graph.tokens()                                 # (in, out) — recursive by default
+graph.tokens(recursive=False)                  # (in, out) — just this agent
 
-save_trace(states, "traces/run1")
-save_trace(states, "traces/run1", metadata={"model": "gpt-5"})
+graph["root.scanner_api"]                      # sub-Graph rooted at that agent / node
+graph.agents["root.scanner_api"]               # same, but explicit
+graph.children                                 # list[Graph] of spawned children
+graph.parent_id                                # str | None — id of the spawning agent
 
-t = load_trace("traces/run1")
-t.states          # list[Node] — typed events preserved
-t.metadata
+graph.agents[aid].states                       # ordered list[Node] for one agent
+graph.agents[aid].result()                     # the latest DoneOutput payload
+graph.agents[aid].tokens()                     # (in, out) for that subtree
+
+graph.nodes                                    # iterate every node (agent then seq)
+graph.nodes.find("n_abc...")                   # bare Node lookup by id
+graph.nodes.errors()                           # list[ErrorOutput]
+graph.nodes.results()                          # list[DoneOutput]
+graph.nodes.supervising()                      # list[SupervisingOutput]
+graph.nodes.where(type="llm_output", agent_id="root")  # kwargs match attrs
+graph.nodes.where(lambda n: n.type == "error_output")  # or pass a predicate
+
+graph.edges.spawns()                           # list[Edge] — cross-agent delegation
+graph.edges.flows_to()                         # list[Edge] — same-agent continuity
 ```
 
-Traces are plain JSON — grep-able, diff-able.
+## Workspace Persistence
 
-The canonical trace shipped with the repo lives at
-`examples/data/notebook-coding-agent/`. It's generated by
-[`coding_agent.ipynb`](../examples/notebooks/coding_agent.ipynb)
-(boids simulation: 6 agents, 5 children) and consumed by
-[`node_basics.ipynb`](../examples/notebooks/node_basics.ipynb)
-(querying API) and
-[`viz_walkthrough.ipynb`](../examples/notebooks/viz_walkthrough.ipynb)
-(every render path) — load it with `load_trace(path).states` to
-inspect a real recursive run end-to-end.
+A workspace is the durable run. It stores per-agent state logs, context
+payloads, and the graph manifest. Reopen it directly:
 
-## Session And Context
+```python
+from rlmflow import Workspace
 
-`Workspace` separates message history from task payloads:
+workspace = Workspace.open_path("runs/deep_research")
+graph = workspace.load_graph()
+```
+
+## Workspace persistence
+
+`Workspace` separates per-agent state logs, the graph manifest, and
+task payloads:
 
 ```text
 workspace/
-  graph.json
+  graph.json                  # workspace manifest: root + agent list
   session/
     root/
-      session.jsonl
-      latest.json
+      agent.json              # per-agent invariants written once
+      session.jsonl           # one Node per line, in seq order
+      latest.json             # cached summary of the latest state
     root.child/
+      agent.json
       session.jsonl
       latest.json
   context/
-    root/
-      context.txt
-      context_metadata.json
-    root.child/
-      context.txt
-      context_metadata.json
+    root/context.txt          # CONTEXT payload + metadata
+    root.child/context.txt
 ```
 
-`Workspace.session` persists the node/message graph. `Workspace.context`
-persists optional payload data exposed in the REPL as `CONTEXT`. Traces are
-not part of the workspace layout — `save_trace(states, path)` writes wherever
-you point it (`workspace.trace_dir` is just a convention path, not an
-engine-managed directory).
-
-`session/<agent-id>/session.jsonl` stores each recursive call's node/message
-events. `graph.json` is a compact manifest of the whole run: node refs, edges,
-roots, and event order. It lets viewers and trace export load the graph without
-scanning every session file first. Messages are derived from
-`Session.chain_to(node)`, not stored as a second source of truth.
+`Workspace.load_graph()` rehydrates the persisted state as the same `Graph`
+shape the engine emits — `flows_to` edges are derived from state order,
+`spawns` edges come straight from `graph.json`.
 
 ## Live terminal
 
 ```python
 from rlmflow.utils.viz import live
-for node in live(agent, agent.start(query)):
+
+for graph in live(agent, agent.start(query)):
     pass
 ```
 
-Or just `print(node.tree())` in a step loop.
+Or just `print(graph.tree())` in a step loop.
 
 ## Gantt swimlane
 
-One row per agent, one column per step, colored by node type. Makes
-parallelism and critical path obvious at a glance.
+One row per agent, one column per step, colored by state type. Makes
+parallelism and the critical path obvious at a glance.
 
 ```python
 from rlmflow.utils.viz import gantt, gantt_html
 
-gantt(states)                            # print to terminal (Rich)
-Path("run.html").write_text(gantt_html(states, title="run 1"))
+gantt(graphs)                                  # print to terminal (Rich)
+Path("run.html").write_text(gantt_html(graphs, title="run 1"))
 ```
 
 ## Topology exports
 
-Static renders of the tree, for READMEs, issues, and post-mortems.
+Static renders of the graph for READMEs, issues, and post-mortems.
 
 ```python
 from rlmflow.utils.export import to_mermaid, to_dot, to_d2
 
-print(to_mermaid(states[-1]))            # stateDiagram-v2 — paste into GitHub
-Path("run.dot").write_text(to_dot(states[-1]))
-Path("run.d2").write_text(to_d2(states[-1]))
+print(to_mermaid(graphs[-1]))                  # stateDiagram-v2 — paste into GitHub
+Path("run.dot").write_text(to_dot(graphs[-1]))
+Path("run.d2").write_text(to_d2(graphs[-1]))
 # $ dot -Tsvg run.dot -o run.svg
 # $ d2  run.d2 run.svg
 ```
 
-Per-agent message streams and ASCII tree boxes are also one call:
+Per-agent transcripts and ASCII tree boxes are one call:
 
 ```python
-from rlmflow.utils.viz import message_stream, ascii_boxes
+from rlmflow.utils.viz import ascii_boxes, message_stream
 
-print(message_stream("root.boids_js", workspace.session))
-print(ascii_boxes(states[-1]))
+print(message_stream("root.boid_js", graphs[-1]))
+print(ascii_boxes(graphs[-1]))
 ```
 
 ## Image and HTML snapshots
 
 For blog posts, PR comments, papers, or CI artifacts — render the
-graph straight to a PNG (or SVG/PDF), or to a single self-contained
-HTML stepper.
+graph to a PNG (or SVG/PDF), or to a single self-contained HTML
+stepper.
 
 ```python
 from rlmflow.utils import save_image, save_steps, save_html
 
-save_image(states[-1], "trace_final.png")        # one snapshot
-save_steps(states, "frames/")                    # one PNG per step
-save_html(states, "trace.html", title="run 1")   # standalone stepper
+save_image("runs/deep_research", "final.png")       # latest workspace snapshot
+save_html("runs/deep_research", "viewer.html")      # standalone viewer
+save_steps(graphs, "frames/")                       # if you kept a history list
 ```
 
-Or via the node convenience methods:
+Or via the graph convenience methods:
 
 ```python
-states[-1].save_image("trace_final.png")
-states[-1].save_html("trace.html", states=states)
+graph.save_image("final.png")
+graph.save_html("viewer.html")
 ```
 
 Markers, edges, and fonts auto-scale (`element_mult=3.0` by default
@@ -182,7 +197,7 @@ taste.
 
 ```python
 save_steps(
-    states,
+    graphs,
     "frames/",
     width=1800,
     height=1350,
@@ -202,7 +217,7 @@ For an animated GIF instead of separate frames, add Pillow:
 ```python
 from rlmflow.utils import save_gif
 
-save_gif(states, "trace.gif", duration=400)   # ~2.5 fps
+save_gif(graphs, "trace.gif", duration=400)    # ~2.5 fps
 ```
 
 ```
@@ -217,23 +232,24 @@ from CDN and runs in any browser.
 ```python
 from rlmflow.utils.viewer import open_viewer
 
-open_viewer(states)                      # from an in-memory run
+open_viewer("runs/deep_research")              # workspace path
+open_viewer(graph)                             # single snapshot
+open_viewer(graphs)                            # explicit in-memory history
 ```
 
 Requires `rlmflow[viewer]`.
 
 ## CLI
 
-The same helpers are reachable from a shell. `view` and `render`
-auto-detect trace directories, `trace.json` files, and single state
-checkpoints.
+The same helpers are reachable from a shell. `view` and `render` take workspace
+directories.
 
 ```
-rlmflow view   traces/run1/
-rlmflow view   workspace/checkpoint.json --port 7861
-rlmflow render traces/run1/   -f gantt-html -o run1.html
-rlmflow render checkpoint.json -f mermaid          # stdout
-rlmflow render checkpoint.json -f dot -o graph.dot
-rlmflow render checkpoint.json -f tree
+rlmflow view   runs/deep_research/
+rlmflow view   runs/deep_research/ --port 7861
+rlmflow render runs/deep_research/ -f gantt-html -o run1.html
+rlmflow render runs/deep_research/ -f mermaid          # stdout
+rlmflow render runs/deep_research/ -f dot -o graph.dot
+rlmflow render runs/deep_research/ -f tree
 rlmflow version
 ```

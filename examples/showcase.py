@@ -1,12 +1,12 @@
-"""Showcase the current node-first RLMFlow API.
+"""Showcase the Graph-centric RLMFlow API.
 
-This walks through the pieces that still matter after the refactor:
+This walks through the pieces that matter after the engine refactor:
 
-1. Step-by-step execution over typed nodes.
-2. Checkpoint round-trip with `Node.save/load`.
-3. Session graph persistence through `Workspace.session`.
-4. Time travel by keeping a list of node snapshots.
-5. Manual intervention by replacing a child leaf.
+1. Step-by-step execution returning :class:`~rlmflow.graph.Graph` snapshots.
+2. Workspace persistence through ``workspace.load_graph()``.
+3. Session layout and latest-state inspection.
+4. Optional in-process history by keeping graph snapshots.
+5. Graph summary helpers (``graph.tree()``, ``graph.tokens()``).
 6. Gym-style stepping with a scalar reward.
 
 Usage:
@@ -20,8 +20,8 @@ import argparse
 import tempfile
 from pathlib import Path
 
+from rlmflow.graph import Graph
 from rlmflow.llm import LLMClient, LLMUsage
-from rlmflow.node import Node, ResultNode, SupervisingNode
 from rlmflow.rlm import RLMConfig, RLMFlow
 from rlmflow.runtime.local import LocalRuntime
 from rlmflow.tools import FILE_TOOLS
@@ -76,20 +76,20 @@ def make_agent(workspace: Workspace, *, max_depth: int, max_iterations: int) -> 
     )
 
 
-def run(agent: RLMFlow, state: Node, no_viz: bool) -> list[Node]:
+def run(agent: RLMFlow, graph: Graph, no_viz: bool) -> list[Graph]:
     if no_viz:
-        history = [state]
+        history = [graph]
         step = 0
-        while not state.finished:
-            state = agent.step(state)
+        while not graph.finished:
+            graph = agent.step(graph)
             step += 1
-            history.append(state)
+            history.append(graph)
             print(f"-- step {step} --")
-            print(state.tree())
+            print(graph.tree())
         return history
     from rlmflow.utils.viz import live
 
-    return live(agent, state)
+    return live(agent, graph)
 
 
 def main() -> None:
@@ -108,65 +108,61 @@ def main() -> None:
         )
 
         banner("1. Step-by-step execution")
-        state = agent.start("Create hello.py and goodbye.py. Delegate each file.")
-        history = run(agent, state, args.no_viz)
+        graph = agent.start("Create hello.py and goodbye.py. Delegate each file.")
+        history = run(agent, graph, args.no_viz)
         final = history[-1]
-        print(f"\n{GREEN}Result:{RESET} {final.get_result()}")
+        print(f"\n{GREEN}Result:{RESET} {final.result()}")
 
-        banner("2. Checkpoint round-trip")
-        ckpt = workspace.checkpoint_path
-        final.save(ckpt)
-        loaded = Node.load(ckpt)
-        print(f"Loaded {loaded.type} checkpoint with {len(loaded.children)} child refs")
+        banner("2. Workspace persistence")
+        loaded = workspace.load_graph()
+        print(
+            f"Loaded graph with {len(loaded.agents)} agents and "
+            f"{len(loaded.nodes)} states from {workspace.root}"
+        )
         print(loaded.tree())
 
-        banner("3. Session graph persistence")
-        nodes = workspace.session.load()
-        print(f"Persisted {len(nodes)} node events in {workspace.root / 'session'}")
-        print("Latest agents:")
-        for node in sorted(nodes.values(), key=lambda item: item.agent_id):
-            print(f"  {node.agent_id}: {node.type}")
+        banner("3. Session layout")
+        reloaded = workspace.load_graph()
+        print(
+            f"Persisted {len(reloaded.nodes)} states across "
+            f"{len(reloaded.agents)} agents in {workspace.root / 'session'}"
+        )
+        print("Latest state per agent:")
+        for aid, sub in reloaded.agents.items():
+            current = sub.current()
+            label = current.type if current else "(empty)"
+            print(f"  {aid}: {label}")
 
         banner("4. Time travel")
-        for idx, item in enumerate(history):
-            print(f"{CYAN}step {idx}{RESET}: {item.agent_id} [{item.type}]")
+        for idx, snapshot in enumerate(history):
+            current = snapshot.current()
+            kind = current.type if current else "empty"
+            print(
+                f"{CYAN}step {idx}{RESET}: root [{kind}]  "
+                f"agents={len(snapshot.agents)}"
+            )
 
-        banner("5. Manual intervention")
-        agent2 = make_agent(
-            workspace,
-            max_depth=args.max_depth,
-            max_iterations=args.max_iterations,
-        )
-        state2 = agent2.start("Create hello.py and goodbye.py. Delegate each file.")
-        intervened = False
-        while not state2.finished:
-            state2 = agent2.step(state2)
-            if isinstance(state2, SupervisingNode) and not intervened:
-                print(f"{YELLOW}Replacing goodbye child with a manual ResultNode{RESET}")
-                new_children = []
-                for child in state2.children:
-                    if "goodbye" in child.agent_id:
-                        new_children.append(
-                            child.successor(ResultNode, result="goodbye.py skipped manually")
-                        )
-                    else:
-                        new_children.append(child)
-                state2 = state2.update(children=new_children)
-                intervened = True
-        print(f"{GREEN}Intervention result:{RESET} {state2.get_result()}")
+        banner("5. Graph summary")
+        inp, out = final.tokens()
+        print(f"Agents:  {len(final.agents)}")
+        print(f"States:  {len(final.nodes)}")
+        print(f"Tokens:  {inp + out:,} ({inp:,} in / {out:,} out)")
+        print(f"Final:   {final.current().type if final.current() else '(empty)'}")
 
         banner("6. Gym-style loop")
         agent3 = make_agent(workspace, max_depth=0, max_iterations=args.max_iterations)
-        state3 = agent3.start("Write a haiku about recursion to haiku.txt")
+        graph3 = agent3.start("Write a haiku about recursion to haiku.txt")
         rewards: list[float] = []
         step = 0
-        while not state3.finished:
-            state3 = agent3.step(state3)
+        while not graph3.finished:
+            graph3 = agent3.step(graph3)
             step += 1
-            reward = 1.0 if state3.finished else 0.0
+            current = graph3.current()
+            reward = 1.0 if graph3.finished else 0.0
             rewards.append(reward)
-            print(f"step {step}: node={state3.type} reward={reward}")
-        print(f"{GREEN}Result:{RESET} {state3.get_result()}")
+            kind = current.type if current else "empty"
+            print(f"step {step}: state={kind} reward={reward}")
+        print(f"{GREEN}Result:{RESET} {graph3.result()}")
         print(f"Total reward: {sum(rewards):.1f}")
 
         banner("Done")

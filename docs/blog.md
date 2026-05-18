@@ -5,7 +5,7 @@
 > [Examples](https://github.com/shyamsn97/rlmflow/tree/main/examples) ·
 > [Changelog](https://github.com/shyamsn97/rlmflow/blob/main/CHANGELOG.md)
 
-![Hero animation: an rlmflow run unfolding from a single root agent into a tree of typed nodes](rlm_animation.gif)
+![Hero animation: an rlmflow run unfolding from a single root agent into a graph of typed states](rlm_animation.gif)
 
 ```bash
 pip install rlmflow
@@ -13,11 +13,11 @@ pip install rlmflow
 
 ## tldr
 
-**rlmflow** turns [Recursive Language Models](https://alexzhang13.github.io/blog/2025/rlm/) into inspectable execution graphs. It's a Python library for writing RLM agents where every query, action, observation, delegation, wait, resume, and result is a typed, immutable Pydantic node, and a run is just the tree of those snapshots.
+**rlmflow** turns [Recursive Language Models](https://alexzhang13.github.io/blog/2025/rlm/) into inspectable execution graphs. It's a Python library for writing RLM agents where every query, action, observation, delegation, wait, resume, and result is a typed, immutable Pydantic state, and a run is the `Graph` of those states plus the agents and edges that connect them.
 
-The whole engine is one transition: `step(node) → node'`. The trace and the execution are the same data structure — there is no separate "tracing mode" to enable — so the same run renders as a Rich live tree, a Mermaid diagram, a Gantt swimlane, or a Gradio step-through viewer, all from one-line projections of the graph.
+The whole engine is one transition: `step(graph) → graph'`. The graph and the execution are the same data structure — there is no separate "tracing mode" to enable — so the same run renders as a Rich live tree, a Mermaid diagram, a Gantt swimlane, or a Gradio viewer, all from one-line projections of the workspace graph.
 
-That graph allows you to **inspect** each subagent, **replay** from a checkpoint, **fork** from any node, and **edit** a branch before continuing. We'll walk through those moves on a real coding-agent run shipped with the repo.
+That graph allows you to **inspect** each subagent, **reopen** a workspace, **fork** from any agent, and **resume** from saved session state. We'll walk through those moves on a real coding-agent run shipped with the repo.
 
 ## Introduction
 
@@ -371,7 +371,7 @@ right, you can't tell whether it was right for the right reason. The
 abstraction is too clean: the act of delegating throws away exactly
 the structure you'd want to debug, evaluate, or steer.
 
-rlmflow keeps that structure — every recursive call is a node in an
+rlmflow keeps that structure — every recursive call is an agent in an
 execution graph that you can step through, inspect, and replay:
 
 <div class="rlm-slides rlm-slides-graph">
@@ -567,50 +567,50 @@ execution graph that you can step through, inspect, and replay:
 </div>
 
 This is the same run, but now the children are not opaque recursive
-calls. The root reaches a supervising node and stops; at that moment
+calls. The root reaches a supervising state and stops; at that moment
 the runnable frontier is `root.chunk_0`, `root.chunk_1`, and
 `root.chunk_2`. Those children can advance independently, so the graph
 shows parallel work without pretending it is one conversation.
 
-Then `root.chunk_2` reaches its own supervising node. The frontier
+Then `root.chunk_2` reaches its own supervising state. The frontier
 changes again: now `root.chunk_2.a` and `root.chunk_2.b` are runnable
 while both `root` and `root.chunk_2` are parked. When those candidate
 readers finish, `root.chunk_2` resumes, returns `84721`, and only then
 can `root` resume and verify the final code.
 
-That is the step-by-step execution state. You can pause after any
-node, inspect exactly what one child saw, fork from the candidate
-reader, or replace a bad child result before the parent resumes. The
+That is the step-by-step execution. You can pause after any
+state, inspect exactly what one child saw, fork the workspace, or
+resume from saved workspace state with a different model or prompt. The
 flat recursive-call view tells you what returned. The graph tells you
 how the answer moved through the run.
 
 rlmflow stores the run in that shape from the beginning. The graph is
 not a visualization recovered from a log after the fact. It is the
 data model. Every meaningful moment in the run is stored as a typed
-node: the initial question, a model step, a tool result, a paused
-parent, a resumed parent, a final answer, or an error. The run is the
-tree of those snapshots.
+state — the initial query, a model step, a tool result, a paused
+parent, a resumed parent, a final answer, or an error — bound to the
+agent that produced it. The run is the immutable `Graph` of those
+states, plus the agents and edges connecting them.
 
 The whole engine is one transition:
 
 ```python
-node = agent.start(query)
-while not node.terminal:
-    node = agent.step(node)
+graph = agent.start(query)
+while not graph.finished:
+    graph = agent.step(graph)
 ```
 
-That loop works because a node is a complete checkpoint. It contains
-enough information to continue the run from that point, inspect what
-led there, or compare it with another branch.
+That loop works because a workspace session is a durable saved run.
+It contains enough information to continue the run from the latest state,
+inspect what led there, or compare it with another branch.
 
 That gives rlmflow its main operations:
 
 - **Inspect** one agent without rereading every sibling's messages.
-- **Replay** from a saved node instead of starting the whole run over.
-- **Fork** from one point and try a different model, prompt, or
-  workspace.
-- **Edit** a branch by replacing a bad child result and continuing
-  from the parent.
+- **Resume** from a saved workspace instead of starting the run over.
+- **Fork** the workspace and try a different model, prompt, or
+  starting point.
+- **Resume** from a persisted session and continue the run.
 
 Those operations are hard to bolt onto a flat transcript because the
 transcript has already thrown away the structure you need. It can tell

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Example Project</title>
+  <meta name="description" content="Landing page for the Example Project." />
+  <style>
+    :root{--bg:#f7f7fb;--card:#ffffff;--accent:#0066cc;--muted:#6b7280}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;
+      background:linear-gradient(180deg,var(--bg),#eef2ff);
+      color:#0f172a;
+      -webkit-font-smoothing:antialiased;
+      -moz-osx-font-smoothing:grayscale;
+      line-height:1.5;
+    }
+    .container{
+      max-width:960px;
+      margin:48px auto;
+      padding:24px;
+    }
+    header{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:16px;
+    }
+    .brand{display:flex;align-items:center;gap:12px}
+    .logo{
+      width:48px;height:48px;border-radius:8px;
+      background:linear-gradient(135deg,var(--accent),#7c3aed);
+      display:inline-grid;place-items:center;color:#fff;font-weight:700;
+      font-family:monospace;
+    }
+    h1{font-size:1.5rem;margin:0}
+    p.lead{margin:8px 0 0;color:var(--muted)}
+    main{
+      margin-top:24px;
+      display:grid;
+      grid-template-columns:1fr;
+      gap:16px;
+    }
+    .card{
+      background:var(--card);
+      padding:18px;
+      border-radius:12px;
+      box-shadow:0 6px 18px rgba(12,16,46,0.08);
+    }
+    .cta{
+      display:inline-block;
+      background:var(--accent);
+      color:#fff;
+      padding:10px 16px;
+      border-radius:8px;
+      text-decoration:none;
+      font-weight:600;
+    }
+    footer{margin-top:28px;color:var(--muted);font-size:0.9rem;text-align:center}
+    @media(min-width:720px){
+      main{grid-template-columns:2fr 1fr}
+      h1{font-size:1.75rem}
+    }
+    pre{background:#0b1220;color:#e6eef8;padding:12px;border-radius:8px;overflow:auto}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <div class="logo" aria-hidden="true">EP</div>
+        <div>
+          <h1>Example Project</h1>
+          <p class="lead">A small, clear starting point — accessible, responsive, and semantic.</p>
+        </div>
+      </div>
+      <nav aria-label="Primary">
+        <a class="cta" href="#get-started">Get started</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="card" aria-labelledby="intro-heading">
+        <h2 id="intro-heading">Quick overview</h2>
+        <p>This page serves as the project's entry point. It demonstrates a minimal, modern HTML layout with sensible defaults: responsive meta tag, readable typography, a clear call-to-action, and accessible landmarks.</p>
+
+        <h3>Usage</h3>
+        <p>Place your project's content here. Example command to serve this file locally:</p>
+        <pre>python -m http.server 8000</pre>
+
+        <p><a id="get-started" class="cta" href="#examples">Explore examples</a></p>
+      </section>
+
+      <aside class="card" aria-labelledby="resources-heading">
+        <h2 id="resources-heading">Resources</h2>
+        <ul>
+          <li><strong>Semantic HTML</strong> — Use landmarks like &lt;main&gt;, &lt;header&gt;, &lt;footer&gt;.</li>
+          <li><strong>Responsive</strong> — The layout adapts to small and large viewports.</li>
+          <li><strong>Accessible</strong> — Proper heading hierarchy and aria attributes.</li>
+        </ul>
+        <p style="margin-top:12px"><a class="cta" href="#contact">Contact</a></p>
+      </aside>
+    </main>
+
+    <footer>
+      © {year} Example Project — Built for demonstration. <a href="https://example.com">Learn more</a>
+    </footer>
+  </div>
+
+  <script>
+    // Small script to set the current year in the footer for convenience.
+    (function(){
+      try{
+        var f = document.querySelector('footer');
+        if(f) f.innerHTML = f.innerHTML.replace('{year}', new Date().getFullYear());
+      }catch(e){}
+    })();
+  </script>
+</body>
+</html>

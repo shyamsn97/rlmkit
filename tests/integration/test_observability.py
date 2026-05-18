@@ -1,12 +1,10 @@
-"""Integration tests for typed-node observability hooks."""
+"""Integration tests for run observability hooks."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-from rlmflow import LLMClient, LLMUsage, Node, RLMConfig, RLMFlow, ResultNode
-from rlmflow.node import Node as BaseNode
+from rlmflow import Graph, LLMClient, LLMUsage, RLMConfig, RLMFlow, is_done
 from rlmflow.runtime.local import LocalRuntime
 from rlmflow.utils.trace import Trace, load_trace, save_trace
 
@@ -33,14 +31,14 @@ class DelegatingLLM(LLMClient):
         return self.ROOT
 
 
-def _run_to_completion(agent: RLMFlow, query: str) -> list[Node]:
-    node = agent.start(query)
-    states = [node]
-    while not node.finished:
-        node = agent.step(node)
-        states.append(node)
-        assert len(states) < 50
-    return states
+def _run_to_completion(agent: RLMFlow, query: str) -> list[Graph]:
+    graph = agent.start(query)
+    graphs = [graph]
+    while not graph.finished:
+        graph = agent.step(graph)
+        graphs.append(graph)
+        assert len(graphs) < 50
+    return graphs
 
 
 def _agent() -> RLMFlow:
@@ -52,61 +50,63 @@ def _agent() -> RLMFlow:
 
 
 def test_tree_render_contains_every_agent():
-    rendered = _run_to_completion(_agent(), "obs-tree")[-1].tree(color=False)
+    final = _run_to_completion(_agent(), "obs-tree")[-1]
+    rendered = final.tree()
 
     assert "root" in rendered
     assert "root.child" in rendered
-    assert "[result]" in rendered
+    assert "done -> " in rendered
 
 
-def test_tree_usage_sums_children_into_root():
+def test_tokens_sum_children_into_root():
     final = _run_to_completion(_agent(), "obs-usage")[-1]
 
-    assert len(final.children) == 1
-    child = final.children[0]
-    root_in, root_out = final.total_input_tokens, final.total_output_tokens
-    child_in, child_out = child.tree_usage()
-    tree_in, tree_out = final.tree_usage()
+    root_in, root_out = final.tokens(recursive=False)
+    child_in, child_out = final["root.child"].tokens(recursive=False)
+    tree_in, tree_out = final.tokens()
 
     assert tree_in == root_in + child_in
     assert tree_out == root_out + child_out
     assert child_in > 0 and child_out > 0
-    assert final.tree_tokens == tree_in + tree_out
-    assert final.tree_tokens >= final.total_tokens
+    assert final.total_tokens() == tree_in + tree_out
 
 
-def test_steps_are_typed_nodes():
-    states = _run_to_completion(_agent(), "obs-nodes")
+def test_step_snapshots_are_graph_instances():
+    graphs = _run_to_completion(_agent(), "obs-graphs")
+    assert all(isinstance(g, Graph) for g in graphs)
+    # The trajectory passes through a seed (start), at least one
+    # yielded supervise (mid-run), and a terminal done (end).
+    from rlmflow import is_done, is_user_query, is_supervising
 
-    assert {state.current().type for state in states} >= {"query", "supervising", "result"}
-    assert all(isinstance(state, BaseNode) for state in states)
+    currents = [g.current() for g in graphs]
+    assert any(is_user_query(c) for c in currents)
+    assert any(is_supervising(c) for c in currents)
+    assert any(is_done(c) for c in currents)
 
 
 def test_trace_save_and_load_round_trip(tmp_path: Path):
-    states = _run_to_completion(_agent(), "obs-trace")
+    graphs = _run_to_completion(_agent(), "obs-trace")
     out_dir = tmp_path / "trace"
 
-    save_trace(states, out_dir, metadata={"kind": "test"})
+    save_trace(graphs, out_dir, metadata={"kind": "test"})
     loaded = load_trace(out_dir)
 
     assert isinstance(loaded, Trace)
     assert loaded.metadata == {"kind": "test"}
-    assert len(loaded.states) == len(states)
-    assert loaded.states[0].agent_id == "root"
-    assert loaded.states[0].query == "obs-trace"
-    assert isinstance(loaded.states[-1].current(), ResultNode)
-    assert any(child.agent_id == "root.child" for child in loaded.states[-1].walk())
-    assert loaded.states[-1].tree(color=False) == states[-1].tree(color=False)
+    assert len(loaded.graphs) == len(graphs)
+    assert loaded.graphs[0].root_agent_id == "root"
+    assert is_done(loaded.graphs[-1].current())
+    assert "root.child" in loaded.graphs[-1]
+    assert loaded.graphs[-1].tree() == graphs[-1].tree()
 
 
-def test_state_save_load_round_trip(tmp_path: Path):
+def test_graph_save_load_round_trip(tmp_path: Path):
     final = _run_to_completion(_agent(), "obs-save")[-1]
-    ckpt = tmp_path / "state.json"
+    ckpt = tmp_path / "graph.json"
 
     final.save(ckpt)
-    restored = Node.load(ckpt)
+    restored = Graph.load(ckpt)
 
-    assert restored.tree(color=False) == final.tree(color=False)
-    assert restored.tree_usage() == final.tree_usage()
-    payload = json.loads(ckpt.read_text())
-    assert payload["children"][0]["agent_id"] == "root"
+    assert restored.tree() == final.tree()
+    assert restored.tokens() == final.tokens()
+    assert restored.result() == final.result()

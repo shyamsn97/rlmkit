@@ -1,9 +1,0 @@
-{
-  "agent_id": "root.boid_js",
-  "latest_leaf_id": "n_b6b8ddf638ac",
-  "branch_id": "main",
-  "depth": 1,
-  "type": "result",
-  "terminal": true,
-  "result": "Wrote output/boids-simulation/js/boid.js"
-}

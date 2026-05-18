@@ -1,0 +1,200 @@
+alpha hotel foxtrot
+golf echo echo hotel golf
+golf echo bravo bravo
+charlie charlie golf
+charlie delta charlie foxtrot golf
+golf bravo hotel foxtrot
+echo echo foxtrot
+charlie bravo charlie bravo golf echo
+hotel hotel charlie foxtrot echo
+hotel hotel bravo hotel charlie delta delta alpha
+delta echo alpha charlie foxtrot echo foxtrot delta
+delta golf golf
+foxtrot echo hotel foxtrot
+foxtrot echo charlie golf
+hotel golf alpha hotel foxtrot delta
+charlie alpha delta golf delta golf
+charlie foxtrot hotel alpha
+echo foxtrot echo bravo echo
+hotel echo alpha foxtrot
+alpha delta delta echo delta charlie golf alpha
+hotel hotel hotel foxtrot bravo golf foxtrot delta
+golf hotel bravo echo foxtrot echo bravo
+alpha echo bravo hotel delta
+bravo charlie echo bravo alpha
+foxtrot delta golf echo foxtrot echo hotel hotel
+alpha alpha bravo echo
+foxtrot bravo hotel golf
+bravo golf delta echo
+hotel golf golf delta golf
+hotel alpha delta echo hotel charlie golf
+bravo golf foxtrot echo echo
+bravo echo hotel charlie golf foxtrot foxtrot alpha
+foxtrot delta alpha charlie echo
+echo hotel delta foxtrot charlie bravo
+hotel echo delta
+bravo charlie foxtrot delta delta
+hotel foxtrot bravo
+hotel alpha golf bravo foxtrot charlie delta bravo
+bravo echo foxtrot charlie golf bravo
+foxtrot delta golf golf golf bravo
+charlie hotel charlie hotel echo golf
+golf foxtrot charlie golf golf golf
+golf hotel bravo
+hotel alpha golf alpha alpha charlie foxtrot
+charlie echo echo delta hotel charlie delta alpha
+golf hotel charlie golf
+charlie golf charlie
+hotel charlie charlie foxtrot
+alpha delta foxtrot delta echo echo golf foxtrot
+charlie echo golf hotel charlie golf
+delta hotel hotel foxtrot foxtrot foxtrot
+golf golf hotel golf golf
+charlie foxtrot golf charlie
+foxtrot charlie echo echo hotel
+delta bravo delta hotel
+charlie charlie delta charlie
+golf golf delta echo alpha bravo delta alpha
+charlie alpha delta hotel alpha
+echo delta hotel alpha hotel
+golf echo echo foxtrot echo charlie delta
+alpha golf charlie foxtrot echo hotel bravo alpha
+bravo bravo foxtrot golf hotel
+delta alpha golf charlie golf hotel echo golf
+alpha charlie hotel alpha golf hotel hotel hotel
+hotel echo hotel hotel echo foxtrot foxtrot golf
+bravo echo alpha echo hotel charlie
+echo hotel echo delta hotel alpha
+foxtrot echo golf
+alpha bravo foxtrot
+charlie hotel foxtrot hotel alpha delta
+alpha delta alpha foxtrot echo
+delta charlie hotel echo golf hotel charlie
+hotel alpha delta golf
+bravo golf charlie charlie foxtrot foxtrot
+hotel foxtrot golf golf
+The magic number is 3746978
+bravo bravo charlie golf bravo
+charlie alpha golf echo hotel charlie
+charlie hotel foxtrot bravo echo foxtrot
+delta golf charlie hotel hotel foxtrot bravo hotel
+alpha bravo alpha hotel delta bravo echo charlie
+charlie bravo hotel
+charlie delta golf alpha delta echo
+echo alpha delta echo alpha foxtrot golf
+charlie delta echo golf foxtrot delta alpha
+echo golf bravo echo delta charlie delta
+golf charlie foxtrot bravo alpha hotel foxtrot foxtrot
+delta foxtrot delta hotel hotel hotel foxtrot
+delta alpha charlie
+echo golf delta bravo foxtrot
+delta golf echo alpha alpha foxtrot bravo
+delta delta echo echo alpha hotel foxtrot
+bravo foxtrot hotel hotel golf
+foxtrot foxtrot bravo charlie
+hotel delta charlie charlie echo hotel
+bravo foxtrot alpha charlie golf
+hotel charlie golf bravo echo
+alpha alpha charlie bravo hotel
+foxtrot hotel bravo charlie echo alpha bravo
+charlie echo charlie echo foxtrot
+charlie alpha foxtrot delta bravo golf hotel bravo
+alpha bravo bravo foxtrot
+golf echo alpha golf delta hotel delta alpha
+golf foxtrot hotel charlie golf
+echo golf alpha foxtrot echo alpha alpha bravo
+golf delta foxtrot charlie
+foxtrot alpha charlie
+echo delta foxtrot bravo delta
+delta echo charlie
+foxtrot bravo echo delta hotel delta echo alpha
+hotel golf alpha echo hotel hotel bravo
+hotel echo bravo charlie foxtrot delta bravo alpha
+charlie golf delta bravo hotel
+alpha charlie hotel foxtrot hotel
+echo charlie charlie hotel
+delta echo bravo
+hotel alpha golf golf charlie echo alpha
+hotel golf hotel delta bravo echo delta hotel
+alpha echo charlie echo charlie
+delta hotel charlie charlie golf golf
+hotel golf alpha golf echo
+hotel delta golf charlie delta
+charlie foxtrot foxtrot alpha echo hotel
+foxtrot echo alpha golf delta golf golf
+golf echo hotel hotel
+alpha delta alpha alpha foxtrot delta
+charlie bravo echo charlie bravo delta echo
+hotel golf foxtrot alpha
+charlie hotel golf bravo delta
+hotel alpha alpha
+delta bravo hotel golf delta foxtrot
+charlie foxtrot echo bravo
+echo golf echo
+delta delta bravo foxtrot foxtrot delta
+golf delta bravo golf delta
+echo hotel foxtrot alpha echo delta
+foxtrot hotel foxtrot golf
+foxtrot charlie hotel alpha
+echo bravo delta foxtrot delta hotel alpha golf
+charlie golf echo golf echo
+charlie hotel delta charlie
+hotel charlie alpha delta
+golf bravo charlie echo bravo hotel alpha
+delta charlie bravo golf foxtrot foxtrot foxtrot
+hotel alpha golf echo
+delta alpha golf golf
+echo foxtrot echo foxtrot alpha alpha
+bravo echo alpha golf bravo
+delta delta alpha hotel
+foxtrot foxtrot foxtrot
+alpha alpha delta bravo delta alpha
+alpha golf hotel
+foxtrot alpha echo hotel charlie hotel alpha
+alpha foxtrot bravo hotel hotel alpha foxtrot delta
+golf delta echo
+delta echo foxtrot golf alpha echo alpha foxtrot
+foxtrot bravo delta charlie echo delta bravo
+bravo foxtrot alpha hotel delta hotel
+charlie alpha foxtrot hotel echo charlie bravo alpha
+charlie foxtrot delta
+foxtrot bravo foxtrot
+foxtrot charlie delta alpha echo hotel
+hotel echo echo
+hotel hotel foxtrot hotel golf
+golf charlie foxtrot bravo charlie alpha delta golf
+echo hotel echo charlie charlie
+bravo bravo foxtrot bravo foxtrot bravo
+hotel echo foxtrot hotel
+golf charlie golf foxtrot
+charlie echo hotel bravo bravo
+foxtrot alpha echo golf alpha alpha
+charlie alpha hotel golf alpha charlie
+bravo foxtrot delta golf foxtrot hotel
+foxtrot foxtrot bravo foxtrot bravo foxtrot
+bravo echo golf golf hotel charlie
+echo golf golf foxtrot
+charlie hotel hotel echo alpha
+delta hotel alpha alpha alpha
+alpha alpha bravo echo alpha
+hotel charlie golf foxtrot charlie echo alpha
+foxtrot charlie echo hotel alpha bravo charlie
+bravo golf alpha
+bravo alpha golf echo alpha alpha
+bravo bravo foxtrot echo alpha alpha golf foxtrot
+bravo golf delta bravo bravo golf
+hotel echo bravo hotel charlie bravo hotel
+golf golf foxtrot echo hotel charlie charlie bravo
+delta charlie delta golf echo echo bravo
+hotel hotel echo foxtrot
+delta bravo golf hotel charlie charlie foxtrot
+charlie charlie foxtrot bravo
+golf foxtrot bravo echo
+alpha charlie charlie
+bravo hotel hotel echo delta alpha delta
+alpha echo charlie foxtrot golf echo echo
+charlie charlie hotel echo golf golf bravo foxtrot
+golf delta charlie delta golf
+echo echo hotel golf hotel golf
+charlie echo charlie
+golf charlie golf hotel

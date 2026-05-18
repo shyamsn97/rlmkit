@@ -1,0 +1,8 @@
+{
+  "agent_id": "root",
+  "latest_node_id": "n_1c859bbe55d2",
+  "seq": 6,
+  "type": "done_output",
+  "terminal": true,
+  "result": "Found in haystack/file_0002.txt: The magic number is 3746978"
+}

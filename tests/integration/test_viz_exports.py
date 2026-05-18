@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from rlmflow import LLMClient, LLMUsage, Node, RLMConfig, RLMFlow
+from rlmflow import (
+    ErrorOutput,
+    Graph,
+    LLMClient,
+    LLMUsage,
+    UserQuery,
+    RLMConfig,
+    RLMFlow,
+)
 from rlmflow.runtime.local import LocalRuntime
 from rlmflow.utils.export import (
     to_d2,
@@ -18,7 +26,6 @@ from rlmflow.utils.viz import (
     code_log,
     error_summary,
     gantt_html,
-    gantt_matrix,
     report_md,
     tee,
     token_sparkline,
@@ -43,14 +50,14 @@ class DelegatingLLM(LLMClient):
         return self.ROOT
 
 
-def _run(agent: RLMFlow, query: str) -> list[Node]:
-    node = agent.start(query)
-    states = [node]
-    while not node.finished:
-        node = agent.step(node)
-        states.append(node)
-        assert len(states) < 50
-    return states
+def _run(agent: RLMFlow, query: str) -> list[Graph]:
+    graph = agent.start(query)
+    graphs = [graph]
+    while not graph.finished:
+        graph = agent.step(graph)
+        graphs.append(graph)
+        assert len(graphs) < 50
+    return graphs
 
 
 def _agent() -> RLMFlow:
@@ -61,13 +68,40 @@ def _agent() -> RLMFlow:
     )
 
 
+def _error_graph() -> Graph:
+    root_query = UserQuery(agent_id="root", seq=0, content="boom")
+    child = Graph(
+        agent_id="root.child",
+        depth=1,
+        parent_agent_id="root",
+        parent_node_id=root_query.id,
+        states=(
+            ErrorOutput(
+                agent_id="root.child",
+                seq=0,
+                error="orphaned_delegates",
+                content="oops",
+            ),
+        ),
+    )
+    return Graph(
+        agent_id="root",
+        query="boom",
+        states=(root_query,),
+        children={"root.child": child},
+    )
+
+
+# ── mermaid ──────────────────────────────────────────────────────────
+
+
 def test_mermaid_export_contains_every_agent_and_result():
     final = _run(_agent(), "mermaid-test")[-1]
     mmd = to_mermaid(final)
 
     assert mmd.startswith("stateDiagram-v2")
-    assert "root (result)" in mmd
-    assert "root.child (result)" in mmd
+    assert "root (done)" in mmd
+    assert "root.child (done)" in mmd
     assert "[*] -->" in mmd
     assert "root:child-answer" in mmd
 
@@ -80,48 +114,12 @@ def test_mermaid_respects_include_results_flag():
     assert "--> [*] :" not in mmd
 
 
-def test_dot_export_has_edges_and_type_labels():
-    final = _run(_agent(), "dot-test")[-1]
-    dot = to_dot(final)
-
-    assert dot.startswith("digraph rlmflow {")
-    assert dot.rstrip().endswith("}")
-    assert "->" in dot
-    assert "result" in dot
-
-
-def test_gantt_matrix_row_per_agent_column_per_step():
-    states = _run(_agent(), "gantt-test")
-    agents, rows = gantt_matrix(states)
-
-    assert agents[0] == "root"
-    assert "root.child" in agents
-    assert len(rows) == len(agents)
-    assert all(len(row) == len(states) for row in rows)
-
-    child_idx = agents.index("root.child")
-    assert rows[child_idx][-1].startswith("result")
-    assert rows[child_idx][0] is None
-
-
-def test_gantt_html_is_self_contained():
-    states = _run(_agent(), "gantt-html-test")
-    html = gantt_html(states, title="test run")
-
-    assert html.strip().startswith("<!doctype html>")
-    assert "test run" in html
-    assert "root" in html
-    assert "root.child" in html
-    for node_type in ("query", "action", "supervising", "result"):
-        assert node_type in html
-
-
 def test_mermaid_flowchart_includes_classes_and_edges():
     final = _run(_agent(), "flow-test")[-1]
     out = to_mermaid_flowchart(final)
     assert out.startswith("flowchart TD")
     assert "-->" in out
-    assert "classDef result" in out
+    assert "classDef done" in out
     assert "root" in out
 
 
@@ -135,6 +133,22 @@ def test_mermaid_sequence_has_participant_per_agent():
     assert "-->>-" in out
 
 
+# ── dot ──────────────────────────────────────────────────────────────
+
+
+def test_dot_export_has_edges_and_type_labels():
+    final = _run(_agent(), "dot-test")[-1]
+    dot = to_dot(final)
+
+    assert dot.startswith("digraph rlmflow {")
+    assert dot.rstrip().endswith("}")
+    assert "->" in dot
+    assert "done" in dot
+
+
+# ── d2 ───────────────────────────────────────────────────────────────
+
+
 def test_d2_export_has_arrows_and_styles():
     final = _run(_agent(), "d2-test")[-1]
     out = to_d2(final)
@@ -142,12 +156,26 @@ def test_d2_export_has_arrows_and_styles():
     assert "style" in out
 
 
-def test_error_summary_groups_by_kind():
-    from rlmflow import ErrorNode, QueryNode
+# ── gantt ────────────────────────────────────────────────────────────
 
-    err = ErrorNode(agent_id="root.child", error="orphaned_delegates", content="oops")
-    root = QueryNode(agent_id="root", children=[err])
-    out = error_summary(root)
+
+def test_gantt_html_is_self_contained():
+    graphs = _run(_agent(), "gantt-html-test")
+    html = gantt_html(graphs, title="test run")
+
+    assert html.strip().startswith("<!doctype html>")
+    assert "test run" in html
+    assert "root" in html
+    assert "root.child" in html
+    for node_type in ("query", "llm", "supervising", "done"):
+        assert node_type in html
+
+
+# ── reports ──────────────────────────────────────────────────────────
+
+
+def test_error_summary_groups_by_kind():
+    out = error_summary(_error_graph())
     assert "orphaned_delegates" in out
     assert "1" in out
 
@@ -158,30 +186,30 @@ def test_error_summary_no_errors():
 
 
 def test_code_log_contains_action_and_observation():
-    states = _run(_agent(), "code-test")
-    log = code_log(states)
+    graphs = _run(_agent(), "code-test")
+    log = code_log(graphs)
     assert "delegate('child', 'do the thing', '')" in log
     assert "[root]" in log
 
 
 def test_token_sparkline_has_summary():
-    states = _run(_agent(), "spark-test")
-    out = token_sparkline(states)
+    graphs = _run(_agent(), "spark-test")
+    out = token_sparkline(graphs)
     assert "tok over" in out
     assert "step" in out
 
 
 def test_budget_burndown_with_and_without_budget():
-    states = _run(_agent(), "burn-test")
-    no_budget = budget_burndown(states)
-    with_budget = budget_burndown(states, max_budget=1_000_000)
+    graphs = _run(_agent(), "burn-test")
+    no_budget = budget_burndown(graphs)
+    with_budget = budget_burndown(graphs, max_budget=1_000_000)
     assert "%" in no_budget and "tok" in no_budget
     assert "1000000" in with_budget
 
 
 def test_report_md_contains_tree_and_outcome():
-    states = _run(_agent(), "report-test")
-    md = report_md(states, title="bench-1")
+    graphs = _run(_agent(), "report-test")
+    md = report_md(graphs, title="bench-1")
     assert "# bench-1" in md
     assert "## Tree" in md
     assert "## Result" in md
@@ -189,27 +217,27 @@ def test_report_md_contains_tree_and_outcome():
 
 
 def test_bench_table_aggregates_traces():
-    states_a = _run(_agent(), "a")
-    states_b = _run(_agent(), "b")
-    table = bench_table({"a": states_a, "b": states_b})
+    a = _run(_agent(), "a")
+    b = _run(_agent(), "b")
+    table = bench_table({"a": a, "b": b})
     assert "label" in table.splitlines()[0]
-    assert "a " in table or "a\n" in table or "a " in table.splitlines()[2]
+    assert table.splitlines()[2].startswith("a")
     assert "b" in table
 
 
-def test_tee_yields_every_node_and_calls_sinks():
-    final = _run(_agent(), "tee-test")[-1]
-    seen: list[Node] = []
-    out = list(tee(final.walk(), seen.append))
-    assert len(out) == len(final.walk())
+def test_tee_yields_every_graph_and_calls_sinks():
+    graphs = _run(_agent(), "tee-test")
+    seen: list[Graph] = []
+    out = list(tee(graphs, seen.append))
+    assert len(out) == len(graphs)
     assert seen == out
 
 
-def test_json_logs_writes_one_line_per_node(tmp_path):
+def test_json_logs_writes_one_line_per_state(tmp_path):
     final = _run(_agent(), "jsonl-test")[-1]
-    p = json_logs(final, tmp_path / "events.jsonl")
+    p = json_logs(final, tmp_path / "states.jsonl")
     lines = p.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == len(final.walk())
+    assert len(lines) == len(final.nodes)
     for line in lines:
         assert '"id":' in line
         assert '"type":' in line

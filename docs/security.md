@@ -56,24 +56,24 @@ privileges. Keep that surface small and validate arguments.
 
 ## Overrides for approval gates
 
-`step_action(node)` is the hook between an `ActionNode` (LLM reply +
-extracted code) and the resulting `ObservationNode` / `ResultNode` /
-`SupervisingNode`. Override it to gate, classify, or rewrite code
-before it touches the runtime:
+Override `_run_code(view, code)` to gate, classify, or rewrite code
+before it touches the runtime. The hook returns
+`(suspended: bool, raw: object)` — the same tuple the runtime
+ordinarily yields — so you can short-circuit execution with a
+rejection string and the engine will record it as the action's
+observation:
 
 ```python
 from rlmflow import RLMFlow
-from rlmflow.node import ActionNode, ResultNode
 
 class ReviewingRLM(RLMFlow):
-    def step_action(self, node: ActionNode):
-        if "rm -rf" in node.code and input(f"run? {node.code}\n> ") != "y":
-            return self.record_successor(
-                node, node.successor(ResultNode, result="rejected")
-            )
-        return super().step_action(node)
+    def _run_code(self, view, code: str):
+        if "rm -rf" in code and input(f"run? {code}\n> ") != "y":
+            return False, "rejected by reviewer"
+        return super()._run_code(view, code)
 ```
 
-Or override `execute_code(node, code) -> str` to route code through a
-classifier, a diff tool, or a manual approval step before it reaches
-the runtime.
+Wrap the runtime itself if you want approval at the transport layer.
+Subclass `Runtime` and override `execute`, `start_code`, or
+`resume_code` to call a classifier, diff tool, or manual approval
+step before delegating to the underlying runtime.

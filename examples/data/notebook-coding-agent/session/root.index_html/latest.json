@@ -1,9 +1,0 @@
-{
-  "agent_id": "root.index_html",
-  "latest_leaf_id": "n_22f12f5e5681",
-  "branch_id": "main",
-  "depth": 1,
-  "type": "result",
-  "terminal": true,
-  "result": "Wrote output/boids-simulation/index.html"
-}

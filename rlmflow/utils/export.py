@@ -1,9 +1,41 @@
-"""Static topology exports for typed RLMFlow node trees."""
+"""Static topology exports (Mermaid, DOT, D2) for :class:`Graph` snapshots."""
 
 from __future__ import annotations
 
-from rlmflow.node import Node
-from rlmflow.utils.viz import VizGraph
+from rlmflow.graph import Graph, Node, is_done
+
+
+def _kind(state: Node) -> str:
+    """Display label / palette key for ``state``.
+
+    One key per node ``type``, with a single special case: an
+    :class:`ExecOutput` produced by a :class:`ResumeAction` (i.e.
+    ``resumed_from`` is non-empty) is bucketed as ``"resume"`` so
+    the post-resume continuation can be coloured differently from a
+    fresh exec.
+    """
+    t = state.type
+    if t == "exec_output" and getattr(state, "resumed_from", None):
+        return "resume"
+    return _DISPLAY.get(t, t)
+
+
+_DISPLAY: dict[str, str] = {
+    "user_query": "query",
+    # Each ActionNode shares its display kind with the observation it
+    # pairs with. When both are present (the normal path) the viewer
+    # hides the action; when only the action is present (mid-tick,
+    # before the observation is written) the action stands in for
+    # that step in the figure.
+    "llm_action": "llm",
+    "llm_output": "llm",
+    "exec_action": "exec",
+    "exec_output": "exec",
+    "supervising_output": "supervising",
+    "error_output": "errored",
+    "done_output": "done",
+    "resume_action": "resume",
+}
 
 
 def _sanitize(node_id: str) -> str:
@@ -23,285 +55,193 @@ def _escape_dot(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-_MERMAID_FLOW_CLASS = {
-    "query": "query",
-    "observation": "obs",
-    "action": "action",
-    "supervising": "sup",
-    "resume": "resume",
-    "error": "err",
-    "result": "result",
+# Display kinds → colour. Actions get a desaturated tint of the
+# observation they pair with so the obs/action alternation reads
+# at a glance.
+_NODE_COLOR: dict[str, str] = {
+    "query": "#58a6ff",  # blue
+    "llm_call": "#a98a2a",  # dim yellow
+    "llm": "#d29922",  # yellow
+    "exec_call": "#b87650",  # dim orange
+    "exec": "#ff9e64",  # orange
+    "supervising": "#bc8cff",  # purple
+    "resume_call": "#5fa067",  # dim green
+    "resume": "#7ee787",  # green
+    "errored": "#f85149",  # red
+    "done": "#3fb950",  # bright green
 }
 
 
-def to_mermaid(state: Node, *, include_results: bool = True) -> str:
-    """Render the node tree as a Mermaid ``stateDiagram-v2``.
+_MERMAID_FLOW_CLASS: dict[str, str] = {k: k.replace("_", "") for k in _NODE_COLOR}
 
-    All ``state ... as <id>`` declarations are emitted before any
-    transitions, and transition labels are unquoted plain text. Both
-    are required to render reliably on GitHub's mermaid version, which
-    crashes on forward-referenced states and quoted transition labels
-    with a "Cannot read properties of undefined (reading 'shape')"
-    error.
-    """
+
+def _state_label(state: Node) -> str:
+    """Short human-readable state label for diagram nodes."""
+    return f"{state.agent_id} ({_kind(state)})"
+
+
+def _state_result_text(state: Node) -> str | None:
+    if is_done(state) and state.result:
+        return state.result
+    return None
+
+
+# ── Mermaid state diagram ────────────────────────────────────────────
+
+
+def to_mermaid(graph: Graph, *, include_results: bool = True) -> str:
+    """Render ``graph`` as a Mermaid ``stateDiagram-v2``."""
     declarations: list[str] = []
     transitions: list[str] = []
+    roots = _root_nodes(graph)
 
-    def walk(node: Node, is_root: bool) -> None:
-        nid = _sanitize(node.id)
-        label = f"{node.agent_id or 'root'} ({node.type})"
-        declarations.append(f'    state "{_escape_mermaid(label)}" as {nid}')
-        if is_root:
-            transitions.append(f"    [*] --> {nid}")
-        for child in node.child_nodes():
-            cid = _sanitize(child.id)
-            walk(child, is_root=False)
-            transitions.append(f"    {nid} --> {cid}")
-        result = getattr(node, "result", None)
-        if include_results and node.terminal and result:
-            transitions.append(
-                f"    {nid} --> [*] : {_escape_mermaid(_truncate(result))}"
-            )
+    for state in graph.nodes:
+        nid = _sanitize(state.id)
+        declarations.append(
+            f'    state "{_escape_mermaid(_state_label(state))}" as {nid}'
+        )
+    for root in roots:
+        transitions.append(f"    [*] --> {_sanitize(root.id)}")
+    for edge in graph.edges:
+        transitions.append(f"    {_sanitize(edge.from_)} --> {_sanitize(edge.to)}")
+    if include_results:
+        for state in graph.nodes:
+            res = _state_result_text(state)
+            if res:
+                transitions.append(
+                    f"    {_sanitize(state.id)} --> [*] : {_escape_mermaid(_truncate(res))}"
+                )
 
-    walk(state, True)
     return "\n".join(["stateDiagram-v2", *declarations, *transitions])
 
 
-_NODE_COLOR = {
-    "query": "#58a6ff",
-    "observation": "#58a6ff",
-    "action": "#d29922",
-    "supervising": "#bc8cff",
-    "resume": "#7ee787",
-    "error": "#f85149",
-    "result": "#3fb950",
-}
+# ── DOT ──────────────────────────────────────────────────────────────
 
 
-def to_dot(state: Node, *, include_results: bool = True) -> str:
+def to_dot(graph: Graph, *, include_results: bool = True) -> str:
     lines = [
         "digraph rlmflow {",
         "    rankdir=TB;",
         '    node [shape=box, style="rounded,filled", fontname="Helvetica"];',
         '    edge [fontname="Helvetica", fontsize=10];',
     ]
-
-    def walk(node: Node) -> None:
-        nid = _sanitize(node.id)
-        color = _NODE_COLOR.get(node.type, "#8b949e")
-        parts = [node.agent_id or "root", node.type]
-        result = getattr(node, "result", None)
-        if include_results and node.terminal and result:
-            parts.append(_truncate(result, 40))
+    for state in graph.nodes:
+        nid = _sanitize(state.id)
+        kind = _kind(state)
+        color = _NODE_COLOR.get(kind, "#8b949e")
+        parts = [state.agent_id or "root", kind]
+        if include_results:
+            res = _state_result_text(state)
+            if res:
+                parts.append(_truncate(res, 40))
         label = "\\n".join(_escape_dot(part) for part in parts)
         lines.append(
             f'    {nid} [label="{label}", fillcolor="{color}22", color="{color}"];'
         )
-        for child in node.child_nodes():
-            cid = _sanitize(child.id)
-            lines.append(f"    {nid} -> {cid};")
-            walk(child)
-
-    walk(state)
+    for edge in graph.edges:
+        style = "solid" if edge.kind == "flows_to" else "dashed"
+        lines.append(
+            f"    {_sanitize(edge.from_)} -> {_sanitize(edge.to)} "
+            f'[label="{edge.kind}", style={style}];'
+        )
     lines.append("}")
     return "\n".join(lines)
 
 
-def to_mermaid_flowchart(state: Node, *, include_results: bool = True) -> str:
-    """Render the node tree as a Mermaid ``flowchart TD`` graph.
+# ── Mermaid flowchart ────────────────────────────────────────────────
 
-    Reads better than ``stateDiagram-v2`` for wide trees with many siblings.
-    """
+
+def to_mermaid_flowchart(graph: Graph, *, include_results: bool = True) -> str:
     lines = ["flowchart TD"]
-
-    def walk(node: Node) -> None:
-        nid = _sanitize(node.id)
-        agent = node.agent_id or "root"
-        body = f"{agent}<br/><i>{node.type}</i>"
-        result = getattr(node, "result", None)
-        if include_results and node.terminal and result:
-            body += f"<br/>{_escape_mermaid(_truncate(result, 40))}"
+    for state in graph.nodes:
+        nid = _sanitize(state.id)
+        agent = state.agent_id or "root"
+        kind = _kind(state)
+        body = f"{agent}<br/><i>{kind}</i>"
+        if include_results:
+            res = _state_result_text(state)
+            if res:
+                body += f"<br/>{_escape_mermaid(_truncate(res, 40))}"
+        lines.append(f'    {nid}["{body}"]:::{_MERMAID_FLOW_CLASS.get(kind, "obs")}')
+    for edge in graph.edges:
         lines.append(
-            f'    {nid}["{body}"]:::{_MERMAID_FLOW_CLASS.get(node.type, "obs")}'
+            f"    {_sanitize(edge.from_)} -->|{edge.kind}| {_sanitize(edge.to)}"
         )
-        for child in node.child_nodes():
-            cid = _sanitize(child.id)
-            lines.append(f"    {nid} --> {cid}")
-            walk(child)
-
-    walk(state)
-
-    lines.extend(
-        [
-            "    classDef query    fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;",
-            "    classDef obs      fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;",
-            "    classDef action   fill:#d2992222,stroke:#d29922,color:#c9d1d9;",
-            "    classDef sup      fill:#bc8cff22,stroke:#bc8cff,color:#c9d1d9;",
-            "    classDef resume   fill:#7ee78722,stroke:#7ee787,color:#c9d1d9;",
-            "    classDef err      fill:#f8514922,stroke:#f85149,color:#c9d1d9;",
-            "    classDef result   fill:#3fb95022,stroke:#3fb950,color:#c9d1d9;",
-        ]
-    )
+    for kind, color in _NODE_COLOR.items():
+        cls = _MERMAID_FLOW_CLASS[kind]
+        lines.append(f"    classDef {cls} fill:{color}22,stroke:{color},color:#c9d1d9;")
     return "\n".join(lines)
 
 
-def to_mermaid_sequence(state: Node) -> str:
-    """Render delegate / wait / done flow between agents as a Mermaid ``sequenceDiagram``.
+# ── Mermaid sequence diagram ─────────────────────────────────────────
 
-    One participant per agent. Edges encode parent → child delegation, child
-    completion (``done()``), and parent resumes (``yield wait``).
-    """
-    agents: list[str] = []
-    seen: set[str] = set()
 
-    def collect_agents(node: Node) -> None:
-        aid = node.agent_id or "root"
-        if aid not in seen:
-            seen.add(aid)
-            agents.append(aid)
-        for child in node.child_nodes():
-            collect_agents(child)
-
-    collect_agents(state)
-
+def to_mermaid_sequence(graph: Graph) -> str:
+    """Delegate / wait / done flow between agents."""
     lines = ["sequenceDiagram"]
-    for aid in agents:
+    for aid in graph.agents:
         lines.append(f"    participant {_sanitize(aid)} as {aid}")
 
-    def walk(node: Node) -> None:
-        parent_id = _sanitize(node.agent_id or "root")
-        for child in node.child_nodes():
-            child_id = _sanitize(child.agent_id or "root")
-            if child.agent_id != node.agent_id:
-                lines.append(f"    {parent_id}->>+{child_id}: delegate")
-            walk(child)
-            current = child.current()
-            if child.agent_id != node.agent_id and current.terminal:
-                kind = "done" if current.type == "result" else current.type
-                result = getattr(current, "result", None)
-                summary = _truncate(result, 30) if result else kind
-                lines.append(
-                    f"    {child_id}-->>-{parent_id}: {_escape_mermaid(summary)}"
-                )
-
-    walk(state)
+    spawns = graph.edges.spawns()
+    by_id = {e.id: e for e in graph.nodes}
+    for edge in spawns:
+        parent = by_id.get(edge.from_)
+        child = by_id.get(edge.to)
+        if parent is None or child is None:
+            continue
+        parent_id = _sanitize(parent.agent_id)
+        child_id = _sanitize(child.agent_id)
+        lines.append(f"    {parent_id}->>+{child_id}: delegate")
+        child_sub = graph.agents[child.agent_id]
+        cur = child_sub.current()
+        if cur is not None and cur.terminal:
+            kind = "done"
+            res = getattr(cur, "result", None)
+            summary = _truncate(res, 30) if res else kind
+            lines.append(f"    {child_id}-->>-{parent_id}: {_escape_mermaid(summary)}")
     return "\n".join(lines)
 
 
-def to_d2(state: Node, *, include_results: bool = True) -> str:
-    """Render the node tree as a `D2 <https://d2lang.com>`_ diagram."""
-    _D2_STYLES = {
-        "query": '{ style: { fill: "#1f6feb22"; stroke: "#58a6ff" } }',
-        "observation": '{ style: { fill: "#1f6feb22"; stroke: "#58a6ff" } }',
-        "action": '{ style: { fill: "#d2992222"; stroke: "#d29922" } }',
-        "supervising": '{ style: { fill: "#bc8cff22"; stroke: "#bc8cff" } }',
-        "resume": '{ style: { fill: "#7ee78722"; stroke: "#7ee787" } }',
-        "error": '{ style: { fill: "#f8514922"; stroke: "#f85149" } }',
-        "result": '{ style: { fill: "#3fb95022"; stroke: "#3fb950" } }',
-    }
-    lines: list[str] = []
+# ── D2 ───────────────────────────────────────────────────────────────
 
-    def walk(node: Node) -> None:
-        nid = _sanitize(node.id)
-        agent = node.agent_id or "root"
-        label = f"{agent}\\n{node.type}"
-        result = getattr(node, "result", None)
-        if include_results and node.terminal and result:
-            label += f"\\n{_truncate(result, 40)}"
-        style = _D2_STYLES.get(node.type, "")
+
+_D2_STYLES = {
+    kind: f'{{ style: {{ fill: "{color}22"; stroke: "{color}" }} }}'
+    for kind, color in _NODE_COLOR.items()
+}
+
+
+def to_d2(graph: Graph, *, include_results: bool = True) -> str:
+    lines: list[str] = []
+    for state in graph.nodes:
+        nid = _sanitize(state.id)
+        agent = state.agent_id or "root"
+        kind = _kind(state)
+        label = f"{agent}\\n{kind}"
+        if include_results:
+            res = _state_result_text(state)
+            if res:
+                label += f"\\n{_truncate(res, 40)}"
+        style = _D2_STYLES.get(kind, "")
         lines.append(f'{nid}: "{label}" {style}'.rstrip())
-        for child in node.child_nodes():
-            cid = _sanitize(child.id)
-            lines.append(f"{nid} -> {cid}")
-            walk(child)
-
-    walk(state)
-    return "\n".join(lines)
-
-
-def viz_graph_to_mermaid_flowchart(
-    graph: VizGraph, *, include_results: bool = True
-) -> str:
-    lines = ["flowchart TD"]
-    for item in graph.nodes:
-        node = item.payload
-        nid = _sanitize(node.id)
-        body = f"{item.label}<br/><i>{node.type}</i>"
-        result = getattr(node, "result", None)
-        if include_results and node.terminal and result:
-            body += f"<br/>{_escape_mermaid(_truncate(result, 40))}"
-        current = "<br/><b>current</b>" if item.current else ""
-        lines.append(
-            f'    {nid}["{body}{current}"]:::{_MERMAID_FLOW_CLASS.get(node.type, "obs")}'
-        )
     for edge in graph.edges:
-        lines.append(
-            f"    {_sanitize(edge.source)} -->|{edge.kind}| {_sanitize(edge.target)}"
-        )
-    lines.extend(
-        [
-            "    classDef query    fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;",
-            "    classDef obs      fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;",
-            "    classDef action   fill:#d2992222,stroke:#d29922,color:#c9d1d9;",
-            "    classDef sup      fill:#bc8cff22,stroke:#bc8cff,color:#c9d1d9;",
-            "    classDef resume   fill:#7ee78722,stroke:#7ee787,color:#c9d1d9;",
-            "    classDef err      fill:#f8514922,stroke:#f85149,color:#c9d1d9;",
-            "    classDef result   fill:#3fb95022,stroke:#3fb950,color:#c9d1d9;",
-        ]
-    )
+        lines.append(f"{_sanitize(edge.from_)} -> {_sanitize(edge.to)}: {edge.kind}")
     return "\n".join(lines)
 
 
-def viz_graph_to_dot(graph: VizGraph, *, include_results: bool = True) -> str:
-    lines = [
-        "digraph rlmflow {",
-        "    rankdir=LR;",
-        '    node [shape=box, style="rounded,filled", fontname="Helvetica"];',
-        '    edge [fontname="Helvetica", fontsize=10];',
-    ]
-    for item in graph.nodes:
-        node = item.payload
-        color = _NODE_COLOR.get(node.type, "#8b949e")
-        parts = [item.label, node.agent_id or "root", node.type]
-        result = getattr(node, "result", None)
-        if include_results and node.terminal and result:
-            parts.append(_truncate(result, 40))
-        label = "\\n".join(_escape_dot(part) for part in parts)
-        penwidth = "2.5" if item.current else "1.0"
-        lines.append(
-            f'    {_sanitize(node.id)} [label="{label}", fillcolor="{color}22", color="{color}", penwidth={penwidth}];'
-        )
-    for edge in graph.edges:
-        style = "solid" if edge.kind == "next" else "dashed"
-        lines.append(
-            f'    {_sanitize(edge.source)} -> {_sanitize(edge.target)} [label="{edge.kind}", style={style}];'
-        )
-    lines.append("}")
-    return "\n".join(lines)
+# ── helpers ──────────────────────────────────────────────────────────
 
 
-def viz_graph_to_d2(graph: VizGraph, *, include_results: bool = True) -> str:
-    styles = {
-        "query": '{ style: { fill: "#1f6feb22"; stroke: "#58a6ff" } }',
-        "observation": '{ style: { fill: "#1f6feb22"; stroke: "#58a6ff" } }',
-        "action": '{ style: { fill: "#d2992222"; stroke: "#d29922" } }',
-        "supervising": '{ style: { fill: "#bc8cff22"; stroke: "#bc8cff" } }',
-        "resume": '{ style: { fill: "#7ee78722"; stroke: "#7ee787" } }',
-        "error": '{ style: { fill: "#f8514922"; stroke: "#f85149" } }',
-        "result": '{ style: { fill: "#3fb95022"; stroke: "#3fb950" } }',
-    }
-    lines: list[str] = []
-    for item in graph.nodes:
-        node = item.payload
-        label = f"{item.label}\\n{node.agent_id}\\n{node.type}"
-        result = getattr(node, "result", None)
-        if include_results and node.terminal and result:
-            label += f"\\n{_truncate(result, 40)}"
-        lines.append(
-            f'{_sanitize(node.id)}: "{label}" {styles.get(node.type, "")}'.rstrip()
-        )
-    for edge in graph.edges:
-        lines.append(
-            f"{_sanitize(edge.source)} -> {_sanitize(edge.target)}: {edge.kind}"
-        )
-    return "\n".join(lines)
+def _root_nodes(graph: Graph) -> list[Node]:
+    """Nodes with no incoming edge — used as ``[*] --> X`` Mermaid roots."""
+    targets = {edge.to for edge in graph.edges}
+    return [n for n in graph.nodes if n.id not in targets]
+
+
+__all__ = [
+    "to_d2",
+    "to_dot",
+    "to_mermaid",
+    "to_mermaid_flowchart",
+    "to_mermaid_sequence",
+]

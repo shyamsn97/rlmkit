@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
+from rlmflow.graph import ChildHandle, WaitRequest
 from rlmflow.runtime.docker import DockerRuntime
 from rlmflow.workspace import FileContext
-from rlmflow.node import ChildHandle, WaitRequest
 
 
 def _docker_available() -> bool:
@@ -90,14 +90,14 @@ def test_star_import_with_yield(runtime):
     rt.inject("delegate", delegate)
     rt.inject("wait", wait)
 
-    suspended, _ = rt.start_code(
+    suspended, _, _ = rt.start_code(
         "from math import *\n"
         "h = delegate('q')\n"
         "yield wait([h])\n"
         "print(int(pi * 100))\n"
     )
     assert suspended is True
-    suspended, out = rt.resume_code({"c": "done"})
+    suspended, out, _ = rt.resume_code({"c": "done"})
     assert suspended is False
     assert "314" in out
 
@@ -131,7 +131,7 @@ def test_end_to_end_delegate_wait():
         rt.inject("delegate", delegate)
         rt.inject("wait", wait)
 
-        suspended, payload = rt.start_code(
+        suspended, payload, _ = rt.start_code(
             "h = delegate('q1')\n"
             "results = yield wait([h])\n"
             "print('after:', results)\n"
@@ -140,7 +140,7 @@ def test_end_to_end_delegate_wait():
         request, _ = payload
         assert request.agent_ids == ["child-q1"]
 
-        suspended, out = rt.resume_code({"child-q1": "answer"})
+        suspended, out, _ = rt.resume_code({"child-q1": "answer"})
         assert suspended is False
         assert "after: {'child-q1': 'answer'}" in out
     finally:

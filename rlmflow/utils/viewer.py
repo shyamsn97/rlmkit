@@ -1,533 +1,557 @@
-"""Small Gradio viewer for typed RLMFlow traces.
+"""Visualization, transcripts, and the Gradio viewer for RLMFlow graphs.
 
-Layout (top to bottom):
-
-- a step slider (1 .. N steps). Drag to scrub the execution graph
-  through time — nodes appear as the agent runs.
-- the interactive Plotly graph for the current step. EVERY node is
-  drawn, color-coded by type. Click any node to drill into it.
-- a detail card for the clicked node: full code, output, content,
-  result, error — whichever fields the node carries — plus the full
-  combined conversation for the agent that produced it.
-
-The viewer prefers a `Session` if you pass one (full event log), and
-falls back to the snapshots in `states`. With states, each step =
-``states[i]`` (a tree snapshot). With only a session, each step adds
-or refreshes one node from the jsonl in insertion order.
+Public viewer/export functions accept a workspace, workspace path, graph, or
+graph list. The viewer + HTML stepper + image / GIF / step-image exporters all
+share the same Plotly figure builder so the on-screen and offline renders match
+pixel-for-pixel.
 """
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable
+from html import escape as _esc_html
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
-from rlmflow.node import Node, parse_node_obj
-from rlmflow.utils.viz import (
-    GraphMode,
-    VizEdge,
-    build_viz_graph,
-    node_tree,
-    session_events,
+from rlmflow.graph import (
+    Graph,
+    Node,
+    is_done,
+    is_errored,
+    is_exec_output,
+    is_llm_output,
+    is_resumed,
+    is_supervising,
+    is_user_query,
 )
-from rlmflow.workspace.session import FileSession, Session
-from rlmflow.workspace.store import FileStore
+from rlmflow.utils.export import _kind as _display_kind  # re-use one mapping
+from rlmflow.workspace import Workspace
 
-# Imported at module top so annotations on nested handlers (e.g. `evt:
-# gradio.SelectData`) resolve via `typing.get_type_hints()` even with
-# `from __future__ import annotations`. Falls back gracefully if the
-# optional `viewer` extra isn't installed — `open_viewer` will then raise
-# the standard ImportError when called.
 try:  # pragma: no cover - optional dep
     import gradio  # noqa: F401  (re-exported for type-hint resolution)
 except ImportError:  # pragma: no cover - optional dep
     gradio = None  # type: ignore[assignment]
 
 
-def _as_node(value: Node | dict) -> Node:
-    return value if isinstance(value, Node) else parse_node_obj(value)
+# An ActionNode is "bookkeeping" when its successor in the same
+# agent is one of these observations — the observation already
+# represents the step, so the action is hidden in figures and in
+# deduper sigs.
+#
+# Engine writes ``(action, observation)`` atomically per
+# ``apply_one`` call (one obs-to-obs transition), so the action
+# is always paired with its observation in any persisted snapshot.
+# The viewer collapses each pair into the single observation
+# node, except for the meaningful exec/resume *outcomes* —
+# ``done_output`` and ``error_output`` keep their predecessor
+# action visible so the figure reads as ``... → exec → done`` or
+# ``... → resume → errored``.
+HIDDEN_ACTION_PAIRS: dict[str, set[str]] = {
+    "llm_action": {"llm_output"},
+    "exec_action": {"exec_output", "supervising_output"},
+    "resume_action": {"exec_output", "supervising_output"},
+}
+
+# Vertical multiplier applied to the depth-based Y coordinate when laying
+# out the graph figure. The figure no longer renders per-node state
+# labels (``llm`` / ``exec`` / ``done`` / …) because the legend already
+# explains them via colour and symbol — only agent-name annotations
+# remain. With state labels gone, rows can sit closer together; 1.4
+# leaves comfortable space for the agent annotations above each
+# agent-entry marker.
+_Y_SPACING = 1.4
+
+# Distinct color for the "agent name" annotation attached to the first
+# visible node of each agent.
+_AGENT_LABEL_COLOR = "#3fb950"
+
+# Pixel offset between an agent-entry marker and its annotation label.
+# Plotly annotations apply ``yshift`` in screen pixels regardless of the
+# figure's data-coordinate range, so this is a stable visual gap.
+_AGENT_LABEL_YSHIFT = 10
 
 
-def _resolve_session(
-    states: list[Node] | None,
-    session: Session | str | Path | None,
-) -> Session | None:
-    if isinstance(session, Session):
-        return session
-    if isinstance(session, (str, Path)):
-        path = Path(session)
-        if path.name == "session" and path.exists():
-            return FileSession(FileStore(path.parent))
-        return FileSession(FileStore(path))
-    if not states:
-        return None
-    # Best-effort: any node may carry a workspace pointer with a sibling session/.
-    for node in states:
-        ws = getattr(node, "workspace", None)
-        root = getattr(ws, "root", None) if ws else None
-        if not root:
+def is_bookkeeping(state: Node, successor: Node | None) -> bool:
+    """``True`` when ``state`` is an action collapsed into ``successor``.
+
+    Two surfaces use this: the figure builder hides such nodes; the
+    viz-frame deduper treats two snapshots that differ only in
+    bookkeeping states as one frame.
+    """
+    paired = HIDDEN_ACTION_PAIRS.get(state.type)
+    if paired is None or successor is None:
+        return False
+    return successor.type in paired
+
+
+ViewSource: TypeAlias = Workspace | str | Path | Graph | Iterable[Graph]
+
+
+def _looks_like_graph_dump(data: Any) -> bool:
+    return isinstance(data, dict) and "agent_id" in data and "states" in data
+
+
+def _load_graphs_from_path(path: str | Path) -> list[Graph]:
+    p = Path(path)
+    if p.is_dir():
+        if Workspace.check_path(p):
+            return Workspace.open_path(p).load_steps()
+
+        graph_json = p / "graph.json"
+        if not graph_json.exists():
+            raise ValueError(
+                f"{p} is not a workspace or graph directory (missing graph.json)"
+            )
+
+        try:
+            data = json.loads(graph_json.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{graph_json} is not valid JSON: {exc}") from exc
+
+        if _looks_like_graph_dump(data):
+            return [Graph.from_dict(data)]
+
+        raise ValueError(
+            f"{p} has graph.json, but it is not a workspace manifest "
+            "or standalone Graph dump"
+        )
+
+    if not p.is_file():
+        raise ValueError(f"no such file or directory: {p}")
+
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{p} is not valid JSON: {exc}") from exc
+
+    if _looks_like_graph_dump(data):
+        return [Graph.from_dict(data)]
+    if isinstance(data, list) and all(_looks_like_graph_dump(item) for item in data):
+        return [Graph.from_dict(item) for item in data]
+    raise ValueError(f"{p} does not look like a workspace or graph dump")
+
+
+def _visible_signature(graph: Graph) -> tuple:
+    """Per-agent display-kind fingerprint for a graph snapshot.
+
+    Two snapshots that produce the same fingerprint render to the
+    same figure under the action-collapse rule — for example a tick
+    that adds an ``llm_action`` and a tick that replaces it with the
+    paired ``llm_output`` both show one ``llm`` node per agent.
+    Used to dedupe consecutive viz frames where only bookkeeping
+    states changed.
+    """
+    sig: list[tuple[str, tuple[str, ...]]] = []
+    for sub in graph.walk():
+        next_in: dict[str, Node] = {}
+        for prev, nxt in zip(sub.states[:-1], sub.states[1:]):
+            next_in[prev.id] = nxt
+        kinds = tuple(
+            _display_kind(n)
+            for n in sub.states
+            if not is_bookkeeping(n, next_in.get(n.id))
+        )
+        sig.append((sub.agent_id, kinds))
+    return tuple(sorted(sig))
+
+
+def _dedupe_by_visible_signature(graphs: list[Graph]) -> list[Graph]:
+    """Drop consecutive snapshots whose visible figure is unchanged."""
+    out: list[Graph] = []
+    last_sig: tuple | None = None
+    for g in graphs:
+        sig = _visible_signature(g)
+        if sig == last_sig:
             continue
-        workspace_root = Path(root)
-        cand = workspace_root / "session"
-        if (workspace_root / "graph.json").exists() or cand.exists():
-            return FileSession(FileStore(workspace_root))
+        out.append(g)
+        last_sig = sig
+    return out
+
+
+def resolve_graphs(source: ViewSource) -> list[Graph]:
+    """Resolve a viewer/export source into graph snapshots.
+
+    ``source`` can be a workspace, workspace path, standalone graph, graph list,
+    or standalone graph JSON path.
+    """
+    if isinstance(source, Workspace):
+        return source.load_steps()
+    if isinstance(source, Graph):
+        return [source]
+    if isinstance(source, (str, Path)):
+        return _load_graphs_from_path(source)
+    graphs = list(source)
+    if not all(isinstance(graph, Graph) for graph in graphs):
+        raise TypeError("expected a Graph, Workspace, path, or iterable of Graphs")
+    return graphs
+
+
+def _resolve_latest_graph(source: ViewSource) -> Graph:
+    graphs = resolve_graphs(source)
+    if not graphs:
+        raise ValueError("expected at least one Graph")
+    return graphs[-1]
+
+
+# ── transcripts ──────────────────────────────────────────────────────
+
+
+def agent_transcript(source: ViewSource, *, include_system: bool = True) -> str:
+    """Render one agent's sub-:class:`Graph` as a chat-log transcript.
+
+    Pulls the system prompt + original query off the :class:`Graph`,
+    then walks the per-agent state log in order. Used by both the public
+    API (``graph[aid].transcript()``) and
+    :class:`~rlmflow.workspace.session.SessionVariable`.
+    """
+    graph = _resolve_latest_graph(source)
+    parts: list[str] = []
+    if include_system and graph.system_prompt:
+        parts.append(f"--- system ---\n{graph.system_prompt.strip()}")
+    if graph.query:
+        parts.append(f"--- query ---\n{graph.query.strip()}")
+    for state in graph.states:
+        rendered = _render_state_transcript(state)
+        if rendered is not None:
+            parts.append(rendered)
+    return "\n\n".join(parts)
+
+
+def graph_session(source: ViewSource, *, include_system: bool = False) -> str:
+    """Render every agent's trajectory in graph order — flat chat-log view.
+
+    Agents appear in spawn order; each agent's states render in their
+    own block. ``include_system`` emits the agent's system prompt once
+    on first appearance.
+    """
+    graph = _resolve_latest_graph(source)
+    parts: list[str] = []
+    for aid in graph.agents:
+        sub = graph.agents[aid]
+        if include_system and sub.system_prompt:
+            parts.append(f"--- [{aid}] system ---\n{sub.system_prompt.strip()}")
+        if sub.query:
+            parts.append(f"--- [{aid}] query ---\n{sub.query.strip()}")
+        for state in sub.states:
+            rendered = _render_state_transcript(state, agent_id=aid)
+            if rendered is not None:
+                parts.append(rendered)
+    return "\n\n".join(parts)
+
+
+def _render_state_transcript(state: Node, *, agent_id: str | None = None) -> str | None:
+    prefix = f"[{agent_id}] " if agent_id else ""
+    if is_user_query(state):
+        body = (state.content or "").strip()
+        return f"--- {prefix}query/turn ---\n{body}" if body else None
+    if is_llm_output(state):
+        body = (state.reply or "").strip()
+        return f"--- {prefix}assistant ---\n{body}" if body else None
+    if is_supervising(state):
+        wait_on = ", ".join(state.waiting_on or [])
+        return f"--- {prefix}supervising ---\nwaiting on: {wait_on}"
+    if is_done(state):
+        body = (state.result or "").strip()
+        return f"--- {prefix}result ---\n{body}"
+    if is_errored(state):
+        body = (state.content or "").strip()
+        return f"--- {prefix}error ({state.error}) ---\n{body}"
+    if is_resumed(state) and is_exec_output(state):
+        resumed_from = ", ".join(state.resumed_from or [])
+        body = f"resumed from: {resumed_from or '(none)'}"
+        output = (state.output or "").strip()
+        if output:
+            body += f"\noutput:\n{output}"
+        return f"--- {prefix}resume ---\n{body}"
+    if is_exec_output(state):
+        body = (state.content or state.output or "").strip()
+        return f"--- {prefix}observation ---\n{body}" if body else None
+    # ActionNode bookkeeping (LLMAction / ExecAction / ResumeAction):
+    # not part of a chat-log transcript.
     return None
 
 
-def _all_nodes(states: list[Node] | None, session: Session | None) -> list[Node]:
-    if session is not None:
-        nodes = list(session.load().values())
-        if nodes:
-            return nodes
-    if not states:
-        return []
-    # Use the richest snapshot's full subtree.
-    richest = max(states, key=lambda s: len(list(s.walk())))
-    return list(richest.walk())
+# ── tree rendering (text) ────────────────────────────────────────────
 
 
-def _agent_chain(agent_id: str, nodes: list[Node]) -> list[Node]:
-    """Linear in-agent chain ordered by parent → child within the agent.
+def _short(text: str, n: int) -> str:
+    t = " ".join(text.split())
+    return t if len(t) <= n else t[: n - 1] + "…"
 
-    Supervising nodes embed sub-agent result objects in their `children`
-    list; we ignore cross-agent edges so we don't accidentally walk into
-    a child agent's chain.
+
+def _label(s: Node) -> str:
+    t = _display_kind(s)
+    if is_supervising(s) and s.waiting_on:
+        return f"{t} waiting_on={s.waiting_on}"
+    if is_done(s) and s.result:
+        return f"{t} -> {_short(s.result, 60)}"
+    if is_errored(s):
+        return f"{t} ({s.error or 'error'})"
+    if is_llm_output(s) and s.code:
+        return f"{t} code={_short(s.code, 40)}"
+    if is_exec_output(s) and (s.content or s.output):
+        return f"{t} {_short(s.content or s.output, 60)}"
+    return t
+
+
+def graph_tree(source: ViewSource) -> str:
+    """Render a :class:`Graph` as a nested text tree.
+
+    Children are attached visually under the supervising state that
+    awaited them when possible, falling back to ``parent_node_id``.
     """
-    same = [n for n in nodes if n.agent_id == agent_id]
-    in_agent = {n.id for n in same}
-    parent_of: dict[str, str] = {}
-    for n in same:
-        for child in n.children:
-            cid = child.id if isinstance(child, Node) else str(child)
-            if cid in in_agent:
-                parent_of[cid] = n.id
-    children_of: dict[str, list[str]] = {n.id: [] for n in same}
-    for cid, pid in parent_of.items():
-        children_of.setdefault(pid, []).append(cid)
+    graph = _resolve_latest_graph(source)
+    lines: list[str] = []
 
-    by_id = {n.id: n for n in same}
-    roots = [n for n in same if n.id not in parent_of]
-    if not roots:
-        return same  # malformed; just give back what we have
-    # Prefer a query node as the root.
-    roots.sort(key=lambda n: (n.type != "query", n.id))
-    root = roots[0]
+    def walk(g: Graph, indent: str) -> None:
+        head = f"{indent}● {g.agent_id} ({g.model_label})"
+        if g.query:
+            head += f" — {_short(g.query, 60)}"
+        lines.append(head)
 
-    chain: list[Node] = []
-    cur: Node | None = root
-    while cur is not None:
-        chain.append(cur)
-        kids = children_of.get(cur.id, [])
-        if not kids:
-            break
-        # Within an agent the chain is linear; if there happen to be
-        # multiple in-agent children pick the latest/terminal-leaning one.
-        kids_sorted = sorted(
-            (by_id[k] for k in kids),
-            key=lambda n: (n.terminal, n.type == "result", n.id),
-            reverse=True,
-        )
-        cur = kids_sorted[0]
-    return chain
+        state_ids = {s.id for s in g.states}
+        sup_for_agent: dict[str, str] = {}
+        for s in g.states:
+            if is_supervising(s):
+                for aid in s.waiting_on:
+                    sup_for_agent[aid] = s.id
 
-
-def _agent_status(chain: list[Node]) -> tuple[str, str]:
-    """Return (marker, kind) for an agent given its chain.
-
-    kind is one of: 'result', 'error', 'running'.
-    """
-    last = chain[-1] if chain else None
-    if last is None:
-        return ("·", "running")
-    if last.type == "result":
-        return ("✓", "result")
-    if last.type == "error" or any(n.type == "error" for n in chain):
-        return ("✗", "error")
-    return ("●", "running")
-
-
-def _agent_result_preview(chain: list[Node], limit: int = 64) -> str:
-    last = chain[-1] if chain else None
-    if last is None:
-        return ""
-    if last.type == "result":
-        body = (getattr(last, "result", "") or "").strip()
-    elif last.type == "error":
-        body = f"{getattr(last, 'error', '') or 'error'}: {getattr(last, 'content', '') or ''}".strip()
-    else:
-        body = f"<in {last.type}>"
-    body = body.replace("\n", " ")
-    return body[:limit] + ("…" if len(body) > limit else "")
-
-
-def node_session(node: Node, *, include_system: bool = False) -> str:
-    """Render every message in this graph subtree, across all agents, in graph order.
-
-    Each message line is prefixed with the agent it came from, so
-    cross-agent flows read top-to-bottom like a chat log. When
-    ``include_system`` is true, an agent's system prompt is emitted the
-    first time that agent appears.
-    """
-    parts: list[str] = []
-    seen_systems: set[str] = set()
-    for item in node.walk():
-        agent = item.agent_id or "root"
-        if include_system and agent not in seen_systems and item.system_prompt:
-            seen_systems.add(agent)
-            parts.append(f"--- [{agent}] system ---\n{item.system_prompt.strip()}")
-
-        if item.type == "query":
-            parts.append(f"--- [{agent}] query ---\n{(item.query or '').strip()}")
-        elif item.type == "action":
-            parts.append(
-                f"--- [{agent}] assistant ---\n{(getattr(item, 'reply', '') or '').strip()}"
+        attach_at: dict[str, list[Graph]] = {}
+        unplaced: list[Graph] = []
+        for child in g.children.values():
+            key = sup_for_agent.get(child.agent_id) or (
+                child.parent_node_id if child.parent_node_id in state_ids else None
             )
-        elif item.type == "observation":
-            parts.append(
-                f"--- [{agent}] observation ---\n{(getattr(item, 'content', '') or '').strip()}"
-            )
-        elif item.type == "supervising":
-            wait_on = ", ".join(getattr(item, "waiting_on", []) or [])
-            parts.append(f"--- [{agent}] supervising ---\nwaiting on: {wait_on}")
-        elif item.type == "resume":
-            parts.append(
-                f"--- [{agent}] resume ---\n{(getattr(item, 'content', '') or '').strip()}"
-            )
-        elif item.type == "error":
-            parts.append(
-                f"--- [{agent}] error ({getattr(item, 'error', '')}) ---\n"
-                f"{(getattr(item, 'content', '') or '').strip()}"
-            )
-        elif item.type == "result":
-            parts.append(
-                f"--- [{agent}] result ---\n{(getattr(item, 'result', '') or '').strip()}"
-            )
-    return "\n\n".join(parts)
+            if key:
+                attach_at.setdefault(key, []).append(child)
+            else:
+                unplaced.append(child)
+
+        for s in g.states:
+            lines.append(f"{indent}  - [{s.seq:>2}] {_label(s)}")
+            for child in attach_at.get(s.id, []):
+                walk(child, indent + "    ")
+        for child in unplaced:
+            walk(child, indent + "    ")
+
+    walk(graph, "")
+    return "\n".join(lines)
 
 
-def node_transcript(
-    node: Node,
-    agent_id: str | None = None,
-    *,
-    session: Session | str | Path | None = None,
-    include_system: bool = True,
-) -> str:
-    """Render a clean transcript for one agent in a node snapshot.
-
-    By default this only uses the subtree visible from ``node``. Pass a
-    session if you want to reconstruct from the persisted event log.
-    """
-    agent_id = agent_id or node.agent_id
-    sess = _resolve_session([node], session)
-    nodes = _all_nodes([node], sess) if sess is not None else list(node.walk())
-    chain = _agent_chain(agent_id, nodes)
-    if not chain:
-        return f"(no nodes for agent {agent_id!r})"
-
-    parts: list[str] = []
-    if include_system and chain[0].system_prompt:
-        parts.append(f"--- system ---\n{chain[0].system_prompt.strip()}")
-    for item in chain:
-        if item.type == "query":
-            parts.append(f"--- query ---\n{(item.query or '').strip()}")
-        elif item.type == "action":
-            parts.append(
-                f"--- assistant ---\n{(getattr(item, 'reply', '') or '').strip()}"
-            )
-        elif item.type == "observation":
-            parts.append(
-                f"--- observation ---\n{(getattr(item, 'content', '') or '').strip()}"
-            )
-        elif item.type == "supervising":
-            wait_on = ", ".join(getattr(item, "waiting_on", []) or [])
-            parts.append(f"--- supervising ---\nwaiting on: {wait_on}")
-        elif item.type == "resume":
-            parts.append(
-                f"--- resume ---\n{(getattr(item, 'content', '') or '').strip()}"
-            )
-        elif item.type == "error":
-            parts.append(
-                f"--- error ({getattr(item, 'error', '')}) ---\n"
-                f"{(getattr(item, 'content', '') or '').strip()}"
-            )
-        elif item.type == "result":
-            parts.append(
-                f"--- result ---\n{(getattr(item, 'result', '') or '').strip()}"
-            )
-    return "\n\n".join(parts)
+# ── plot palette ─────────────────────────────────────────────────────
 
 
-def _normalize_reply(reply: str, code: str) -> str:
-    """Re-fence custom code blocks (e.g. ```repl) as ```python so the chat
-    panel gets proper syntax highlighting. Falls back to the raw reply if
-    we can't find a clean substitution."""
-    if not reply:
-        return ""
-    if not code or code not in reply:
-        return reply
-    # Find the fence that wraps `code` and rewrite its language tag.
-    idx = reply.find(code)
-    fence_start = reply.rfind("```", 0, idx)
-    if fence_start == -1:
-        return reply
-    nl = reply.find("\n", fence_start)
-    if nl == -1 or nl > idx:
-        return reply
-    return reply[:fence_start] + "```python" + reply[nl:]
-
-
-def _render_action_message(
-    node: Node, prev: Node | None = None
-) -> dict[str, str] | None:
-    """Render an action / supervising / error / result node as ONE assistant turn.
-
-    The action node already carries `reply`, `code`, and `output` — fold
-    them into a single Markdown bubble with a `<details>` block for the
-    REPL output so the conversation reads like a normal chat.
-    Supervising nodes typically replay the prior action's code; we strip
-    that and keep just the "waiting on" status to avoid duplication.
-    """
-    parts: list[str] = []
-    reply = (getattr(node, "reply", "") or "").strip()
-    code = (getattr(node, "code", "") or "").strip()
-    output = (getattr(node, "output", "") or "").strip()
-
-    prev_code = (getattr(prev, "code", "") or "").strip() if prev is not None else ""
-    suppress_code = node.type == "supervising" and bool(code) and code == prev_code
-
-    if not suppress_code:
-        if reply and code and code in reply:
-            parts.append(_normalize_reply(reply, code))
-        else:
-            if reply:
-                parts.append(reply)
-            if code:
-                parts.append(f"```python\n{code}\n```")
-
-    if node.type == "supervising":
-        wait_on = getattr(node, "waiting_on", []) or []
-        if wait_on:
-            badges = ", ".join(f"`{w}`" for w in wait_on)
-            parts.append(f"_⏳ delegated to {badges}_")
-        else:
-            parts.append("_⏳ supervising_")
-
-    if node.type == "error":
-        kind = getattr(node, "error", "") or "error"
-        body = (getattr(node, "content", "") or "").strip()
-        parts.append(f"**❌ {kind}**\n```\n{body[:2000]}\n```")
-    elif output and not suppress_code:
-        snippet = output if len(output) <= 2000 else output[:2000] + "\n…(truncated)"
-        parts.append(
-            f"<details><summary>output</summary>\n\n```\n{snippet}\n```\n\n</details>"
-        )
-
-    if node.type == "result":
-        result = (getattr(node, "result", "") or "").strip()
-        parts.append(f"**✓ done()** — {result}" if result else "**✓ done()**")
-
-    body = "\n\n".join(p for p in parts if p)
-    if not body:
-        return None
-    return {"role": "assistant", "content": body}
-
-
-def _looks_like_continue_ping(content: str) -> bool:
-    """Heuristic: skip observations whose content is just the boilerplate
-    'Your response MUST contain ...' or trivial REPL echoes."""
-    head = content.strip().lower()
-    if not head:
-        return True
-    if "your response must contain" in head:
-        return True
-    if head.startswith("query:") and len(head) < 400:
-        return True
-    return False
-
-
-# ── graph figure ─────────────────────────────────────────────────────
-
-# Plotly hue per node type. Same palette is reused by the message
-# bubbles in the detail panel so each conversation row visually matches
-# the node it came from.
-_GRAPH_NODE_COLORS: dict[str, str] = {
-    "query": "#58a6ff",  # sky blue   — input
-    "action": "#bc8cff",  # lavender   — compute step
-    "observation": "#ff9e64",  # peach      — feedback / tool output
-    "supervising": "#ffd33d",  # gold       — orchestrator
-    "resume": "#56d4dd",  # cyan       — continuation
-    "result": "#56d364",  # emerald    — terminal success
-    "error": "#ff7b72",  # coral      — failure
+_NODE_COLORS: dict[str, str] = {
+    "query": "#58a6ff",
+    "llm_call": "#a98a2a",
+    "llm": "#bc8cff",
+    "exec_call": "#b87650",
+    "exec": "#ff9e64",
+    "supervising": "#ffd33d",
+    "resume_call": "#3a8a5d",
+    "resume": "#56d4dd",
+    "done": "#56d364",
+    "errored": "#ff7b72",
 }
 
-# Marker symbols pair with color so types stay distinguishable at small
-# sizes / for color-blind viewers / in screenshots.
-_GRAPH_NODE_SYMBOLS: dict[str, str] = {
+_NODE_SYMBOLS: dict[str, str] = {
     "query": "circle",
-    "action": "diamond",
-    "observation": "square",
+    "llm_call": "diamond-open",
+    "llm": "diamond",
+    "exec_call": "square-open",
+    "exec": "square",
     "supervising": "star",
+    "resume_call": "triangle-right-open",
     "resume": "triangle-right",
-    "result": "hexagon",
-    "error": "x",
+    "done": "hexagon",
+    "errored": "x",
 }
 
 
-def _node_hover_text(node: Node) -> str:
-    """Hover string for a Plotly scatter node — supports <br> + basic HTML.
+# ── plot helpers ─────────────────────────────────────────────────────
 
-    Kept deliberately minimal: just identity (agent_id / type / depth /
-    model / tokens). Click the node to see code, output, result, or
-    error content in the detail panel.
-    """
+
+def _state_hover_text(state: Node, agent: Graph) -> str:
     rows = [
-        f"<b>{node.agent_id or 'root'}</b>",
-        f"<i>{node.type}</i> · depth {node.depth or 0}",
+        f"<b>{_esc_html(agent.agent_id or 'root')}</b>",
+        f"<i>{_display_kind(state)}</i> · depth {agent.depth} · seq {state.seq}",
     ]
-    model = getattr(node, "model_label", "") or ""
-    if model:
-        rows.append(f"model: {model}")
-    tin = getattr(node, "total_input_tokens", 0) or 0
-    tout = getattr(node, "total_output_tokens", 0) or 0
-    if tin or tout:
-        rows.append(f"tokens: {tin + tout:,} (in {tin:,} / out {tout:,})")
+    if agent.model_label:
+        rows.append(f"model: {_esc_html(agent.model_label)}")
+    inp, out = agent.tokens()
+    if inp or out:
+        rows.append(f"agent tokens: {inp + out:,} (in {inp:,} / out {out:,})")
     return "<br>".join(rows)
 
 
-def _node_display_label(
-    node: Node,
-    *,
-    repeated_agent: bool = False,
-    is_agent_entry: bool = False,
-    limit: int = 22,
-) -> str:
-    label = node.agent_id or node.id[:8]
+def _agent_display_label(agent: Graph, *, limit: int = 22) -> str:
+    """Short label for an agent's column. Used only for agent-entry
+    annotations; the figure does not render any per-state labels."""
+    label = agent.agent_id or ""
     if label.startswith("root."):
         label = label[len("root.") :]
-    if (node.depth or 0) >= 2 and "." in label:
+    if agent.depth >= 2 and "." in label:
         label = label.rsplit(".", 1)[-1]
-    if repeated_agent and not is_agent_entry:
-        label = node.type
     if len(label) > limit:
         label = label[: limit - 1] + "…"
     return label
 
 
-def _node_children_ids(node: Node) -> list[str]:
-    out: list[str] = []
-    for child in node.children:
-        out.append(child.id if isinstance(child, Node) else str(child))
-    return out
-
-
 def _build_graph_figure(
-    nodes: list[Node],
+    graph: Graph,
     *,
     height: int = 360,
     title: str = "execution graph",
-    id_to_agent: dict[str, str] | None = None,
-    edges: list[VizEdge] | None = None,
 ):
-    """Plotly figure showing every node, colored by type, edges = children.
+    """Plotly figure showing every node, colored by type, edges from
+    :attr:`Graph.edges`.
 
-    Works with a flat list (where `children` may be id strings) or with
-    a list pulled from a state subtree (where `children` are real Node
-    objects). We re-derive the parent → child edges from id references
-    so both representations behave the same.
-
-    `id_to_agent` is an optional GLOBAL id → agent_id map (covering nodes
-    not yet present in the snapshot). Lets us route cross-agent edges
-    even when supervising's `children` references future result ids that
-    haven't been created yet at this step.
+    Lay-out is a tidy tree from explicit edges: a node sits centered
+    above its children, leaf count determines horizontal slot width.
     """
     try:
         import plotly.graph_objects as go
     except ImportError:  # pragma: no cover - optional dep
         return None
 
+    # An ActionNode is hidden when its successor "absorbs" it — see
+    # :func:`rlmflow.graph.timeline.is_bookkeeping`. Same rule that
+    # ``retrace_steps`` uses to merge bookkeeping states into the
+    # previous tick, so the figure and the slider stay in sync.
+    next_in_agent: dict[str, Node] = {}
+    for sub in graph.walk():
+        states = sub.states
+        for prev, nxt in zip(states[:-1], states[1:]):
+            next_in_agent[prev.id] = nxt
+
+    nodes = [n for n in graph.nodes if not is_bookkeeping(n, next_in_agent.get(n.id))]
     by_id: dict[str, Node] = {n.id: n for n in nodes}
-    children_of: dict[str, list[str]] = {nid: [] for nid in by_id}
+    # Two kinds of outgoing edges per node:
+    #   chain_child[n]: at most one — the next state of the SAME agent (flows_to).
+    #   spawn_children[n]: zero or more — first state of each child agent (spawns).
+    # Visual layout: the chain child sits directly below its parent (same column),
+    # spawn children fan out to either side so the parent's trajectory stays
+    # readable as a vertical spine.
+    #
+    # We deliberately re-root spawn edges from the spawning *action* onto the
+    # matching ``SupervisingOutput``. Reason: spawned children only "live" during
+    # the supervising state (the parent is yielded waiting on them). Visually
+    # attaching them to supervising makes the action → supervising → resume
+    # spine readable as a column, with the children fanning out *from* the
+    # state that owns their lifecycle. When no supervising is waiting on a
+    # child agent (mid-run, before the wait is committed) we fall back to
+    # the action that physically spawned it.
+    chain_child: dict[str, str] = {}
+    spawn_children: dict[str, list[str]] = {n.id: [] for n in nodes}
     parent_of: dict[str, str] = {}
 
-    # Global id → agent_id (snapshot ⊕ caller-supplied future nodes).
-    agent_of_id: dict[str, str] = {n.id: n.agent_id for n in nodes}
-    if id_to_agent:
-        for k, v in id_to_agent.items():
-            agent_of_id.setdefault(k, v)
+    # agent_id -> id of the SupervisingOutput that waits on it (first wins).
+    sup_for_child_agent: dict[str, str] = {}
+    for node in nodes:
+        if is_supervising(node):
+            for aid in node.waiting_on:
+                sup_for_child_agent.setdefault(aid, node.id)
 
-    if edges is not None:
-        for edge in edges:
-            if edge.source not in by_id or edge.target not in by_id:
+    # Rebuild flows_to from each agent's visible states in seq order so
+    # collapsed action nodes don't punch holes in the chain.
+    for sub in graph.walk():
+        prev_id: str | None = None
+        for s in sub.states:
+            if s.id not in by_id:
                 continue
-            if edge.target in parent_of:
-                continue
-            parent_of[edge.target] = edge.source
-            children_of[edge.source].append(edge.target)
-    else:
-        # Pass 1 — intra-agent edges. The agent's chain (query → action → ...
-        # → result) is the *real* parent chain. We do this first so the chain
-        # claims its nodes before any cross-agent embed (e.g. supervising
-        # listing each child agent's `result` in its `children`) tries to.
-        for n in nodes:
-            for cid in _node_children_ids(n):
-                if cid not in by_id or cid == n.id:
-                    continue
-                child = by_id[cid]
-                if child.agent_id != n.agent_id:
-                    continue
-                if cid in parent_of:
-                    continue
-                parent_of[cid] = n.id
-                children_of[n.id].append(cid)
+            if prev_id is not None:
+                chain_child[prev_id] = s.id
+                parent_of[s.id] = prev_id
+            prev_id = s.id
 
-        # Pass 2 — cross-agent / delegation edges.
-        by_agent: dict[str, list[Node]] = {}
-        for n in nodes:
-            by_agent.setdefault(n.agent_id, []).append(n)
-        for agent_id in by_agent:
-            chain = _agent_chain(agent_id, nodes)
-            if not chain:
-                continue
-            first = chain[0]
-            if first.id in parent_of:
-                continue
-            attached = False
-            for other in nodes:
-                if other.agent_id == agent_id:
-                    continue
-                for cid in _node_children_ids(other):
-                    if agent_of_id.get(cid) == agent_id:
-                        parent_of[first.id] = other.id
-                        children_of[other.id].append(first.id)
-                        attached = True
-                        break
-                if attached:
-                    break
+    # When a spawning edge points at a hidden action, walk the parent
+    # agent's trajectory to find the nearest preceding visible state.
+    visible_predecessor: dict[str, str | None] = {}
+    for sub in graph.walk():
+        prev_visible: str | None = None
+        for s in sub.states:
+            visible_predecessor[s.id] = prev_visible
+            if s.id in by_id:
+                prev_visible = s.id
 
-    # Roots = nodes without a known parent.
-    roots = [nid for nid in by_id if nid not in parent_of]
-    roots.sort(key=lambda nid: (by_id[nid].depth or 0, nid))
+    for edge in graph.edges:
+        if edge.kind != "spawns":
+            continue
+        if edge.to not in by_id or edge.to in parent_of:
+            continue
+        child_agent_id = by_id[edge.to].agent_id
+        attach_to = sup_for_child_agent.get(child_agent_id)
+        if attach_to is None:
+            attach_to = (
+                edge.from_
+                if edge.from_ in by_id
+                else visible_predecessor.get(edge.from_)
+            )
+        if attach_to is None:
+            continue
+        parent_of[edge.to] = attach_to
+        spawn_children.setdefault(attach_to, []).append(edge.to)
 
-    # Tidy-tree layout: each subtree gets a horizontal slot proportional
-    # to its leaf count; parent sits centered above its children.
+    def all_children(eid: str) -> list[str]:
+        kids = list(spawn_children.get(eid, []))
+        if eid in chain_child:
+            # Insert the chain child at the middle so the trajectory column
+            # stays visually centered under its parent.
+            mid = len(kids) // 2
+            kids.insert(mid, chain_child[eid])
+        return kids
+
+    roots = [eid for eid in by_id if eid not in parent_of]
+    roots.sort(key=lambda eid: (graph.agents[by_id[eid].agent_id].depth, eid))
+
     pos: dict[str, tuple[float, float]] = {}
 
-    def leaf_count(nid: str, seen: set[str]) -> int:
-        if nid in seen:
+    def leaf_count(eid: str, seen: set[str]) -> int:
+        if eid in seen:
             return 1
-        seen.add(nid)
-        kids = children_of.get(nid, [])
+        seen.add(eid)
+        kids = all_children(eid)
         if not kids:
             return 1
         return sum(leaf_count(k, seen) for k in kids)
 
-    def place(nid: str, left: float, right: float, depth: int, seen: set[str]) -> None:
-        if nid in seen:
+    def place(eid: str, left: float, right: float, depth: int, seen: set[str]) -> None:
+        if eid in seen:
             return
-        seen.add(nid)
-        pos[nid] = ((left + right) / 2, -float(depth))
-        kids = children_of.get(nid, [])
+        seen.add(eid)
+        center_x = (left + right) / 2
+        pos[eid] = (center_x, -float(depth) * _Y_SPACING)
+        kids = all_children(eid)
         if not kids:
             return
+        # If there's both a chain child and spawn children: fan the spawns
+        # out symmetrically at depth+1, and put the chain child one row
+        # below on the parent's vertical spine (depth+2) so its label has
+        # its own horizontal slot instead of fighting the spawn labels.
+        if eid in chain_child and spawn_children.get(eid):
+            spawns = list(spawn_children[eid])
+            n_spawn = len(spawns)
+            half = n_spawn // 2
+            left_spawns = spawns[:half]
+            right_spawns = spawns[half:]
+            span = right - left
+            unit = span / max(n_spawn + 1, 2)
+            for i, cid in enumerate(reversed(left_spawns)):
+                cx = center_x - unit * (i + 1)
+                place(cid, cx - unit / 2, cx + unit / 2, depth + 1, seen)
+            for i, cid in enumerate(right_spawns):
+                cx = center_x + unit * (i + 1)
+                place(cid, cx - unit / 2, cx + unit / 2, depth + 1, seen)
+            place(
+                chain_child[eid],
+                center_x - unit / 2,
+                center_x + unit / 2,
+                depth + 2,
+                seen,
+            )
+            return
+        # Otherwise: equal-slot tidy tree based on leaf counts.
         widths = [leaf_count(k, set()) for k in kids]
         total = sum(widths) or 1
         span = right - left
@@ -543,18 +567,18 @@ def _build_graph_figure(
         width = leaf_count(root, set())
         place(root, cursor_left, cursor_left + float(max(width, 1)), 0, placed)
         cursor_left += float(max(width, 1)) + 1.0
-    # Stragglers (cycles, broken edges) — drop them at depth 0 to the right.
-    for nid in by_id:
-        if nid not in pos:
+    for eid in by_id:
+        if eid not in pos:
             cursor_left += 1.0
-            pos[nid] = (cursor_left, 0.0)
+            pos[eid] = (cursor_left, 0.0)
 
     edge_x: list[float | None] = []
     edge_y: list[float | None] = []
-    for nid, kids in children_of.items():
-        if nid not in pos:
+    for eid in by_id:
+        if eid not in pos:
             continue
-        x0, y0 = pos[nid]
+        x0, y0 = pos[eid]
+        kids = all_children(eid)
         for cid in kids:
             if cid not in pos:
                 continue
@@ -571,7 +595,7 @@ def _build_graph_figure(
         showlegend=False,
     )
 
-    ordered = [by_id[nid] for nid in pos]
+    ordered = [by_id[eid] for eid in pos]
     node_x = [pos[n.id][0] for n in ordered]
     node_y = [pos[n.id][1] for n in ordered]
     agent_counts: dict[str, int] = {}
@@ -580,39 +604,16 @@ def _build_graph_figure(
     agent_first_id: dict[str, str] = {}
     for node in ordered:
         agent_first_id.setdefault(node.agent_id, node.id)
-    labels = [
-        _node_display_label(
-            n,
-            repeated_agent=agent_counts.get(n.agent_id, 0) > 1,
-            is_agent_entry=agent_first_id.get(n.agent_id) == n.id,
-        )
-        for n in ordered
-    ]
-    colors = [_GRAPH_NODE_COLORS.get(n.type, "#8b949e") for n in ordered]
-    symbols = [_GRAPH_NODE_SYMBOLS.get(n.type, "circle") for n in ordered]
+    is_agent_entry = [agent_first_id.get(n.agent_id) == n.id for n in ordered]
+    colors = [_NODE_COLORS.get(_display_kind(n), "#8b949e") for n in ordered]
+    symbols = [_NODE_SYMBOLS.get(_display_kind(n), "circle") for n in ordered]
     sizes = [14 for _ in ordered]
-    hover = [_node_hover_text(n) for n in ordered]
-
-    def text_position(node: Node) -> str:
-        parent = parent_of.get(node.id)
-        siblings = children_of.get(parent, []) if parent is not None else []
-        if len(siblings) > 1 and node.id in siblings and not children_of.get(node.id):
-            midpoint = (len(siblings) - 1) / 2
-            idx = siblings.index(node.id)
-            return "bottom left" if idx < midpoint else "bottom right"
-        return "top center" if (node.depth or 0) % 2 else "bottom center"
+    hover = [_state_hover_text(n, graph.agents[n.agent_id]) for n in ordered]
 
     node_trace = go.Scatter(
         x=node_x,
         y=node_y,
-        mode="markers+text",
-        text=labels,
-        textposition=[text_position(n) for n in ordered],
-        textfont={
-            "color": "#c9d1d9",
-            "family": "ui-monospace, SFMono-Regular, Menlo, monospace",
-            "size": 10,
-        },
+        mode="markers",
         hovertext=hover,
         hoverinfo="text",
         customdata=[n.id for n in ordered],
@@ -627,7 +628,37 @@ def _build_graph_figure(
     )
 
     fig = go.Figure(data=[edge_trace, node_trace])
-    for ntype, color in _GRAPH_NODE_COLORS.items():
+
+    # Agent-name headers are emitted as Plotly annotations rather than
+    # part of the marker text so we can offset them by a fixed pixel
+    # amount (``yshift``) regardless of zoom or data range. The label
+    # always floats a stable pixel distance above each agent's first
+    # marker — never overlapping the marker, never colliding with the
+    # parent's terminal / supervising marker that may sit directly
+    # above it. State kinds are conveyed by the legend (color +
+    # symbol), so no per-state text is rendered.
+    for node, entry in zip(ordered, is_agent_entry):
+        if not entry:
+            continue
+        x, y = pos[node.id]
+        fig.add_annotation(
+            x=x,
+            y=y,
+            text=_agent_display_label(graph.agents[node.agent_id]),
+            showarrow=False,
+            xanchor="center",
+            yanchor="bottom",
+            yshift=_AGENT_LABEL_YSHIFT,
+            font={
+                "color": _AGENT_LABEL_COLOR,
+                "family": "ui-monospace, SFMono-Regular, Menlo, monospace",
+                "size": 11,
+            },
+        )
+    visible_kinds = {_display_kind(n) for n in ordered}
+    for ntype, color in _NODE_COLORS.items():
+        if ntype not in visible_kinds:
+            continue
         fig.add_trace(
             go.Scatter(
                 x=[None],
@@ -635,7 +666,7 @@ def _build_graph_figure(
                 mode="markers",
                 marker={
                     "color": color,
-                    "symbol": _GRAPH_NODE_SYMBOLS.get(ntype, "circle"),
+                    "symbol": _NODE_SYMBOLS.get(ntype, "circle"),
                     "size": 11,
                     "line": {"color": "#0d1117", "width": 1},
                 },
@@ -660,7 +691,7 @@ def _build_graph_figure(
         y_range = [-1.0, 1.0]
     fig.update_layout(
         title={
-            "text": f"<b>{title}</b> · {len(ordered)} nodes · {n_edges} edges",
+            "text": f"<b>{title}</b> · {len(ordered)} states · {n_edges} edges",
             "font": {"color": "#e6edf3", "size": 12},
             "x": 0.0,
             "xanchor": "left",
@@ -700,20 +731,7 @@ def _scale_figure_elements(
     marker_mult: float,
     text_mult: float | None = None,
 ) -> None:
-    """Multiply pixel-sized elements on a Plotly figure.
-
-    ``marker_mult`` scales markers, marker outlines, and edge widths.
-    ``text_mult`` scales label / title / legend / global font sizes; if
-    ``None`` it defaults to ``marker_mult`` (uniform scaling — the
-    common case).
-
-    ``_build_graph_figure`` lays the plot out for ~420 px display. When
-    rendering to a much larger canvas (image or full-page HTML) those
-    fixed pixel sizes shrink to specks; run this on the returned figure
-    to restore visual weight at the larger canvas. Pass
-    ``text_mult < marker_mult`` (e.g. 2.2 vs 3.5) when labels would
-    otherwise collide on dense trees.
-    """
+    """Multiply marker / edge / font pixel sizes in-place."""
     if text_mult is None:
         text_mult = marker_mult
     if marker_mult == 1.0 and text_mult == 1.0:
@@ -746,18 +764,16 @@ def _scale_figure_elements(
         layout.legend.font.size = layout.legend.font.size * text_mult
     if layout.font and layout.font.size:
         layout.font.size = layout.font.size * text_mult
+    # Agent-name labels live in annotations now, so ``text_mult`` has
+    # to scale those too.
+    for ann in getattr(layout, "annotations", ()) or ():
+        font = getattr(ann, "font", None)
+        if font is not None and getattr(font, "size", None) is not None:
+            font.size = font.size * text_mult
 
 
 def _normalize_label_positions(fig: Any) -> None:
-    """Force every node label to ``bottom center``.
-
-    ``_build_graph_figure`` alternates ``top center`` / ``bottom
-    center`` by depth, which puts adjacent depths' labels in the *same*
-    inter-row gap and causes collisions on dense trees (e.g. a parent's
-    ``supervising`` label vs. its child's label, or a sibling's label).
-    Forcing every row's labels into the gap below that row only lets
-    adjacent depths use independent vertical bands.
-    """
+    """Force every node label to ``bottom center``."""
     if fig is None:
         return
     for trace in getattr(fig, "data", ()):
@@ -775,140 +791,71 @@ def _normalize_label_positions(fig: Any) -> None:
             )
 
 
-def node_plot(
-    node: Node,
+# ── plot public API ──────────────────────────────────────────────────
+
+
+def graph_plot(
+    source: ViewSource,
     kind: str = "graph",
     *,
-    states: list[Node] | None = None,
-    events: list[Node] | None = None,
-    step: int | None = None,
-    mode: GraphMode = "snapshot",
     height: int = 420,
     title: str | None = None,
-    session: Session | str | Path | None = None,
     include_results: bool = True,
     element_mult: float = 1.0,
     marker_mult: float | None = None,
     text_mult: float | None = None,
     normalize_labels: bool = False,
 ):
-    """Render ``node`` in one of several formats.
+    """Render a workspace, path, graph, or graph list in one of several formats.
 
-    ``kind`` may be:
-    - ``"graph"`` / ``"plotly"``: Plotly figure matching the Gradio viewer.
-    - ``"mermaid"`` / ``"state"``: Mermaid state diagram string.
-    - ``"flowchart"``: Mermaid flowchart string.
-    - ``"sequence"``: Mermaid sequence diagram string.
-    - ``"dot"`` / ``"d2"``: static graph language strings.
-    - ``"tree"``: plain text tree.
-    - ``"gantt"``: HTML swimlane. Pass ``states=[...]`` for a full run.
-
-    Scaling knobs (Plotly only — ignored for string kinds):
-
-    - ``element_mult`` scales markers / edges / fonts uniformly.
-      Default ``1.0`` keeps the on-screen layout.
-    - ``marker_mult`` overrides ``element_mult`` for markers + edges.
-    - ``text_mult`` overrides ``element_mult`` for fonts. Set lower
-      than ``marker_mult`` (e.g. ``3.5`` vs. ``2.2``) when labels
-      would otherwise collide on dense trees.
-    - ``normalize_labels=True`` forces every node label to
-      ``bottom center`` instead of the alternating top/bottom layout.
-      Useful for static exports of dense trees; the on-screen
-      alternation looks fine at small canvases.
+    ``kind`` may be ``"graph"`` / ``"plotly"`` (Plotly figure),
+    ``"mermaid"`` / ``"flowchart"`` / ``"sequence"`` / ``"dot"`` / ``"d2"``
+    (string formats), ``"tree"`` (plain text), or ``"gantt"`` (HTML).
     """
     fmt = kind.lower().replace("-", "_")
-    if fmt in {"mermaid", "state", "state_diagram"}:
-        from rlmflow.utils.export import to_mermaid
-
-        return to_mermaid(node, include_results=include_results)
-    if fmt in {"flow", "flowchart", "mermaid_flowchart"}:
-        from rlmflow.utils.export import (
-            to_mermaid_flowchart,
-            viz_graph_to_mermaid_flowchart,
-        )
-
-        if mode == "events":
-            graph = build_viz_graph(
-                states=states or [node],
-                events=events,
-                session=session,
-                step=step,
-                mode=mode,
-            )
-            return viz_graph_to_mermaid_flowchart(
-                graph, include_results=include_results
-            )
-        return to_mermaid_flowchart(node, include_results=include_results)
-    if fmt in {"sequence", "sequence_diagram"}:
-        from rlmflow.utils.export import to_mermaid_sequence
-
-        return to_mermaid_sequence(node)
-    if fmt == "dot":
-        from rlmflow.utils.export import to_dot, viz_graph_to_dot
-
-        if mode == "events":
-            graph = build_viz_graph(
-                states=states or [node],
-                events=events,
-                session=session,
-                step=step,
-                mode=mode,
-            )
-            return viz_graph_to_dot(graph, include_results=include_results)
-        return to_dot(node, include_results=include_results)
-    if fmt == "d2":
-        from rlmflow.utils.export import to_d2, viz_graph_to_d2
-
-        if mode == "events":
-            graph = build_viz_graph(
-                states=states or [node],
-                events=events,
-                session=session,
-                step=step,
-                mode=mode,
-            )
-            return viz_graph_to_d2(graph, include_results=include_results)
-        return to_d2(node, include_results=include_results)
-    if fmt in {"tree", "ascii"}:
-        return node.tree()
-    if fmt in {"node_tree", "nodes_tree", "event_tree"}:
-        graph = build_viz_graph(
-            states=states or [node],
-            events=events,
-            session=session,
-            step=step,
-            mode=mode,
-        )
-        return node_tree(graph)
     if fmt in {"gantt", "swimlane", "swimlanes"}:
         from rlmflow.utils.viz import gantt_html
 
-        return gantt_html(states or [node], title=title or "rlmflow gantt")
-    if fmt not in {"graph", "plotly", "viewer"}:
-        supported = (
-            "graph, mermaid, flowchart, sequence, dot, d2, tree, node_tree, gantt"
-        )
-        raise ValueError(f"Unknown plot kind {kind!r}. Supported: {supported}.")
+        return gantt_html(resolve_graphs(source), title=title or "rlmflow gantt")
 
-    graph = build_viz_graph(
-        states=states or [node],
-        events=events,
-        session=session,
-        step=step,
-        mode=mode,
-    )
-    visible_nodes = graph.payloads
-    id_to_agent = {item.id: item.agent_id for item in visible_nodes}
+    graph = _resolve_latest_graph(source)
+    if fmt in {"mermaid", "state", "state_diagram"}:
+        from rlmflow.utils.export import to_mermaid
+
+        return to_mermaid(graph, include_results=include_results)
+    if fmt in {"flow", "flowchart", "mermaid_flowchart"}:
+        from rlmflow.utils.export import to_mermaid_flowchart
+
+        return to_mermaid_flowchart(graph, include_results=include_results)
+    if fmt in {"sequence", "sequence_diagram"}:
+        from rlmflow.utils.export import to_mermaid_sequence
+
+        return to_mermaid_sequence(graph)
+    if fmt == "dot":
+        from rlmflow.utils.export import to_dot
+
+        return to_dot(graph, include_results=include_results)
+    if fmt == "d2":
+        from rlmflow.utils.export import to_d2
+
+        return to_d2(graph, include_results=include_results)
+    if fmt in {"tree", "ascii"}:
+        return graph.tree()
+    if fmt not in {"graph", "plotly", "viewer"}:
+        raise ValueError(
+            f"Unknown plot kind {kind!r}. Supported: "
+            "graph, mermaid, flowchart, sequence, dot, d2, tree, gantt."
+        )
+
     fig = _build_graph_figure(
-        visible_nodes,
+        graph,
         height=height,
-        title=title or f"{node.agent_id} · {node.type}",
-        id_to_agent=id_to_agent,
-        edges=graph.edges,
+        title=title
+        or f"{graph.root_agent_id} · {graph.current().type if graph.current() else 'empty'}",
     )
     if fig is None:
         raise ImportError(
-            "Node.plot() requires the viewer extra: `pip install rlmflow[viewer]`."
+            "Graph.plot() requires the viewer extra: `pip install rlmflow[viewer]`."
         )
     if normalize_labels:
         _normalize_label_positions(fig)
@@ -918,17 +865,12 @@ def node_plot(
     return fig
 
 
-def node_plot_html(
-    node: Node,
+def graph_plot_html(
+    source: ViewSource,
     kind: str = "graph",
     *,
-    states: list[Node] | None = None,
-    events: list[Node] | None = None,
-    step: int | None = None,
-    mode: GraphMode = "snapshot",
     height: int = 420,
     title: str | None = None,
-    session: Session | str | Path | None = None,
     include_results: bool = True,
     include_plotlyjs: str | bool = "cdn",
     element_mult: float = 1.0,
@@ -936,23 +878,11 @@ def node_plot_html(
     text_mult: float | None = None,
     normalize_labels: bool = False,
 ) -> str:
-    """Return an HTML fragment for ``node.plot(kind)``.
-
-    The ``element_mult`` / ``marker_mult`` / ``text_mult`` /
-    ``normalize_labels`` knobs match :func:`node_plot` and let the HTML
-    stepper (:func:`render_html`) and any ad-hoc embeds produce the same
-    polished layout the image exporters use.
-    """
-    rendered = node_plot(
-        node,
+    rendered = graph_plot(
+        source,
         kind,
-        states=states,
-        events=events,
-        step=step,
-        mode=mode,
         height=height,
         title=title,
-        session=session,
         include_results=include_results,
         element_mult=element_mult,
         marker_mult=marker_mult,
@@ -963,26 +893,23 @@ def node_plot_html(
         return rendered.to_html(include_plotlyjs=include_plotlyjs, full_html=False)
     if kind.lower().replace("-", "_") in {"gantt", "swimlane", "swimlanes"}:
         return str(rendered)
-    from html import escape
-
     return (
         '<pre style="background:#0d1117;color:#c9d1d9;padding:12px;'
         'border-radius:6px;overflow:auto;">'
-        f"{escape(str(rendered))}</pre>"
+        f"{_esc_html(str(rendered))}</pre>"
     )
+
+
+# ── exports ──────────────────────────────────────────────────────────
 
 
 _DEFAULT_EXPORT_MARGIN = {"l": 24, "r": 24, "t": 80, "b": 120}
 
 
 def save_image(
-    node: Node,
+    source: ViewSource,
     path: str | Path,
     *,
-    states: list[Node] | None = None,
-    events: list[Node] | None = None,
-    step: int | None = None,
-    mode: GraphMode = "snapshot",
     width: int = 1800,
     height: int = 1350,
     scale: float = 2.0,
@@ -992,36 +919,16 @@ def save_image(
     normalize_labels: bool = True,
     margin: dict | None = None,
     title: str | None = None,
-    session: Session | str | Path | None = None,
 ) -> Path:
-    """Render ``node.plot()`` to an image file (PNG/SVG/PDF/etc.).
-
-    Format is inferred from ``path``'s suffix. Markers, edges, and
-    fonts are scaled so the tree stays visually balanced on the larger
-    export canvas (the on-screen plot is laid out for ~420 px height,
-    so ``element_mult=3.0`` matches a 1350 px export).
-
-    Pass ``marker_mult`` and/or ``text_mult`` separately when labels
-    collide on dense trees — bump ``marker_mult`` higher than
-    ``text_mult`` (e.g. ``3.5`` vs. ``2.2``). ``normalize_labels=True``
-    forces every label to ``bottom center`` so adjacent depths' labels
-    can't share the same vertical band.
-
-    Requires ``kaleido`` for image export — install with
-    ``pip install kaleido``.
-    """
+    """Render ``source`` to a PNG/SVG/PDF file. Requires ``kaleido``."""
+    graph = _resolve_latest_graph(source)
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig = node_plot(
-        node,
+    fig = graph_plot(
+        graph,
         "graph",
-        states=states,
-        events=events,
-        step=step,
-        mode=mode,
         height=height,
         title=title,
-        session=session,
         element_mult=element_mult,
         marker_mult=marker_mult,
         text_mult=text_mult,
@@ -1031,20 +938,17 @@ def save_image(
     try:
         fig.write_image(out, width=width, height=height, scale=scale)
     except (ImportError, ValueError) as exc:
-        # Plotly raises ValueError("Image export requires the kaleido package.")
         raise ImportError(
-            "save_image() requires the `kaleido` package: " "`pip install kaleido`."
+            "save_image() requires the `kaleido` package: `pip install kaleido`."
         ) from exc
     return out
 
 
 def save_steps(
-    states: list[Node],
+    source: ViewSource,
     out_dir: str | Path,
     *,
     fmt: str = "png",
-    events: list[Node] | None = None,
-    mode: GraphMode = "snapshot",
     width: int = 1800,
     height: int = 1350,
     scale: float = 2.0,
@@ -1054,33 +958,32 @@ def save_steps(
     normalize_labels: bool = True,
     margin: dict | None = None,
     title_template: str = "step {i} / {total}: {agent_id} [{type}]",
-    session: Session | str | Path | None = None,
 ) -> Path:
-    """Save one image per snapshot in ``states`` under ``out_dir``.
+    """Save one image per snapshot in ``source`` under ``out_dir``.
 
-    Files are written as ``step_{i:02d}.{fmt}``. Same scaling /
-    aspect / label knobs as :func:`save_image`. Returns the resolved
-    output directory.
+    Consecutive snapshots that produce an identical visible figure
+    (same set of non-bookkeeping nodes after the action-collapse rule)
+    are deduplicated — only the first is written. This keeps the
+    frame count tied to *visible* progress, not raw state-appends.
     """
+    graphs = resolve_graphs(source)
+    graphs = _dedupe_by_visible_signature(graphs)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    if not states:
+    if not graphs:
         return out
-    total = len(states) - 1
-    for i, state in enumerate(states):
+    total = len(graphs) - 1
+    for i, graph in enumerate(graphs):
+        current = graph.current()
         title = title_template.format(
             i=i,
             total=total,
-            agent_id=state.agent_id,
-            type=state.type,
+            agent_id=graph.root_agent_id,
+            type=current.type if current else "empty",
         )
         save_image(
-            state,
+            graph,
             out / f"step_{i:02d}.{fmt}",
-            states=states,
-            events=events,
-            step=i,
-            mode=mode,
             width=width,
             height=height,
             scale=scale,
@@ -1090,9 +993,11 @@ def save_steps(
             normalize_labels=normalize_labels,
             margin=margin,
             title=title,
-            session=session,
         )
     return out
+
+
+# ── HTML stepper ─────────────────────────────────────────────────────
 
 
 _HTML_STYLES = """
@@ -1107,6 +1012,8 @@ _HTML_STYLES = """
   --green: #3fb950;
   --purple: #bc8cff;
   --yellow: #d29922;
+  --orange: #ff9e64;
+  --red: #ff7b72;
 }
 body {
   background: var(--bg);
@@ -1162,10 +1069,16 @@ code { color: var(--blue); }
   display: inline-block;
   padding: 0.1rem 0.45rem;
 }
-.kind-result { color: var(--green); border-color: var(--green); }
-.kind-supervising { color: var(--purple); border-color: var(--purple); }
-.kind-action { color: var(--yellow); border-color: var(--yellow); }
-.kind-query, .kind-observation { color: var(--blue); border-color: var(--blue); }
+.kind-done { color: var(--green); border-color: var(--green); }
+.kind-supervising { color: var(--yellow); border-color: var(--yellow); }
+.kind-llm { color: var(--purple); border-color: var(--purple); }
+.kind-llm_call { color: var(--purple); border-color: var(--purple); opacity: 0.7; }
+.kind-resume { color: var(--blue); border-color: var(--blue); }
+.kind-resume_call { color: var(--green); border-color: var(--green); opacity: 0.7; }
+.kind-errored { color: var(--red); border-color: var(--red); }
+.kind-query { color: var(--blue); border-color: var(--blue); }
+.kind-exec { color: var(--orange); border-color: var(--orange); }
+.kind-exec_call { color: var(--orange); border-color: var(--orange); opacity: 0.7; }
 .nav {
   align-items: center;
   display: flex;
@@ -1215,108 +1128,79 @@ document.addEventListener("keydown", (event) => {
 """.strip()
 
 
-def _node_table_html(state: Node) -> str:
-    from html import escape
-
-    rows = []
-    for node in state.walk():
-        result = getattr(node, "result", "") or ""
-        waiting = ", ".join(getattr(node, "waiting_on", []) or [])
-        detail = result or waiting or getattr(node, "query", "") or ""
+def _state_table_html(graph: Graph) -> str:
+    rows: list[str] = []
+    for node in graph.nodes:
+        detail = (
+            getattr(node, "result", "")
+            or ", ".join(getattr(node, "waiting_on", []) or [])
+            or graph.agents[node.agent_id].query
+            or getattr(node, "content", "")
+            or ""
+        )
         rows.append(
             "<tr>"
-            f"<td><code>{escape(node.agent_id)}</code></td>"
-            f"<td><span class='pill kind-{escape(node.type)}'>{escape(node.type)}</span></td>"
-            f"<td>{escape(str(detail)[:120])}</td>"
+            f"<td><code>{_esc_html(node.agent_id)}</code></td>"
+            f"<td><span class='pill kind-{_esc_html(_display_kind(node))}'>"
+            f"{_esc_html(_display_kind(node))}</span></td>"
+            f"<td>{_esc_html(str(detail)[:120])}</td>"
             "</tr>"
         )
     return "\n".join(rows)
 
 
 def render_html(
-    states: list[Node],
+    source: ViewSource,
     *,
-    title: str = "rlmflow trace",
-    events: list[Node] | None = None,
-    mode: GraphMode | None = None,
+    title: str = "rlmflow run",
     height: int = 720,
     include_plotlyjs: str | bool = "cdn",
-    session: Session | str | Path | None = None,
     element_mult: float = 2.0,
     marker_mult: float | None = None,
     text_mult: float | None = None,
     normalize_labels: bool = True,
 ) -> str:
-    """Render ``states`` as a single self-contained HTML stepper.
-
-    Each slide pairs the Plotly graph for one snapshot with that
-    snapshot's transcript and a node table. Navigation lives at the
-    bottom (arrows + dots, plus keyboard left/right). The output is
-    standalone — drop it in a PR comment, attach it to a CI artifact,
-    or commit it next to the code that produced the trace.
-
-    Pass ``events=[...]`` and ``mode="events"`` to get the per-event
-    progressive view (matches the Gradio viewer); ``mode="snapshot"``
-    just shows each saved state. Default picks ``"events"`` when events
-    are supplied, otherwise ``"snapshot"``.
-
-    The figure styling matches :func:`save_image`: ``normalize_labels``
-    defaults to ``True`` so adjacent depths' labels can't share the same
-    vertical band, and ``marker_mult`` / ``text_mult`` (or the uniform
-    ``element_mult``) let you fatten markers / shrink labels for dense
-    trees the same way you would when exporting PNGs.
-
-    Defaults are tuned so the live stepper matches the proportions of
-    a ``save_image`` PNG slide: ``height=720`` gives the tree breathing
-    room, and ``element_mult=2.0`` lifts the native 14 px markers to
-    28 px so each node stays clearly readable without encoding token
-    count in marker size.
-    """
-    from html import escape
-
-    if not states:
-        raise ValueError("render_html() needs at least one state")
-    resolved_mode: GraphMode = mode or ("events" if events else "snapshot")
+    """Render ``source`` as a single self-contained HTML stepper."""
+    graphs = _dedupe_by_visible_signature(resolve_graphs(source))
+    if not graphs:
+        raise ValueError("render_html() needs at least one graph")
 
     slides: list[str] = []
     dots: list[str] = []
-    total = len(states)
-    for idx, state in enumerate(states, start=1):
+    total = len(graphs)
+    for idx, graph in enumerate(graphs, start=1):
         active = " active" if idx == 1 else ""
-        # Only embed plotly.js once (first slide) to keep file size sane.
         plotly_inc = include_plotlyjs if idx == 1 else False
-        graph_html = node_plot_html(
-            state,
+        graph_html = graph_plot_html(
+            graph,
             "graph",
-            states=states,
-            events=events,
-            step=idx - 1,
-            mode=resolved_mode,
             height=height,
             title=f"step {idx} / {total}",
-            session=session,
             include_plotlyjs=plotly_inc,
             element_mult=element_mult,
             marker_mult=marker_mult,
             text_mult=text_mult,
             normalize_labels=normalize_labels,
         )
-        head_title = f"{state.agent_id} \u00b7 {state.type}"
+        current = graph.current()
+        head_title = (
+            f"{graph.root_agent_id} \u00b7 {current.type if current else 'empty'}"
+        )
         slide_body = (
             f'<section class="slide{active}" data-step="{idx}">'
             '<div class="slide-head">'
             f'<span class="step">Step {idx} / {total}</span>'
-            f"<h2>{escape(head_title)}</h2>"
+            f"<h2>{_esc_html(head_title)}</h2>"
             "</div>"
             '<div class="viewer-grid">'
             f'<div class="graph-card">{graph_html}</div>'
             '<aside class="detail-card">'
-            f"<h3>Transcript: <code>{escape(state.agent_id)}</code></h3>"
-            f"<pre>{escape(state.transcript(include_system=False))}</pre>"
-            "<h3>Visible Nodes</h3>"
+            f"<h3>Transcript: <code>{_esc_html(graph.root_agent_id)}</code></h3>"
+            f"<pre>{_esc_html(graph.transcript(include_system=False))}</pre>"
+            "<h3>States</h3>"
             "<table>"
             "<thead><tr><th>Agent</th><th>Type</th><th>Detail</th></tr></thead>"
-            f"<tbody>{_node_table_html(state)}</tbody>"
+            f"<tbody>{_state_table_html(graph)}</tbody>"
             "</table>"
             "</aside>"
             "</div>"
@@ -1334,12 +1218,12 @@ def render_html(
         "<head>\n"
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        f"<title>{escape(title)}</title>\n"
+        f"<title>{_esc_html(title)}</title>\n"
         f"<style>{_HTML_STYLES}</style>\n"
         "</head>\n"
         "<body>\n"
         "<main>\n"
-        f"<h1>{escape(title)}</h1>\n" + "".join(slides) + '\n<div class="nav">\n'
+        f"<h1>{_esc_html(title)}</h1>\n" + "".join(slides) + '\n<div class="nav">\n'
         '<button class="arrow" id="prev" aria-label="Previous step">&larr;</button>\n'
         + "".join(dots)
         + '\n<button class="arrow" id="next" aria-label="Next step">&rarr;</button>\n'
@@ -1352,25 +1236,23 @@ def render_html(
 
 
 def save_html(
-    states: list[Node],
+    source: ViewSource,
     path: str | Path,
     **kwargs: Any,
 ) -> Path:
     """Write :func:`render_html` output to ``path``."""
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_html(states, **kwargs), encoding="utf-8")
+    out.write_text(render_html(source, **kwargs), encoding="utf-8")
     return out
 
 
 def save_gif(
-    states: list[Node],
+    source: ViewSource,
     path: str | Path,
     *,
     duration: int = 600,
     loop: int = 0,
-    events: list[Node] | None = None,
-    mode: GraphMode = "snapshot",
     width: int = 1200,
     height: int = 900,
     scale: float = 1.0,
@@ -1380,22 +1262,13 @@ def save_gif(
     normalize_labels: bool = True,
     margin: dict | None = None,
     title_template: str = "step {i} / {total}: {agent_id} [{type}]",
-    session: Session | str | Path | None = None,
 ) -> Path:
-    """Stitch every snapshot in ``states`` into an animated GIF.
-
-    Renders each state to an in-memory PNG with kaleido, then assembles
-    them with ``Pillow`` (``PIL.Image``). ``duration`` is the per-frame
-    delay in milliseconds (default 600 = ~1.6 fps). ``loop=0`` loops
-    forever; pass a positive int to limit it.
-
-    Requires both ``kaleido`` (for PNG export) and ``Pillow`` (for GIF
-    assembly): ``pip install rlmflow[image] pillow``.
-    """
+    """Stitch every graph snapshot into an animated GIF."""
+    graphs = _dedupe_by_visible_signature(resolve_graphs(source))
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    if not states:
-        raise ValueError("save_gif() needs at least one state")
+    if not graphs:
+        raise ValueError("save_gif() needs at least one graph")
 
     try:
         from PIL import Image
@@ -1405,24 +1278,20 @@ def save_gif(
     import io
 
     frames: list[Image.Image] = []
-    total = len(states) - 1
-    for i, state in enumerate(states):
+    total = len(graphs) - 1
+    for i, graph in enumerate(graphs):
+        current = graph.current()
         title = title_template.format(
             i=i,
             total=total,
-            agent_id=state.agent_id,
-            type=state.type,
+            agent_id=graph.root_agent_id,
+            type=current.type if current else "empty",
         )
-        fig = node_plot(
-            state,
+        fig = graph_plot(
+            graph,
             "graph",
-            states=states,
-            events=events,
-            step=i,
-            mode=mode,
             height=height,
             title=title,
-            session=session,
             element_mult=element_mult,
             marker_mult=marker_mult,
             text_mult=text_mult,
@@ -1461,65 +1330,35 @@ def save_gif(
     return out
 
 
-def open_viewer(
-    states: list[Node] | list[dict] | None = None,
-    *,
-    session: Session | str | Path | None = None,
-    mode: GraphMode | None = None,
-    **launch_kwargs: Any,
-):
+# ── Gradio viewer ────────────────────────────────────────────────────
+
+
+def open_viewer(source: ViewSource, **launch_kwargs: Any):
+    """Open the Gradio stepper over a workspace, path, graph, or graph list."""
     import gradio as gr
 
-    norm_states: list[Node] | None = None
-    if states:
-        norm_states = [_as_node(s) for s in states]
+    graphs = _dedupe_by_visible_signature(resolve_graphs(source))
+    if not graphs:
+        raise ValueError("open_viewer needs at least one Graph")
 
-    sess = _resolve_session(norm_states, session)
-    nodes = _all_nodes(norm_states, sess)
-    events = session_events(sess)
-    if not nodes:
-        raise ValueError(
-            "open_viewer needs either `states` (a list of snapshots) "
-            "or `session=` (a Session / path to a session/ dir)."
-        )
-
-    resolved_mode: GraphMode = mode or ("events" if events else "snapshot")
-    if resolved_mode == "events" and not events:
-        raise ValueError("open_viewer(mode='events') requires a persisted session log.")
-    n_steps = len(norm_states) if norm_states else max(1, len(events))
-    step_graphs = [
-        build_viz_graph(
-            states=norm_states,
-            events=events,
-            session=sess,
-            step=i,
-            mode=resolved_mode,
-        )
-        for i in range(n_steps)
-    ]
-    nodes_by_id_global = {n.id: n for graph in step_graphs for n in graph.payloads}
+    n_steps = len(graphs)
 
     def _coerce_step(value: Any) -> int:
-        # Gradio's server-function bridge sometimes hands the JS arg list in
-        # as a single positional, so unwrap one-element list/tuple wrappers.
         while isinstance(value, (list, tuple)) and len(value) == 1:
             value = value[0]
         return max(0, min(int(value), n_steps - 1))
 
     def _fig_json_for_step(step: int) -> str:
         step = _coerce_step(step)
-        graph = step_graphs[step]
+        graph = graphs[step]
         fig = _build_graph_figure(
-            graph.payloads,
+            graph,
             height=420,
             title=f"step {step + 1} / {n_steps}",
-            id_to_agent={node.id: node.agent_id for node in graph.payloads},
-            edges=graph.edges,
         )
         return fig.to_json() if fig is not None else "{}"
 
     def get_step_fig(*args: Any) -> str:
-        # Accept ``(step,)`` or ``([step, ...],)`` – the JS bridge is loose.
         step_arg = args[0] if len(args) == 1 else args
         if isinstance(step_arg, (list, tuple)) and len(step_arg) >= 1:
             step_arg = step_arg[0]
@@ -1534,26 +1373,25 @@ def open_viewer(
             return "<i style='color:#8b949e'>(missing node id)</i>"
         step_arg, node_id = payload[0], payload[1]
         step = _coerce_step(step_arg)
-        graph = step_graphs[step]
-        nodes_by_id = graph.nodes_by_id
-        node = nodes_by_id.get(node_id)
+        graph = graphs[step]
+        node = graph.nodes.find(node_id)
         if node is None:
             return "<i style='color:#8b949e'>(node not visible at this step)</i>"
-        return _node_detail_html(node, graph.payloads)
+        return _state_detail_html(node, graph)
 
     initial_fig_json = _fig_json_for_step(n_steps - 1)
     initial_detail = (
         "<i style='color:#8b949e'>Click any node above to see its full payload.</i>"
     )
 
-    js_on_load = _GRAPH_JS_ON_LOAD
+    total_nodes = sum(len(g.nodes) for g in graphs)
 
     with gr.Blocks(title="RLMFlow Viewer", fill_height=True) as demo:
         gr.Markdown(
             f"### RLMFlow Viewer · {n_steps} steps · "
-            f"{len(nodes_by_id_global)} unique nodes · {resolved_mode} mode\n"
+            f"{total_nodes} nodes\n"
             "Drag the slider to scrub the graph through time. "
-            "Click any node to see its step-local code, output, and conversation."
+            "Click any node to see its step-local payload + conversation."
         )
 
         slider = gr.Slider(
@@ -1569,7 +1407,7 @@ def open_viewer(
             value="",
             html_template=_GRAPH_HTML_TEMPLATE,
             css_template=_GRAPH_CSS,
-            js_on_load=js_on_load,
+            js_on_load=_GRAPH_JS_ON_LOAD,
             server_functions=[get_step_fig, get_node_detail],
             initial_fig_json=initial_fig_json,
             initial_detail=initial_detail,
@@ -1577,8 +1415,6 @@ def open_viewer(
             min_height=720,
         )
 
-        # JS-only handler: relay slider changes to the HTML component
-        # via a window CustomEvent. No Python round-trip.
         slider.change(
             fn=None,
             inputs=slider,
@@ -1593,7 +1429,8 @@ def open_viewer(
     return demo.launch(**launch_kwargs)
 
 
-# ── HTML template, CSS, and JS for the interactive graph + detail card
+# ── viewer HTML/CSS/JS templates ─────────────────────────────────────
+
 
 _GRAPH_HTML_TEMPLATE = """
 <div class="rlmflow-shell" data-initial-step="${initial_step}">
@@ -1639,121 +1476,67 @@ _GRAPH_CSS = """
     background: #161b22; border: 1px solid #30363d; font-size: 10px;
     color: #8b949e; margin-right: 4px;
 }
-/* Pills + message accents share one palette — same hues used by the
-   plotly graph above so the message list color-matches the node it
-   came from. */
 .rlmflow-detail .pill.type-query       { color: #58a6ff; border-color: #58a6ff; }
-.rlmflow-detail .pill.type-action      { color: #bc8cff; border-color: #bc8cff; }
-.rlmflow-detail .pill.type-observation { color: #ff9e64; border-color: #ff9e64; }
+.rlmflow-detail .pill.type-llm         { color: #bc8cff; border-color: #bc8cff; }
+.rlmflow-detail .pill.type-exec        { color: #ff9e64; border-color: #ff9e64; }
 .rlmflow-detail .pill.type-supervising { color: #ffd33d; border-color: #ffd33d; }
 .rlmflow-detail .pill.type-resume      { color: #56d4dd; border-color: #56d4dd; }
-.rlmflow-detail .pill.type-result      { color: #56d364; border-color: #56d364; }
-.rlmflow-detail .pill.type-error       { color: #ff7b72; border-color: #ff7b72; }
-.rlmflow-detail .messages {
-    display: flex; flex-direction: column; gap: 8px;
+.rlmflow-detail .pill.type-done        { color: #56d364; border-color: #56d364; }
+.rlmflow-detail .pill.type-errored     { color: #ff7b72; border-color: #ff7b72; }
+.rlmflow-detail .payload-block {
+    margin: 8px 0; padding: 8px 10px;
+    background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
 }
-.rlmflow-detail .msg {
-    padding: 8px 10px 8px 12px; border-radius: 6px;
-    border: 1px solid #30363d;
-    border-left: 3px solid #30363d;
-    background: #0d1117; color: #e6edf3;
+.rlmflow-detail .payload-block pre {
+    margin-top: 6px; background: #161b22;
 }
-.rlmflow-detail .msg .role {
-    text-transform: uppercase; font-size: 9px; color: #8b949e;
-    letter-spacing: 0.06em; margin-bottom: 4px; display: block;
-    font-weight: 600;
+.rlmflow-detail .payload-label {
+    color: #8b949e; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    font-family: -apple-system, system-ui, sans-serif;
 }
-.rlmflow-detail .msg pre { background: rgba(255,255,255,0.03); }
-
-/* Color-code each bubble by source node type. Left border = the type's
-   accent hue, background = a heavily desaturated tint of the same. */
-.rlmflow-detail .msg.kind-query {
-    border-left-color: #58a6ff; background: #0e1822;
+.rlmflow-detail .state-blocks {
+    display: flex; flex-direction: column; gap: 10px;
 }
-.rlmflow-detail .msg.kind-query .role { color: #58a6ff; }
-
-.rlmflow-detail .msg.kind-action {
-    border-left-color: #bc8cff; background: #18142a;
+.rlmflow-detail .state-block {
+    border: 1px solid #30363d; border-left: 3px solid #30363d;
+    border-radius: 6px;
+    background: #0d1117; padding: 10px 12px;
 }
-.rlmflow-detail .msg.kind-action .role { color: #bc8cff; }
-
-.rlmflow-detail .msg.kind-observation {
-    border-left-color: #ff9e64; background: #241710;
+.rlmflow-detail .state-block-query       { border-left-color: #58a6ff; background: #58a6ff0a; }
+.rlmflow-detail .state-block-llm         { border-left-color: #bc8cff; background: #bc8cff0a; }
+.rlmflow-detail .state-block-llm_call    { border-left-color: #a98a2a; background: #a98a2a0a; }
+.rlmflow-detail .state-block-exec        { border-left-color: #ff9e64; background: #ff9e640a; }
+.rlmflow-detail .state-block-exec_call   { border-left-color: #b87650; background: #b876500a; }
+.rlmflow-detail .state-block-supervising { border-left-color: #ffd33d; background: #ffd33d0a; }
+.rlmflow-detail .state-block-resume      { border-left-color: #56d4dd; background: #56d4dd0a; }
+.rlmflow-detail .state-block-resume_call { border-left-color: #3a8a5d; background: #3a8a5d0a; }
+.rlmflow-detail .state-block-done        { border-left-color: #56d364; background: #56d3640a; }
+.rlmflow-detail .state-block-errored     { border-left-color: #ff7b72; background: #ff7b720a; }
+.rlmflow-detail .state-block-selected {
+    box-shadow: 0 0 0 1px currentColor;
+    border-top-color: currentColor;
+    border-right-color: currentColor;
+    border-bottom-color: currentColor;
 }
-.rlmflow-detail .msg.kind-observation .role { color: #ff9e64; }
-
-.rlmflow-detail .msg.kind-supervising {
-    border-left-color: #ffd33d; background: #221d08;
+.rlmflow-detail .state-block-query.state-block-selected       { color: #58a6ff; }
+.rlmflow-detail .state-block-llm.state-block-selected         { color: #bc8cff; }
+.rlmflow-detail .state-block-llm_call.state-block-selected    { color: #a98a2a; }
+.rlmflow-detail .state-block-exec.state-block-selected        { color: #ff9e64; }
+.rlmflow-detail .state-block-exec_call.state-block-selected   { color: #b87650; }
+.rlmflow-detail .state-block-supervising.state-block-selected { color: #ffd33d; }
+.rlmflow-detail .state-block-resume.state-block-selected      { color: #56d4dd; }
+.rlmflow-detail .state-block-resume_call.state-block-selected { color: #3a8a5d; }
+.rlmflow-detail .state-block-done.state-block-selected        { color: #56d364; }
+.rlmflow-detail .state-block-errored.state-block-selected     { color: #ff7b72; }
+.rlmflow-detail .state-block-head {
+    display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px;
 }
-.rlmflow-detail .msg.kind-supervising .role { color: #ffd33d; }
-
-.rlmflow-detail .msg.kind-resume {
-    border-left-color: #56d4dd; background: #0d2226;
+.rlmflow-detail .state-block .payload-block {
+    margin: 6px 0 0; background: #161b22;
 }
-.rlmflow-detail .msg.kind-resume .role { color: #56d4dd; }
-
-.rlmflow-detail .msg.kind-result {
-    border-left-color: #56d364; background: #0d2114;
-}
-.rlmflow-detail .msg.kind-result .role { color: #56d364; }
-
-.rlmflow-detail .msg.kind-error {
-    border-left-color: #ff7b72; background: #2a1010;
-}
-.rlmflow-detail .msg.kind-error .role { color: #ff7b72; }
-
-.rlmflow-detail .msg.kind-system {
-    border-left-color: #6e7681; background: #0d1117;
-    color: #8b949e;
-}
-.rlmflow-detail .msg.kind-system .role { color: #8b949e; }
-.rlmflow-detail details.agent-block {
-    border: 1px solid #30363d; border-radius: 6px;
-    background: #0a0d12; margin: 8px 0; padding: 0;
-}
-.rlmflow-detail details.agent-block > summary {
-    cursor: pointer; padding: 8px 12px; user-select: none;
-    list-style: none; font-size: 12px; color: #e6edf3;
-    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-}
-.rlmflow-detail details.agent-block > summary::-webkit-details-marker { display: none; }
-.rlmflow-detail details.agent-block > summary::before {
-    content: "▸"; color: #8b949e; font-size: 10px; transition: transform 0.1s;
-    display: inline-block; width: 10px;
-}
-.rlmflow-detail details.agent-block[open] > summary::before {
-    transform: rotate(90deg);
-}
-.rlmflow-detail details.agent-block > .agent-body {
-    padding: 8px 12px 12px 24px;
-    border-top: 1px solid #30363d;
-}
-.rlmflow-detail .child-agents { margin-bottom: 12px; }
-.rlmflow-detail h6.msg-header {
-    margin: 12px 0 6px 0; color: #8b949e; font-size: 10px;
-    text-transform: uppercase; letter-spacing: 0.05em;
-    font-family: -apple-system, system-ui, sans-serif; font-weight: 600;
-}
-.rlmflow-detail details.agent-block > summary:hover { background: #161b22; }
-
-.rlmflow-detail details.payload-block {
-    border: 1px solid #30363d; border-radius: 6px;
-    background: #0a0d12; margin: 6px 0; padding: 0;
-}
-.rlmflow-detail details.payload-block > summary {
-    cursor: pointer; padding: 6px 12px; user-select: none;
-    list-style: none; font-size: 11px; color: #e6edf3;
-}
-.rlmflow-detail details.payload-block > summary::-webkit-details-marker { display: none; }
-.rlmflow-detail details.payload-block > summary::before {
-    content: "▸"; color: #8b949e; font-size: 10px; margin-right: 6px;
-    display: inline-block; transition: transform 0.1s;
-}
-.rlmflow-detail details.payload-block[open] > summary::before {
-    transform: rotate(90deg);
-}
-.rlmflow-detail details.payload-block > pre {
-    margin: 0 12px 12px 12px;
+.rlmflow-detail .payload-empty {
+    color: #6e7681; font-style: italic; font-size: 11px;
 }
 """.strip()
 
@@ -1798,6 +1581,8 @@ _GRAPH_JS_ON_LOAD = r"""
                 detail.innerHTML = '<i style="color:#8b949e">loading…</i>';
                 try {
                     detail.innerHTML = await server.get_node_detail(currentStep, nid);
+                    const sel = detail.querySelector('.state-block-selected');
+                    if (sel) sel.scrollIntoView({block: 'nearest'});
                 } catch (err) {
                     detail.innerHTML =
                         '<span style="color:#f85149">error: ' + err.message + '</span>';
@@ -1825,267 +1610,118 @@ _GRAPH_JS_ON_LOAD = r"""
 """.strip()
 
 
-def _esc(s: str) -> str:
+# ── state detail HTML (clicked-node panel) ───────────────────────────
+
+
+# Per-node-type ordered field list. Each tuple is (attr, heading).
+# Empty values are skipped at render time.
+_DETAIL_FIELDS: dict[str, list[tuple[str, str]]] = {
+    "user_query": [("content", "query")],
+    "llm_action": [("model", "model")],
+    "llm_output": [("reply", "reply"), ("code", "code")],
+    "exec_action": [("code", "code")],
+    "exec_output": [("output", "output"), ("content", "rendered")],
+    "supervising_output": [("waiting_on", "waiting on"), ("output", "output")],
+    "error_output": [
+        ("error", "error kind"),
+        ("content", "retry message"),
+        ("output", "raw output"),
+    ],
+    "done_output": [("result", "result"), ("output", "output")],
+    "resume_action": [
+        ("resumed_from", "resumed from"),
+        ("code", "code"),
+    ],
+}
+
+
+def _render_state_block(state: Node, *, selected: bool) -> str:
+    """Render a single state as a labeled block of its typed fields."""
+    fields = _DETAIL_FIELDS.get(state.type, [])
+    body_parts: list[str] = []
+    for attr, heading in fields:
+        val = getattr(state, attr, None)
+        if val is None or val == "" or val == []:
+            continue
+        if isinstance(val, list):
+            text = "\n".join(str(x) for x in val)
+        else:
+            text = str(val)
+        if not text.strip():
+            continue
+        body_parts.append(
+            f"<div class='payload-block'>"
+            f"<div class='payload-label'>{_esc_html(heading)}</div>"
+            f"<pre>{_esc_html(text)}</pre>"
+            f"</div>"
+        )
+    if not body_parts:
+        body_parts.append("<div class='payload-block payload-empty'>(no payload)</div>")
+
+    kind = _display_kind(state)
+    pills = (
+        f"<span class='pill kind-{_esc_html(kind)}'>{_esc_html(kind)}</span>"
+        f"<span class='pill'>seq {state.seq}</span>"
+        f"<span class='pill'>{_esc_html(state.type)}</span>"
+    )
+    sel_class = " state-block-selected" if selected else ""
+    kind_class = f" state-block-{_esc_html(kind)}"
     return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
+        f"<section class='state-block{kind_class}{sel_class}' "
+        f"id='state-block-{_esc_html(state.id)}'>"
+        f"<header class='state-block-head'>{pills}</header>"
+        f"{''.join(body_parts)}"
+        f"</section>"
     )
 
 
-def _node_detail_html(node: Node, all_nodes: list[Node]) -> str:
-    """Render the full payload of a single node + its agent's conversation as HTML."""
+def _state_detail_html(state: Node, graph: Graph) -> str:
+    agent = graph.agents[state.agent_id]
     parts: list[str] = []
-
-    pill_type = f'<span class="pill type-{_esc(node.type)}">{_esc(node.type)}</span>'
-    tin = node.total_input_tokens or 0
-    tout = node.total_output_tokens or 0
+    kind = _display_kind(state)
+    pill = f'<span class="pill type-{_esc_html(kind)}">{_esc_html(kind)}</span>'
+    inp, out = agent.tokens()
     parts.append(
         f"""
 <div class="header">
   <div>
-    <h4>{_esc(node.agent_id or "root")} {pill_type}</h4>
+    <h4>{_esc_html(agent.agent_id or "root")} {pill}</h4>
     <div>
-      <span class="pill">id {_esc(node.id)}</span>
-      <span class="pill">model {_esc(node.model_label)}</span>
-      <span class="pill">depth {node.depth or 0}</span>
-      <span class="pill">{tin:,} in / {tout:,} out tokens</span>
-      {'<span class="pill" style="color:#7ee787;border-color:#7ee787">terminal</span>' if node.terminal else ''}
+      <span class="pill">type {_esc_html(state.type)}</span>
+      <span class="pill">id {_esc_html(state.id)}</span>
+      <span class="pill">model {_esc_html(agent.model_label)}</span>
+      <span class="pill">depth {agent.depth}</span>
+      <span class="pill">seq {state.seq}</span>
+      <span class="pill">agent tokens {inp + out:,}</span>
+      {'<span class="pill" style="color:#7ee787;border-color:#7ee787">terminal</span>' if state.terminal else ''}
     </div>
   </div>
 </div>
 """
     )
 
-    # Conversation tree first — start at the clicked node's agent and
-    # walk that agent's chain in time order, inlining every spawned
-    # sub-agent at the exact delegation point. Sub-agents render as
-    # collapsible blocks so the parent's flow stays readable.
-    nodes_by_id = {n.id: n for n in all_nodes}
-    seen_agents: set[str] = {node.agent_id}
-    parts.append("<h5>conversation tree</h5>")
-    parts.append(
-        _agent_block_html(node.agent_id, nodes_by_id, seen_agents, open_top=True)
-    )
+    if agent.query:
+        parts.append("<h5>agent query</h5>")
+        parts.append(f"<pre>{_esc_html(agent.query)}</pre>")
 
-    # Then the raw payload fields. Each gets its own collapsible <details>
-    # so a giant `code` or `output` field doesn't push everything else off
-    # screen.
-    fields: list[tuple[str, str]] = []
-    for label in ("query", "reply", "code", "output", "content", "result", "error"):
-        val = getattr(node, label, None)
-        if val:
-            fields.append((label, str(val)))
-    waiting_on = getattr(node, "waiting_on", None) or []
-    if waiting_on:
-        fields.append(("waiting_on", "\n".join(waiting_on)))
-
-    if fields:
-        parts.append("<h5>raw node payload</h5>")
-        for label, val in fields:
-            preview = val.strip().splitlines()[0][:80] if val.strip() else ""
-            preview_html = (
-                f" <span style='color:#8b949e'>{_esc(preview)}</span>"
-                if preview
-                else ""
-            )
-            # First field opens by default; the rest stay collapsed.
-            open_attr = " open" if label == fields[0][0] else ""
-            parts.append(
-                f"<details class='payload-block'{open_attr}>"
-                f"<summary><strong>{_esc(label)}</strong>{preview_html}</summary>"
-                f"<pre>{_esc(val)}</pre>"
-                "</details>"
-            )
+    parts.append(f"<h5>states ({len(agent.states)})</h5>" "<div class='state-blocks'>")
+    for s in agent.states:
+        parts.append(_render_state_block(s, selected=s.id == state.id))
+    parts.append("</div>")
 
     return "".join(parts)
 
 
-def _emit_msg(
-    out: list[str], role: str, html_body: str, *, kind: str | None = None
-) -> None:
-    """Append one message bubble. `kind` is the originating node type
-    (query / action / supervising / observation / resume / result / error)
-    so CSS can color-code by graph node type, matching the legend in the
-    graph above."""
-    cls = f"msg {_esc(role)}"
-    if kind:
-        cls += f" kind-{_esc(kind)}"
-    label = kind or role
-    out.append(
-        f'<div class="{cls}">'
-        f'<span class="role">{_esc(label)}</span>'
-        f"<div>{html_body}</div>"
-        "</div>"
-    )
-
-
-def _emit_chain_into(
-    agent_id: str,
-    chain: list[Node],
-    nodes_by_id: dict[str, Node],
-    seen_agents: set[str],
-    out: list[str],
-) -> None:
-    """Walk one agent's chain in time order, emitting messages and inlining
-    every spawned sub-agent's block at the node that spawned it."""
-    if not chain:
-        _emit_msg(
-            out,
-            "tool",
-            "<i style='color:#8b949e'>(no nodes recorded for this agent)</i>",
-            kind="system",
-        )
-        return
-
-    sysp = (getattr(chain[0], "system_prompt", "") or "").strip()
-    if sysp:
-        _emit_msg(
-            out,
-            "system",
-            "<details><summary>system prompt</summary><pre>"
-            + _esc(sysp)
-            + "</pre></details>",
-            kind="system",
-        )
-
-    pending_obs: list[tuple[str, str]] = []  # (kind, content)
-    prev_action: Node | None = None
-
-    out.append('<div class="messages">')
-
-    def flush_pending() -> None:
-        if not pending_obs:
-            return
-        # If everything was the same kind, color the bubble that kind;
-        # otherwise just call it "observation" (the common case).
-        kinds = {k for k, _ in pending_obs}
-        kind = next(iter(kinds)) if len(kinds) == 1 else "observation"
-        body = "".join(
-            f"<details><summary>note</summary><pre>{_esc(c[:4000])}</pre></details>"
-            for _, c in pending_obs
-        )
-        _emit_msg(out, "user", body, kind=kind)
-        pending_obs.clear()
-
-    def inject_spawned(node: Node) -> None:
-        spawned: list[str] = []
-        for cid in _node_children_ids(node):
-            child_node = nodes_by_id.get(cid)
-            if child_node is None:
-                continue
-            if child_node.agent_id == agent_id:
-                continue
-            if child_node.agent_id in seen_agents:
-                continue
-            seen_agents.add(child_node.agent_id)
-            spawned.append(child_node.agent_id)
-        if not spawned:
-            return
-        out.append("</div>")  # close current messages block
-        out.append("<div class='spawned-agents'>")
-        for sub_agent_id in spawned:
-            out.append(_agent_block_html(sub_agent_id, nodes_by_id, seen_agents))
-        out.append("</div>")
-        out.append('<div class="messages">')  # reopen messages
-
-    for node in chain:
-        if node.type == "query":
-            q = (getattr(node, "query", "") or "").strip()
-            if q:
-                _emit_msg(out, "user", _render_md_to_html(q), kind="query")
-        elif node.type in ("observation", "resume"):
-            content = (getattr(node, "content", "") or "").strip()
-            if content and not _looks_like_continue_ping(content):
-                pending_obs.append((node.type, content))
-        else:
-            flush_pending()
-            msg = _render_action_message(node, prev=prev_action)
-            if msg is not None:
-                _emit_msg(
-                    out,
-                    msg["role"],
-                    _render_md_to_html(msg["content"]),
-                    kind=node.type,
-                )
-            if node.type in ("action", "supervising"):
-                prev_action = node
-
-        inject_spawned(node)
-
-    flush_pending()
-    out.append("</div>")
-
-
-def _agent_block_html(
-    agent_id: str,
-    nodes_by_id: dict[str, Node],
-    seen_agents: set[str],
-    *,
-    open_top: bool = False,
-) -> str:
-    """Collapsible block for one agent. Nested sub-agents render inline at
-    the delegation point inside this agent's body, not bunched at the top
-    or bottom — natural conversational order."""
-    all_nodes = list(nodes_by_id.values())
-    chain = _agent_chain(agent_id, all_nodes)
-    in_tokens = sum((n.total_input_tokens or 0) for n in chain)
-    out_tokens = sum((n.total_output_tokens or 0) for n in chain)
-    marker, _kind = _agent_status(chain)
-    result_preview = _agent_result_preview(chain, limit=80)
-
-    summary_html = (
-        f"<span class='pill'>{_esc(marker)}</span>"
-        f"<strong>{_esc(agent_id or 'root')}</strong>"
-        f"<span class='pill'>{(in_tokens + out_tokens):,} tok</span>"
-        f"<span style='color:#8b949e;margin-left:8px;font-style:italic'>"
-        f"{_esc(result_preview)}</span>"
-    )
-
-    body_parts: list[str] = []
-    _emit_chain_into(agent_id, chain, nodes_by_id, seen_agents, body_parts)
-
-    open_attr = " open" if open_top else ""
-    return (
-        f"<details class='agent-block'{open_attr}>"
-        f"<summary>{summary_html}</summary>"
-        f"<div class='agent-body'>{''.join(body_parts)}</div>"
-        "</details>"
-    )
-
-
-def _render_md_to_html(text: str) -> str:
-    """Lightweight markdown-ish to HTML for the in-detail message view.
-
-    We don't want to pull in a full markdown library for the viewer, but
-    we DO want fenced code blocks and basic line breaks to read cleanly.
-    """
-    text = _esc(text)
-    out: list[str] = []
-    in_code = False
-    lang = ""
-    for line in text.split("\n"):
-        stripped = line.lstrip()
-        if stripped.startswith("```"):
-            if in_code:
-                out.append("</pre>")
-                in_code = False
-            else:
-                lang = stripped[3:].strip()
-                out.append(f'<pre data-lang="{_esc(lang) if lang else "txt"}">')
-                in_code = True
-            continue
-        if in_code:
-            out.append(line + "\n")
-        else:
-            if not line.strip():
-                out.append("<br>")
-            else:
-                out.append(line + "<br>")
-    if in_code:
-        out.append("</pre>")
-    return "".join(out)
-
-
-__all__ = ["node_plot", "node_plot_html", "node_transcript", "open_viewer"]
+__all__ = [
+    "agent_transcript",
+    "graph_plot",
+    "graph_plot_html",
+    "graph_session",
+    "open_viewer",
+    "render_html",
+    "resolve_graphs",
+    "save_gif",
+    "save_html",
+    "save_image",
+    "save_steps",
+]

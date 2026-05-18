@@ -1,9 +1,0 @@
-{
-  "agent_id": "root",
-  "latest_leaf_id": "n_58f0c88557bf",
-  "branch_id": "main",
-  "depth": 0,
-  "type": "result",
-  "terminal": true,
-  "result": "Boids simulation created and verified at output/boids-simulation. Summary: {\"files_ok\": true, \"sizes\": {\"html\": 462, \"boid\": 4277, \"sim\": 2694, \"main\": 1962}, \"speed\": 240.0, \"boid_count_hundreds\": true, \"node_available\": false, \"js_syntax_ok\": true, \"syntax_errors\": []}"
-}

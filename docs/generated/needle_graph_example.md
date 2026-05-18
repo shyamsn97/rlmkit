@@ -47,17 +47,17 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    n_fcae719846a6["root<br/><i>query</i>"]:::query
-    n_fcae719846a6 --> n_f4dcc74e0f10
-    n_f4dcc74e0f10["root<br/><i>action</i>"]:::action
-    n_f4dcc74e0f10 --> n_c92b3987e89e
-    n_c92b3987e89e["root<br/><i>supervising</i>"]:::sup
-    n_c92b3987e89e --> n_c27f13f211e5
-    n_c27f13f211e5["root.chunk_0<br/><i>query</i>"]:::query
-    n_c92b3987e89e --> n_6cfdfd261ef1
-    n_6cfdfd261ef1["root.chunk_1<br/><i>query</i>"]:::query
-    n_c92b3987e89e --> n_8d6e2d5d2b7a
-    n_8d6e2d5d2b7a["root.chunk_2<br/><i>query</i>"]:::query
+    n_775aca4fec50["root<br/><i>query</i>"]:::query
+    n_6efe0da341dc["root<br/><i>action</i>"]:::action
+    n_f254e1d0b615["root<br/><i>supervising</i>"]:::sup
+    n_4c43503fd1d5["root.chunk_0<br/><i>query</i>"]:::query
+    n_f8c79721330a["root.chunk_1<br/><i>query</i>"]:::query
+    n_b819fe52c01c["root.chunk_2<br/><i>query</i>"]:::query
+    n_775aca4fec50 -->|flows_to| n_6efe0da341dc
+    n_6efe0da341dc -->|flows_to| n_f254e1d0b615
+    n_6efe0da341dc -->|spawns| n_4c43503fd1d5
+    n_6efe0da341dc -->|spawns| n_f8c79721330a
+    n_6efe0da341dc -->|spawns| n_b819fe52c01c
     classDef query    fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;
     classDef obs      fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;
     classDef action   fill:#d2992222,stroke:#d29922,color:#c9d1d9;
@@ -71,33 +71,33 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    n_fcae719846a6["root<br/><i>query</i>"]:::query
-    n_fcae719846a6 --> n_f4dcc74e0f10
-    n_f4dcc74e0f10["root<br/><i>action</i>"]:::action
-    n_f4dcc74e0f10 --> n_c92b3987e89e
-    n_c92b3987e89e["root<br/><i>supervising</i>"]:::sup
-    n_c92b3987e89e --> n_c27f13f211e5
-    n_c27f13f211e5["root.chunk_0<br/><i>query</i>"]:::query
-    n_c27f13f211e5 --> n_44fcfb74a5d5
-    n_44fcfb74a5d5["root.chunk_0<br/><i>action</i>"]:::action
-    n_44fcfb74a5d5 --> n_21c7de897284
-    n_21c7de897284["root.chunk_0<br/><i>result</i><br/>not found"]:::result
-    n_c92b3987e89e --> n_6cfdfd261ef1
-    n_6cfdfd261ef1["root.chunk_1<br/><i>query</i>"]:::query
-    n_6cfdfd261ef1 --> n_ae921b6a0f83
-    n_ae921b6a0f83["root.chunk_1<br/><i>action</i>"]:::action
-    n_ae921b6a0f83 --> n_7c42c10975a9
-    n_7c42c10975a9["root.chunk_1<br/><i>result</i><br/>decoy, no code"]:::result
-    n_c92b3987e89e --> n_8d6e2d5d2b7a
-    n_8d6e2d5d2b7a["root.chunk_2<br/><i>query</i>"]:::query
-    n_8d6e2d5d2b7a --> n_ba73a874f021
-    n_ba73a874f021["root.chunk_2<br/><i>action</i>"]:::action
-    n_ba73a874f021 --> n_b304b8d53fd9
-    n_b304b8d53fd9["root.chunk_2<br/><i>supervising</i>"]:::sup
-    n_b304b8d53fd9 --> n_a0e4a44d92b2
-    n_a0e4a44d92b2["root.chunk_2.candidate_a<br/><i>query</i>"]:::query
-    n_b304b8d53fd9 --> n_3288505316ef
-    n_3288505316ef["root.chunk_2.candidate_b<br/><i>query</i>"]:::query
+    n_775aca4fec50["root<br/><i>query</i>"]:::query
+    n_6efe0da341dc["root<br/><i>action</i>"]:::action
+    n_f254e1d0b615["root<br/><i>supervising</i>"]:::sup
+    n_4c43503fd1d5["root.chunk_0<br/><i>query</i>"]:::query
+    n_cd0c9cab5c4a["root.chunk_0<br/><i>action</i>"]:::action
+    n_01b877b58700["root.chunk_0<br/><i>result</i><br/>not found"]:::result
+    n_f8c79721330a["root.chunk_1<br/><i>query</i>"]:::query
+    n_544df024ea32["root.chunk_1<br/><i>action</i>"]:::action
+    n_f08dfefc174a["root.chunk_1<br/><i>result</i><br/>decoy, no code"]:::result
+    n_b819fe52c01c["root.chunk_2<br/><i>query</i>"]:::query
+    n_138a1299b54c["root.chunk_2<br/><i>action</i>"]:::action
+    n_96ab3088a1be["root.chunk_2<br/><i>supervising</i>"]:::sup
+    n_38891fef3ec4["root.chunk_2.candidate_a<br/><i>query</i>"]:::query
+    n_08ceac6039f2["root.chunk_2.candidate_b<br/><i>query</i>"]:::query
+    n_775aca4fec50 -->|flows_to| n_6efe0da341dc
+    n_6efe0da341dc -->|flows_to| n_f254e1d0b615
+    n_4c43503fd1d5 -->|flows_to| n_cd0c9cab5c4a
+    n_cd0c9cab5c4a -->|flows_to| n_01b877b58700
+    n_f8c79721330a -->|flows_to| n_544df024ea32
+    n_544df024ea32 -->|flows_to| n_f08dfefc174a
+    n_b819fe52c01c -->|flows_to| n_138a1299b54c
+    n_138a1299b54c -->|flows_to| n_96ab3088a1be
+    n_6efe0da341dc -->|spawns| n_4c43503fd1d5
+    n_6efe0da341dc -->|spawns| n_f8c79721330a
+    n_6efe0da341dc -->|spawns| n_b819fe52c01c
+    n_138a1299b54c -->|spawns| n_38891fef3ec4
+    n_138a1299b54c -->|spawns| n_08ceac6039f2
     classDef query    fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;
     classDef obs      fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;
     classDef action   fill:#d2992222,stroke:#d29922,color:#c9d1d9;
@@ -111,43 +111,43 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    n_fcae719846a6["root<br/><i>query</i>"]:::query
-    n_fcae719846a6 --> n_f4dcc74e0f10
-    n_f4dcc74e0f10["root<br/><i>action</i>"]:::action
-    n_f4dcc74e0f10 --> n_c92b3987e89e
-    n_c92b3987e89e["root<br/><i>supervising</i>"]:::sup
-    n_c92b3987e89e --> n_c27f13f211e5
-    n_c27f13f211e5["root.chunk_0<br/><i>query</i>"]:::query
-    n_c27f13f211e5 --> n_44fcfb74a5d5
-    n_44fcfb74a5d5["root.chunk_0<br/><i>action</i>"]:::action
-    n_44fcfb74a5d5 --> n_21c7de897284
-    n_21c7de897284["root.chunk_0<br/><i>result</i><br/>not found"]:::result
-    n_c92b3987e89e --> n_6cfdfd261ef1
-    n_6cfdfd261ef1["root.chunk_1<br/><i>query</i>"]:::query
-    n_6cfdfd261ef1 --> n_ae921b6a0f83
-    n_ae921b6a0f83["root.chunk_1<br/><i>action</i>"]:::action
-    n_ae921b6a0f83 --> n_7c42c10975a9
-    n_7c42c10975a9["root.chunk_1<br/><i>result</i><br/>decoy, no code"]:::result
-    n_c92b3987e89e --> n_8d6e2d5d2b7a
-    n_8d6e2d5d2b7a["root.chunk_2<br/><i>query</i>"]:::query
-    n_8d6e2d5d2b7a --> n_ba73a874f021
-    n_ba73a874f021["root.chunk_2<br/><i>action</i>"]:::action
-    n_ba73a874f021 --> n_b304b8d53fd9
-    n_b304b8d53fd9["root.chunk_2<br/><i>supervising</i>"]:::sup
-    n_b304b8d53fd9 --> n_a0e4a44d92b2
-    n_a0e4a44d92b2["root.chunk_2.candidate_a<br/><i>query</i>"]:::query
-    n_a0e4a44d92b2 --> n_b63f8488577e
-    n_b63f8488577e["root.chunk_2.candidate_a<br/><i>action</i>"]:::action
-    n_b63f8488577e --> n_0e98ffff4096
-    n_0e98ffff4096["root.chunk_2.candidate_a<br/><i>result</i><br/>decoy: the code is not 12345"]:::result
-    n_b304b8d53fd9 --> n_3288505316ef
-    n_3288505316ef["root.chunk_2.candidate_b<br/><i>query</i>"]:::query
-    n_3288505316ef --> n_ffeeabaca0fb
-    n_ffeeabaca0fb["root.chunk_2.candidate_b<br/><i>action</i>"]:::action
-    n_ffeeabaca0fb --> n_b2c78d9af6bc
-    n_b2c78d9af6bc["root.chunk_2.candidate_b<br/><i>result</i><br/>needle: the secret code is 84721"]:::result
-    n_b304b8d53fd9 --> n_60fd6a74241e
-    n_60fd6a74241e["root.chunk_2<br/><i>result</i><br/>candidate code 84721"]:::result
+    n_775aca4fec50["root<br/><i>query</i>"]:::query
+    n_6efe0da341dc["root<br/><i>action</i>"]:::action
+    n_f254e1d0b615["root<br/><i>supervising</i>"]:::sup
+    n_4c43503fd1d5["root.chunk_0<br/><i>query</i>"]:::query
+    n_cd0c9cab5c4a["root.chunk_0<br/><i>action</i>"]:::action
+    n_01b877b58700["root.chunk_0<br/><i>result</i><br/>not found"]:::result
+    n_f8c79721330a["root.chunk_1<br/><i>query</i>"]:::query
+    n_544df024ea32["root.chunk_1<br/><i>action</i>"]:::action
+    n_f08dfefc174a["root.chunk_1<br/><i>result</i><br/>decoy, no code"]:::result
+    n_b819fe52c01c["root.chunk_2<br/><i>query</i>"]:::query
+    n_138a1299b54c["root.chunk_2<br/><i>action</i>"]:::action
+    n_96ab3088a1be["root.chunk_2<br/><i>supervising</i>"]:::sup
+    n_298256982916["root.chunk_2<br/><i>result</i><br/>candidate code 84721"]:::result
+    n_38891fef3ec4["root.chunk_2.candidate_a<br/><i>query</i>"]:::query
+    n_3edb3213a745["root.chunk_2.candidate_a<br/><i>action</i>"]:::action
+    n_282a418cdaa0["root.chunk_2.candidate_a<br/><i>result</i><br/>decoy: the code is not 12345"]:::result
+    n_08ceac6039f2["root.chunk_2.candidate_b<br/><i>query</i>"]:::query
+    n_ccc94f357f2f["root.chunk_2.candidate_b<br/><i>action</i>"]:::action
+    n_da0f2a2004dc["root.chunk_2.candidate_b<br/><i>result</i><br/>needle: the secret code is 84721"]:::result
+    n_775aca4fec50 -->|flows_to| n_6efe0da341dc
+    n_6efe0da341dc -->|flows_to| n_f254e1d0b615
+    n_4c43503fd1d5 -->|flows_to| n_cd0c9cab5c4a
+    n_cd0c9cab5c4a -->|flows_to| n_01b877b58700
+    n_f8c79721330a -->|flows_to| n_544df024ea32
+    n_544df024ea32 -->|flows_to| n_f08dfefc174a
+    n_b819fe52c01c -->|flows_to| n_138a1299b54c
+    n_138a1299b54c -->|flows_to| n_96ab3088a1be
+    n_96ab3088a1be -->|flows_to| n_298256982916
+    n_38891fef3ec4 -->|flows_to| n_3edb3213a745
+    n_3edb3213a745 -->|flows_to| n_282a418cdaa0
+    n_08ceac6039f2 -->|flows_to| n_ccc94f357f2f
+    n_ccc94f357f2f -->|flows_to| n_da0f2a2004dc
+    n_6efe0da341dc -->|spawns| n_4c43503fd1d5
+    n_6efe0da341dc -->|spawns| n_f8c79721330a
+    n_6efe0da341dc -->|spawns| n_b819fe52c01c
+    n_138a1299b54c -->|spawns| n_38891fef3ec4
+    n_138a1299b54c -->|spawns| n_08ceac6039f2
     classDef query    fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;
     classDef obs      fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;
     classDef action   fill:#d2992222,stroke:#d29922,color:#c9d1d9;
@@ -161,57 +161,57 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    n_fcae719846a6["root<br/><i>query</i>"]:::query
-    n_fcae719846a6 --> n_f4dcc74e0f10
-    n_f4dcc74e0f10["root<br/><i>action</i>"]:::action
-    n_f4dcc74e0f10 --> n_c92b3987e89e
-    n_c92b3987e89e["root<br/><i>supervising</i>"]:::sup
-    n_c92b3987e89e --> n_c27f13f211e5
-    n_c27f13f211e5["root.chunk_0<br/><i>query</i>"]:::query
-    n_c27f13f211e5 --> n_44fcfb74a5d5
-    n_44fcfb74a5d5["root.chunk_0<br/><i>action</i>"]:::action
-    n_44fcfb74a5d5 --> n_21c7de897284
-    n_21c7de897284["root.chunk_0<br/><i>result</i><br/>not found"]:::result
-    n_c92b3987e89e --> n_6cfdfd261ef1
-    n_6cfdfd261ef1["root.chunk_1<br/><i>query</i>"]:::query
-    n_6cfdfd261ef1 --> n_ae921b6a0f83
-    n_ae921b6a0f83["root.chunk_1<br/><i>action</i>"]:::action
-    n_ae921b6a0f83 --> n_7c42c10975a9
-    n_7c42c10975a9["root.chunk_1<br/><i>result</i><br/>decoy, no code"]:::result
-    n_c92b3987e89e --> n_8d6e2d5d2b7a
-    n_8d6e2d5d2b7a["root.chunk_2<br/><i>query</i>"]:::query
-    n_8d6e2d5d2b7a --> n_ba73a874f021
-    n_ba73a874f021["root.chunk_2<br/><i>action</i>"]:::action
-    n_ba73a874f021 --> n_b304b8d53fd9
-    n_b304b8d53fd9["root.chunk_2<br/><i>supervising</i>"]:::sup
-    n_b304b8d53fd9 --> n_a0e4a44d92b2
-    n_a0e4a44d92b2["root.chunk_2.candidate_a<br/><i>query</i>"]:::query
-    n_a0e4a44d92b2 --> n_b63f8488577e
-    n_b63f8488577e["root.chunk_2.candidate_a<br/><i>action</i>"]:::action
-    n_b63f8488577e --> n_0e98ffff4096
-    n_0e98ffff4096["root.chunk_2.candidate_a<br/><i>result</i><br/>decoy: the code is not 12345"]:::result
-    n_b304b8d53fd9 --> n_3288505316ef
-    n_3288505316ef["root.chunk_2.candidate_b<br/><i>query</i>"]:::query
-    n_3288505316ef --> n_ffeeabaca0fb
-    n_ffeeabaca0fb["root.chunk_2.candidate_b<br/><i>action</i>"]:::action
-    n_ffeeabaca0fb --> n_b2c78d9af6bc
-    n_b2c78d9af6bc["root.chunk_2.candidate_b<br/><i>result</i><br/>needle: the secret code is 84721"]:::result
-    n_b304b8d53fd9 --> n_60fd6a74241e
-    n_60fd6a74241e["root.chunk_2<br/><i>result</i><br/>candidate code 84721"]:::result
-    n_c92b3987e89e --> n_10a45ae36119
-    n_10a45ae36119["root<br/><i>resume</i>"]:::resume
-    n_10a45ae36119 --> n_7d2f49a5b7e1
-    n_7d2f49a5b7e1["root<br/><i>action</i>"]:::action
-    n_7d2f49a5b7e1 --> n_4e8630aeb5f3
-    n_4e8630aeb5f3["root<br/><i>supervising</i>"]:::sup
-    n_4e8630aeb5f3 --> n_289c76c7ee0f
-    n_289c76c7ee0f["root.verify<br/><i>query</i>"]:::query
-    n_289c76c7ee0f --> n_7dcca8b45141
-    n_7dcca8b45141["root.verify<br/><i>action</i>"]:::action
-    n_7dcca8b45141 --> n_df7775fdad79
-    n_df7775fdad79["root.verify<br/><i>result</i><br/>84721 matches the requested needle"]:::result
-    n_4e8630aeb5f3 --> n_d7b27692fa78
-    n_d7b27692fa78["root<br/><i>result</i><br/>84721"]:::result
+    n_775aca4fec50["root<br/><i>query</i>"]:::query
+    n_6efe0da341dc["root<br/><i>action</i>"]:::action
+    n_f254e1d0b615["root<br/><i>supervising</i>"]:::sup
+    n_04b6b0d066f4["root<br/><i>resume</i>"]:::resume
+    n_a56ca26e1960["root<br/><i>action</i>"]:::action
+    n_be71e3d850a9["root<br/><i>supervising</i>"]:::sup
+    n_402349c90cf4["root<br/><i>result</i><br/>84721"]:::result
+    n_4c43503fd1d5["root.chunk_0<br/><i>query</i>"]:::query
+    n_cd0c9cab5c4a["root.chunk_0<br/><i>action</i>"]:::action
+    n_01b877b58700["root.chunk_0<br/><i>result</i><br/>not found"]:::result
+    n_f8c79721330a["root.chunk_1<br/><i>query</i>"]:::query
+    n_544df024ea32["root.chunk_1<br/><i>action</i>"]:::action
+    n_f08dfefc174a["root.chunk_1<br/><i>result</i><br/>decoy, no code"]:::result
+    n_b819fe52c01c["root.chunk_2<br/><i>query</i>"]:::query
+    n_138a1299b54c["root.chunk_2<br/><i>action</i>"]:::action
+    n_96ab3088a1be["root.chunk_2<br/><i>supervising</i>"]:::sup
+    n_298256982916["root.chunk_2<br/><i>result</i><br/>candidate code 84721"]:::result
+    n_38891fef3ec4["root.chunk_2.candidate_a<br/><i>query</i>"]:::query
+    n_3edb3213a745["root.chunk_2.candidate_a<br/><i>action</i>"]:::action
+    n_282a418cdaa0["root.chunk_2.candidate_a<br/><i>result</i><br/>decoy: the code is not 12345"]:::result
+    n_08ceac6039f2["root.chunk_2.candidate_b<br/><i>query</i>"]:::query
+    n_ccc94f357f2f["root.chunk_2.candidate_b<br/><i>action</i>"]:::action
+    n_da0f2a2004dc["root.chunk_2.candidate_b<br/><i>result</i><br/>needle: the secret code is 84721"]:::result
+    n_766171592332["root.verify<br/><i>query</i>"]:::query
+    n_af2cdcb45d4e["root.verify<br/><i>action</i>"]:::action
+    n_a062a9ff68bf["root.verify<br/><i>result</i><br/>84721 matches the requested needle"]:::result
+    n_775aca4fec50 -->|flows_to| n_6efe0da341dc
+    n_6efe0da341dc -->|flows_to| n_f254e1d0b615
+    n_f254e1d0b615 -->|flows_to| n_04b6b0d066f4
+    n_04b6b0d066f4 -->|flows_to| n_a56ca26e1960
+    n_a56ca26e1960 -->|flows_to| n_be71e3d850a9
+    n_be71e3d850a9 -->|flows_to| n_402349c90cf4
+    n_4c43503fd1d5 -->|flows_to| n_cd0c9cab5c4a
+    n_cd0c9cab5c4a -->|flows_to| n_01b877b58700
+    n_f8c79721330a -->|flows_to| n_544df024ea32
+    n_544df024ea32 -->|flows_to| n_f08dfefc174a
+    n_b819fe52c01c -->|flows_to| n_138a1299b54c
+    n_138a1299b54c -->|flows_to| n_96ab3088a1be
+    n_96ab3088a1be -->|flows_to| n_298256982916
+    n_38891fef3ec4 -->|flows_to| n_3edb3213a745
+    n_3edb3213a745 -->|flows_to| n_282a418cdaa0
+    n_08ceac6039f2 -->|flows_to| n_ccc94f357f2f
+    n_ccc94f357f2f -->|flows_to| n_da0f2a2004dc
+    n_766171592332 -->|flows_to| n_af2cdcb45d4e
+    n_af2cdcb45d4e -->|flows_to| n_a062a9ff68bf
+    n_6efe0da341dc -->|spawns| n_4c43503fd1d5
+    n_6efe0da341dc -->|spawns| n_f8c79721330a
+    n_6efe0da341dc -->|spawns| n_b819fe52c01c
+    n_138a1299b54c -->|spawns| n_38891fef3ec4
+    n_138a1299b54c -->|spawns| n_08ceac6039f2
+    n_a56ca26e1960 -->|spawns| n_766171592332
     classDef query    fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;
     classDef obs      fill:#1f6feb22,stroke:#58a6ff,color:#c9d1d9;
     classDef action   fill:#d2992222,stroke:#d29922,color:#c9d1d9;

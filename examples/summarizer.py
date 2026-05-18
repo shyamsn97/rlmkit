@@ -215,34 +215,27 @@ def main():
             prompt_builder=build_prompt_builder(),
         )
 
-        state = agent.start(
+        graph = agent.start(
             f"Summarize meeting_notes.txt ({actual_lines:,} lines). It contains "
             f"detailed meeting notes from many meetings. Extract key decisions, "
             f"action items, and themes. The file is too long to read at once — "
             f"chunk it and delegate."
         )
-        trace = [state]
-
         if args.no_viz:
-            while not state.finished:
-                state = agent.step(state)
-                trace.append(state)
-                print(state.tree())
+            while not graph.finished:
+                graph = agent.step(graph)
+                print(graph.tree())
         else:
             from rlmflow.utils.viz import live
-            for s in live(agent, state):
-                state = s
-                trace.append(state)
+            graphs = live(agent, graph)
+            graph = graphs[-1]
 
         print(f"\n{'=' * 60}")
-        result_text = state.get_result()
+        result_text = graph.result()
         print(f"SUMMARY ({len(result_text.splitlines())} lines):\n")
         print(result_text or "(no result)")
 
-        from rlmflow.utils.trace import save_trace
-        trace_dir = Path(__file__).parent / "runs" / "summarizer" / "trace"
-        save_trace(trace, trace_dir, metadata={"lines": actual_lines})
-        print(f"\nTrace saved to {trace_dir}/")
+        print(f"\nWorkspace saved to {workspace}")
 
 
 if __name__ == "__main__":

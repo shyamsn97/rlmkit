@@ -1,19 +1,15 @@
-"""Workspace — branch-local working tree, session, context, trace handles."""
+"""Workspace — branch-local working tree, session, and context handles."""
 
 from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from rlmflow.graph import Graph, WorkspaceRef, retrace_steps
 from rlmflow.workspace.context import Context, FileContext
 from rlmflow.workspace.session import FileSession, Session
 from rlmflow.workspace.store import FileStore
-
-if TYPE_CHECKING:
-    from rlmflow.node import WorkspaceRef
-    from rlmflow.runtime.runtime import Runtime
 
 
 @dataclass
@@ -28,14 +24,6 @@ class Workspace:
     def path(self, *parts: str) -> Path:
         """Return a path inside the workspace working tree."""
         return self.root.joinpath(*parts)
-
-    @property
-    def trace_dir(self) -> Path:
-        return self.root / "trace"
-
-    @property
-    def checkpoint_path(self) -> Path:
-        return self.root / "checkpoint.json"
 
     @classmethod
     def create(
@@ -59,15 +47,54 @@ class Workspace:
     def open(cls, ref: WorkspaceRef) -> Workspace:
         return cls.create(ref.root, branch_id=ref.branch_id)
 
-    def ref(self) -> WorkspaceRef:
-        from rlmflow.node import WorkspaceRef
+    @classmethod
+    def open_path(
+        cls,
+        dir: str | Path,
+        *,
+        branch_id: str = "main",
+    ) -> Workspace:
+        """Open an existing workspace directory by path.
 
+        This is intentionally the same materialization path as ``create``:
+        workspace storage is append-only, so constructing the handle should not
+        mutate run state beyond ensuring the root directory exists.
+        """
+        return cls.create(dir, branch_id=branch_id)
+
+    @staticmethod
+    def check_path(path: str | Path) -> bool:
+        """Return True if ``path`` looks like a persisted RLMFlow workspace."""
+        root = Path(path)
+        return (
+            root.is_dir()
+            and (root / "graph.json").is_file()
+            and (root / "session").is_dir()
+        )
+
+    def ref(self) -> WorkspaceRef:
         return WorkspaceRef(root=str(self.root), branch_id=self.branch_id)
 
-    def materialize_runtime(self) -> Runtime:
-        from rlmflow.runtime.local import LocalRuntime
+    def load_graph(self) -> Graph:
+        """Load the current graph snapshot from this workspace's session."""
+        return self.session.load_graph()
 
-        return LocalRuntime(workspace=self)
+    def load_steps(self) -> list[Graph]:
+        """Load the run as a list of snapshots, one per state-append.
+
+        Retraces the persisted graph as it would have looked after each
+        successive state was written, ordered the way an ``RLMFlow``
+        with unbounded ``max_concurrency`` would have produced them
+        (children spawned by the same supervising step are
+        round-robined, not drained one-at-a-time).
+        """
+        return retrace_steps(self.load_graph())
+
+    def open_viewer(self, **kwargs):
+        """Open the interactive viewer for this workspace."""
+        from rlmflow.utils.viewer import open_viewer
+
+        return open_viewer(self, **kwargs)
 
     def fork(
         self,

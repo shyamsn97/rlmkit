@@ -12,8 +12,8 @@ Use full replacement only when you want to own that entire protocol yourself.
 Before changing the prompt, render the one your agent already sees:
 
 ```python
-node = agent.start("Summarize this document.", context=document)
-print(agent.build_system_prompt(node))
+graph = agent.start("Summarize this document.", context=document)
+print(agent.build_system_prompt(graph))
 ```
 
 You can also render without starting a run:
@@ -26,10 +26,11 @@ print(agent.build_system_prompt_for(
 ))
 ```
 
-Each `QueryNode` stores the prompt snapshot that was used for that call:
+Each `Graph` stores the prompt snapshot that was used for that agent's
+first call:
 
 ```python
-print(node.system_prompt)
+print(graph.system_prompt)
 ```
 
 ## Recommended: Derive From `DEFAULT_BUILDER`
@@ -206,18 +207,21 @@ those features.
 
 ## Dynamic Prompts
 
-Subclass `RLMFlow` when the prompt should depend on the current node, depth,
-query, available tools, or project state.
+Subclass `RLMFlow` when the prompt should depend on the current agent,
+depth, query, available tools, or project state. The hook receives the
+agent's `Graph` — all run-invariants are flat fields on it
+(`agent_id`, `depth`, `query`, `config`, `model`, …).
 
 ```python
 from rlmflow import RLMFlow
+from rlmflow.graph import Graph
 from rlmflow.prompts.default import DEFAULT_BUILDER
 
 
 class AuditFlow(RLMFlow):
-    def build_system_prompt(self, node):
+    def build_system_prompt(self, graph: Graph) -> str:
         extra = ""
-        if node.depth == 0:
+        if graph.depth == 0:
             extra = "At root depth, produce an executive summary after verification."
         else:
             extra = "As a child call, return only structured findings."
@@ -230,7 +234,7 @@ class AuditFlow(RLMFlow):
         )
         return builder.build(
             tools=self.build_tools_section(),
-            status=self.build_status_section(node),
+            status=self.build_status_section(graph),
         )
 ```
 
@@ -242,8 +246,8 @@ class MyFlow(RLMFlow):
         tools = super().build_tools_section()
         return tools + "\n- Prefer read-only tools before write tools."
 
-    def build_messages(self, node):
-        messages = super().build_messages(node)
+    def build_messages(self, graph, *, force_final=False):
+        messages = super().build_messages(graph, force_final=force_final)
         # Add or transform chat messages here.
         return messages
 ```
@@ -271,7 +275,7 @@ results = yield wait(*handles)
 ```
 
 If every child of a flow needs a different system prompt, use a subclass and
-branch on `node.depth`, `node.agent_id`, or `node.query`.
+branch on `graph.depth`, `graph.agent_id`, or `graph.query`.
 
 ## Section Reference
 

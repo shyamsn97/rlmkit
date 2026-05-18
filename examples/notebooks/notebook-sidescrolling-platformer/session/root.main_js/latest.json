@@ -1,9 +1,0 @@
-{
-  "agent_id": "root.main_js",
-  "latest_leaf_id": "n_ab0ff2b36331",
-  "branch_id": "main",
-  "depth": 1,
-  "type": "result",
-  "terminal": true,
-  "result": "output/sidescrolling-platformer/js/main.js"
-}

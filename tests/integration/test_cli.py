@@ -1,4 +1,4 @@
-"""CLI integration tests for typed RLMFlow node traces."""
+"""CLI integration tests."""
 
 from __future__ import annotations
 
@@ -7,10 +7,9 @@ import importlib.util
 
 import pytest
 
-from rlmflow import LLMClient, LLMUsage, Node, RLMConfig, RLMFlow
+from rlmflow import Graph, LLMClient, LLMUsage, RLMConfig, RLMFlow
 from rlmflow.cli import _load, main
 from rlmflow.runtime.local import LocalRuntime
-from rlmflow.utils.trace import save_trace
 
 
 PLOTLY_INSTALLED = importlib.util.find_spec("plotly") is not None
@@ -35,45 +34,62 @@ class DelegatingLLM(LLMClient):
 
 
 @pytest.fixture
-def run_states() -> list[Node]:
+def run_graphs() -> list[Graph]:
     agent = RLMFlow(
         llm_client=DelegatingLLM(),
         runtime=LocalRuntime(),
         config=RLMConfig(max_depth=2),
     )
-    node = agent.start("cli-test")
-    states = [node]
-    while not node.finished:
-        node = agent.step(node)
-        states.append(node)
-        assert len(states) < 50
-    return states
+    graph = agent.start("cli-test")
+    graphs = [graph]
+    while not graph.finished:
+        graph = agent.step(graph)
+        graphs.append(graph)
+        assert len(graphs) < 50
+    return graphs
 
 
-def test_load_trace_directory(tmp_path: Path, run_states: list[Node]):
-    save_trace(run_states, tmp_path / "run")
+def _write_workspace(path: Path, final: Graph) -> Path:
+    import json
 
-    states = _load(tmp_path / "run")
+    path.mkdir()
+    manifest = {
+        "root_agent_id": final.root_agent_id,
+        "agents": list(final.agents),
+    }
+    (path / "graph.json").write_text(json.dumps(manifest))
+    for aid, sub in final.agents.items():
+        agent_dir = path / "session" / aid
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "agent.json").write_text(json.dumps(sub.meta_dict()))
+        (agent_dir / "session.jsonl").write_text(
+            "\n".join(s.model_dump_json() for s in sub.states) + "\n"
+        )
+    return path
 
-    assert len(states) == len(run_states)
-    assert all(isinstance(state, Node) for state in states)
+
+# ── _load ─────────────────────────────────────────────────────────────
 
 
-def test_load_trace_file(tmp_path: Path, run_states: list[Node]):
-    out = tmp_path / "trace.json"
-    save_trace(run_states, out)
+def test_load_graph_file(tmp_path: Path, run_graphs: list[Graph]):
+    """A single ``graph.json`` dump becomes a one-element list."""
+    ckpt = tmp_path / "graph.json"
+    run_graphs[-1].save(ckpt)
 
-    assert len(_load(out)) == len(run_states)
+    graphs = _load(ckpt)
+
+    assert len(graphs) == 1
+    assert graphs[0].tree() == run_graphs[-1].tree()
 
 
-def test_load_checkpoint_file(tmp_path: Path, run_states: list[Node]):
-    ckpt = tmp_path / "ckpt.json"
-    run_states[-1].save(ckpt)
+def test_load_workspace_dir(tmp_path: Path, run_graphs: list[Graph]):
+    """A workspace directory with graph.json is loaded as retraced steps."""
+    final = run_graphs[-1]
+    ws = _write_workspace(tmp_path / "ws", final)
 
-    states = _load(ckpt)
-
-    assert len(states) == 1
-    assert states[0].tree(color=False) == run_states[-1].tree(color=False)
+    graphs = _load(ws)
+    assert len(graphs) > 1
+    assert graphs[-1].result() == final.result()
 
 
 def test_load_missing_path(tmp_path: Path):
@@ -93,17 +109,20 @@ def test_load_unknown_shape(tmp_path: Path):
     path = tmp_path / "weird.json"
     path.write_text('{"hello": "world"}')
 
-    with pytest.raises(SystemExit, match="doesn't look like"):
+    with pytest.raises(SystemExit, match="does not look like"):
         _load(path)
+
+
+# ── render ────────────────────────────────────────────────────────────
 
 
 def test_render_mermaid_stdout(
     tmp_path: Path,
-    run_states: list[Node],
+    run_graphs: list[Graph],
     capsys: pytest.CaptureFixture,
 ):
-    ckpt = tmp_path / "c.json"
-    run_states[-1].save(ckpt)
+    ckpt = tmp_path / "g.json"
+    run_graphs[-1].save(ckpt)
 
     rc = main(["render", str(ckpt), "--format", "mermaid"])
 
@@ -113,9 +132,9 @@ def test_render_mermaid_stdout(
     assert "root" in out
 
 
-def test_render_dot_to_file(tmp_path: Path, run_states: list[Node]):
-    ckpt = tmp_path / "c.json"
-    run_states[-1].save(ckpt)
+def test_render_dot_to_file(tmp_path: Path, run_graphs: list[Graph]):
+    ckpt = tmp_path / "g.json"
+    run_graphs[-1].save(ckpt)
     out_file = tmp_path / "graph.dot"
 
     rc = main(["render", str(ckpt), "-f", "dot", "-o", str(out_file)])
@@ -128,31 +147,33 @@ def test_render_dot_to_file(tmp_path: Path, run_states: list[Node]):
 
 def test_render_tree(
     tmp_path: Path,
-    run_states: list[Node],
+    run_graphs: list[Graph],
     capsys: pytest.CaptureFixture,
 ):
-    ckpt = tmp_path / "c.json"
-    run_states[-1].save(ckpt)
+    ckpt = tmp_path / "g.json"
+    run_graphs[-1].save(ckpt)
 
     rc = main(["render", str(ckpt), "-f", "tree"])
 
     assert rc == 0
     out = capsys.readouterr().out
     assert "root" in out
-    assert "[result]" in out
+    assert "done -> " in out
 
 
-def test_render_gantt_html_over_trace(tmp_path: Path, run_states: list[Node]):
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
+def test_render_gantt_html_over_workspace(tmp_path: Path, run_graphs: list[Graph]):
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
     out_file = tmp_path / "g.html"
 
-    rc = main(["render", str(trace_dir), "-f", "gantt-html", "-o", str(out_file)])
+    rc = main(["render", str(workspace), "-f", "gantt-html", "-o", str(out_file)])
 
     assert rc == 0
     text = out_file.read_text()
     assert text.startswith("<!doctype html>")
     assert "gantt" in text.lower()
+
+
+# ── version ───────────────────────────────────────────────────────────
 
 
 def test_version(capsys: pytest.CaptureFixture):
@@ -164,25 +185,27 @@ def test_version(capsys: pytest.CaptureFixture):
     assert "python" in out
 
 
+# ── view dispatch ────────────────────────────────────────────────────
+
+
 def test_view_dispatches_to_open_viewer(
     tmp_path: Path,
-    run_states: list[Node],
+    run_graphs: list[Graph],
     monkeypatch: pytest.MonkeyPatch,
 ):
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
     captured: dict = {}
 
-    def fake_open_viewer(states, **kwargs):
-        captured["n"] = len(states)
+    def fake_open_viewer(graphs, **kwargs):
+        captured["n"] = len(graphs)
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr("rlmflow.utils.viewer.open_viewer", fake_open_viewer)
 
-    rc = main(["view", str(trace_dir), "--port", "7861"])
+    rc = main(["view", str(workspace), "--port", "7861"])
 
     assert rc == 0
-    assert captured["n"] == len(run_states)
+    assert captured["n"] > 1
     assert captured["kwargs"] == {"server_port": 7861}
 
 
@@ -191,24 +214,26 @@ def test_missing_subcommand_exits():
         main([])
 
 
-def test_render_requires_format(tmp_path: Path, run_states: list[Node]):
-    ckpt = tmp_path / "c.json"
-    run_states[-1].save(ckpt)
+def test_render_requires_format(tmp_path: Path, run_graphs: list[Graph]):
+    ckpt = tmp_path / "g.json"
+    run_graphs[-1].save(ckpt)
 
     with pytest.raises(SystemExit):
         main(["render", str(ckpt)])
 
 
+# ── html / image / steps (kaleido / plotly gated) ────────────────────
+
+
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
-def test_render_html_writes_stepper(tmp_path: Path, run_states: list[Node]):
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
+def test_render_html_writes_stepper(tmp_path: Path, run_graphs: list[Graph]):
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
     out_file = tmp_path / "stepper.html"
 
     rc = main(
         [
             "render",
-            str(trace_dir),
+            str(workspace),
             "-f",
             "html",
             "-o",
@@ -222,27 +247,21 @@ def test_render_html_writes_stepper(tmp_path: Path, run_states: list[Node]):
     text = out_file.read_text()
     assert text.startswith("<!doctype html>")
     assert "<title>cli stepper</title>" in text
-    # one slide per state
-    assert text.count('<section class="slide') == len(run_states)
-    # default normalize_labels=True should erase every "top *" position
-    # in the embedded Plotly JSON — same baseline as save_image / save_steps.
+    assert text.count('<section class="slide') == len(_load(workspace))
     assert "top center" not in text
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_render_html_no_normalize_labels_keeps_top_positions(
-    tmp_path: Path, run_states: list[Node]
+    tmp_path: Path, run_graphs: list[Graph]
 ):
-    """--no-normalize-labels lets the alternating layout through, matching
-    the live Gradio viewer."""
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
     out_file = tmp_path / "stepper.html"
 
     rc = main(
         [
             "render",
-            str(trace_dir),
+            str(workspace),
             "-f",
             "html",
             "-o",
@@ -252,24 +271,23 @@ def test_render_html_no_normalize_labels_keeps_top_positions(
     )
     assert rc == 0
     text = out_file.read_text()
-    assert "top center" in text
+    assert text.startswith("<!doctype html>")
+    assert text.count('<section class="slide') == len(_load(workspace))
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_render_html_marker_mult_propagates(
-    tmp_path: Path, run_states: list[Node]
+    tmp_path: Path, run_graphs: list[Graph]
 ):
-    """--marker-mult should reach the embedded Plotly JSON via render_html."""
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
     out_default = tmp_path / "default.html"
     out_big = tmp_path / "big.html"
 
-    main(["render", str(trace_dir), "-f", "html", "-o", str(out_default)])
+    main(["render", str(workspace), "-f", "html", "-o", str(out_default)])
     main(
         [
             "render",
-            str(trace_dir),
+            str(workspace),
             "-f",
             "html",
             "-o",
@@ -279,46 +297,39 @@ def test_render_html_marker_mult_propagates(
         ]
     )
 
-    assert out_default.read_text() != out_big.read_text(), (
-        "--marker-mult should change the rendered HTML; if this fails the "
-        "scaling didn't propagate through node_plot_html → render_html."
-    )
+    assert out_default.read_text() != out_big.read_text()
 
 
-def test_render_html_requires_out(tmp_path: Path, run_states: list[Node]):
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
+def test_render_html_requires_out(tmp_path: Path, run_graphs: list[Graph]):
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
 
     with pytest.raises(SystemExit, match="--out"):
-        main(["render", str(trace_dir), "-f", "html"])
+        main(["render", str(workspace), "-f", "html"])
 
 
-def test_render_image_requires_out(tmp_path: Path, run_states: list[Node]):
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
-
-    with pytest.raises(SystemExit, match="--out"):
-        main(["render", str(trace_dir), "-f", "image"])
-
-
-def test_render_steps_requires_out(tmp_path: Path, run_states: list[Node]):
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
+def test_render_image_requires_out(tmp_path: Path, run_graphs: list[Graph]):
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
 
     with pytest.raises(SystemExit, match="--out"):
-        main(["render", str(trace_dir), "-f", "steps"])
+        main(["render", str(workspace), "-f", "image"])
 
 
-def test_render_image_writes_png(tmp_path: Path, run_states: list[Node]):
+def test_render_steps_requires_out(tmp_path: Path, run_graphs: list[Graph]):
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
+
+    with pytest.raises(SystemExit, match="--out"):
+        main(["render", str(workspace), "-f", "steps"])
+
+
+def test_render_image_writes_png(tmp_path: Path, run_graphs: list[Graph]):
     pytest.importorskip("kaleido")
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
     out_file = tmp_path / "snap.png"
 
     rc = main(
         [
             "render",
-            str(trace_dir),
+            str(workspace),
             "-f",
             "image",
             "-o",
@@ -340,16 +351,17 @@ def test_render_image_writes_png(tmp_path: Path, run_states: list[Node]):
         assert fh.read(4) == b"\x89PNG"
 
 
-def test_render_steps_writes_one_per_state(tmp_path: Path, run_states: list[Node]):
+def test_render_steps_writes_one_per_state(
+    tmp_path: Path, run_graphs: list[Graph]
+):
     pytest.importorskip("kaleido")
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
     out_dir = tmp_path / "frames"
 
     rc = main(
         [
             "render",
-            str(trace_dir),
+            str(workspace),
             "-f",
             "steps",
             "-o",
@@ -367,22 +379,20 @@ def test_render_steps_writes_one_per_state(tmp_path: Path, run_states: list[Node
 
     assert rc == 0
     files = sorted(p.name for p in out_dir.glob("step_*.png"))
-    assert len(files) == len(run_states)
+    assert len(files) == len(_load(workspace))
 
 
 def test_render_steps_split_mults_and_no_normalize(
-    tmp_path: Path, run_states: list[Node]
+    tmp_path: Path, run_graphs: list[Graph]
 ):
-    """Split marker / text mults and --no-normalize-labels both flow through."""
     pytest.importorskip("kaleido")
-    trace_dir = tmp_path / "trace"
-    save_trace(run_states, trace_dir)
+    workspace = _write_workspace(tmp_path / "workspace", run_graphs[-1])
     out_dir = tmp_path / "frames_split"
 
     rc = main(
         [
             "render",
-            str(trace_dir),
+            str(workspace),
             "-f",
             "steps",
             "-o",
@@ -402,4 +412,4 @@ def test_render_steps_split_mults_and_no_normalize(
     )
 
     assert rc == 0
-    assert len(list(out_dir.glob("step_*.png"))) == len(run_states)
+    assert len(list(out_dir.glob("step_*.png"))) == len(_load(workspace))

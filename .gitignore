@@ -61,5 +61,10 @@ mlruns/*
 examples/*_log.md
 examples/**/workspace/*
 examples/runs/
+*/**/runs/*
 .DS_Store
 */**/needle_trace_images/*
+examples/*/**/workspaces/*
+examples/autoresearch/runs/*
+examples/*/**/frames/*
+examples/example-workspaces/*

@@ -1,4 +1,10 @@
-"""Save and load typed RLMFlow node traces."""
+"""Save and load :class:`Graph` traces.
+
+A trace is a list of graph snapshots — typically one per
+:meth:`RLMFlow.step` call. The file format is JSON: a top-level dict with
+``"steps"`` (list of ``Graph.to_dict()`` payloads) and optional
+``"metadata"``.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +12,12 @@ import json
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from rlmflow.node import Node, parse_node_obj
-from rlmflow.utils.viz import session_events
+from rlmflow.graph import Graph
 
 
 class Trace(NamedTuple):
-    states: list[Node]
+    graphs: list[Graph]
     metadata: dict[str, Any]
-    events: list[Node] = []
 
 
 def _resolve(path: str | Path, *, writing: bool) -> Path:
@@ -28,48 +32,24 @@ def _resolve(path: str | Path, *, writing: bool) -> Path:
 
 
 def save_trace(
-    states: list[Node],
+    graphs: list[Graph],
     path: str | Path = "trace.json",
     metadata: dict | None = None,
-    *,
-    include_events: bool = False,
-    events: list[Node] | None = None,
 ) -> Path:
+    """Persist a list of :class:`Graph` snapshots."""
     p = _resolve(path, writing=True)
-    data: dict[str, Any] = {"steps": [state.to_dict() for state in states]}
-    trace_events = list(events or [])
-    if include_events and not trace_events:
-        trace_events = _events_from_states(states)
-    if trace_events:
-        data["events"] = [event.to_dict() for event in trace_events]
+    data: dict[str, Any] = {"steps": [graph.to_dict() for graph in graphs]}
     if metadata:
         data["metadata"] = metadata
     p.write_text(json.dumps(data, default=str, indent=2), encoding="utf-8")
     return p
 
 
-def _events_from_states(states: list[Node]) -> list[Node]:
-    for state in states:
-        ws = getattr(state, "workspace", None)
-        root = getattr(ws, "root", None) if ws else None
-        if not root:
-            continue
-        root_path = Path(root)
-        events = session_events(root_path)
-        if not events:
-            events = session_events(root_path / "session")
-        if events:
-            return events
-    return []
-
-
 def load_trace(path: str | Path) -> Trace:
     p = _resolve(path, writing=False)
     data = json.loads(p.read_text(encoding="utf-8"))
-    states = [parse_node_obj(state) for state in data["steps"]]
-    events = [parse_node_obj(event) for event in data.get("events", [])]
-    return Trace(
-        states=states,
-        metadata=data.get("metadata") or {},
-        events=events,
-    )
+    graphs = [Graph.from_dict(step) for step in data.get("steps", [])]
+    return Trace(graphs=graphs, metadata=data.get("metadata") or {})
+
+
+__all__ = ["Trace", "load_trace", "save_trace"]

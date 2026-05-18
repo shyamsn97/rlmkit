@@ -12,16 +12,32 @@ import ast
 import inspect
 import os
 import shutil
+import threading
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from rlmflow.node import WaitRequest
+from rlmflow.graph import WaitRequest
 from rlmflow.runtime.repl import deserialize, serialize
 from rlmflow.tools import get_tool_metadata
 from rlmflow.tools import tool as tool_decorator
+from rlmflow.tools.builtins import DoneSignal
+
+# Process-global lock guarding ``os.chdir`` in :meth:`Runtime._in_workspace`.
+#
+# ``os.chdir`` mutates a process-wide piece of state. With more than one
+# runtime active at a time (e.g. ``max_concurrency > 1`` driving several
+# child agents in parallel), naive try/finally chdir is racy: thread A
+# captures ``prev = getcwd()`` and chdirs into the workspace; thread B
+# then captures ``prev = workspace`` (because A has already chdir'd) and
+# also chdirs into the workspace; A's finally restores the original cwd;
+# B's finally restores… the workspace. The host process is now stuck on
+# the workspace cwd. Serializing the chdir + body with this lock prevents
+# the interleaving. The body is short (file I/O or one REPL ``run``
+# message) so the perf impact is negligible in practice.
+_CWD_LOCK = threading.Lock()
 
 DEFAULT_MODULES: list[str] = [
     "re",
@@ -92,6 +108,15 @@ class Runtime(ABC):
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.tools: dict[str, ToolDef] = {}
         self.proxied: dict[str, Callable] = {}
+        # Per-runtime mutable state shared between the engine and any
+        # core tool closures (``done``, ``delegate``) the engine binds to
+        # this runtime. The engine resets this between executions.
+        self.env: dict[str, Any] = {}
+        # ``True`` while the REPL holds a generator paused at a ``yield``.
+        # The engine reads this to detect a lost suspension (e.g. after
+        # fork or process restart) and trigger replay-of-one to rebuild
+        # the generator before calling ``resume_code``.
+        self.suspended: bool = False
 
     # ── subclasses implement these two ────────────────────────────────
 
@@ -126,6 +151,8 @@ class Runtime(ABC):
             try:
                 with self._in_workspace():
                     result = fn(*args, **kwargs)
+            except DoneSignal:
+                self.send({"done": True})
             except Exception as exc:
                 self.send({"error": f"{type(exc).__name__}: {exc}"})
             else:
@@ -133,29 +160,58 @@ class Runtime(ABC):
 
     @contextmanager
     def _in_workspace(self):
-        """Temporarily chdir into ``self.workspace`` for a proxy call."""
-        prev = os.getcwd()
-        try:
-            os.chdir(self.workspace)
-            yield
-        finally:
-            os.chdir(prev)
+        """Temporarily chdir into ``self.workspace`` for a proxy call.
 
-    def execute(self, code: str, timeout: float | None = None) -> str:
+        Serialized via the module-level :data:`_CWD_LOCK` because
+        ``os.chdir`` is process-global; concurrent runtimes (parallel
+        children under a non-trivial ``max_concurrency``) would
+        otherwise race and leak the workspace cwd back to the caller.
+        """
+        with _CWD_LOCK:
+            prev = os.getcwd()
+            try:
+                os.chdir(self.workspace)
+                yield
+            finally:
+                os.chdir(prev)
+
+    def execute(self, code: str) -> str:
         """Run ``code`` and return captured stdout."""
         return self.call({"cmd": "run", "code": code}).get("output", "")
 
-    def start_code(self, code: str) -> tuple[bool, object]:
+    def start_code(self, code: str) -> tuple[bool, object, bool]:
         """Run code that may ``yield``.
 
-        Returns ``(True, (WaitRequest, pre_output))`` on suspend or
-        ``(False, stdout)`` on completion.
+        Returns ``(suspended, payload, errored)``. ``payload`` is
+        ``(WaitRequest, pre_output)`` when ``suspended`` else captured
+        stdout. ``errored`` is ``True`` when user code raised an
+        exception (or had a ``SyntaxError``); the traceback is included
+        in the captured output.
         """
-        return parse_response(self.call({"cmd": "run", "code": code}))
+        suspended, payload, errored = parse_response(
+            self.call({"cmd": "run", "code": code})
+        )
+        self.suspended = suspended
+        return suspended, payload, errored
 
-    def resume_code(self, send_value=None) -> tuple[bool, object]:
+    def resume_code(self, send_value=None) -> tuple[bool, object, bool]:
         """Resume a suspended generator. Same return shape as :meth:`start_code`."""
-        return parse_response(self.call({"cmd": "resume", "value": send_value}))
+        suspended, payload, errored = parse_response(
+            self.call({"cmd": "resume", "value": send_value})
+        )
+        self.suspended = suspended
+        return suspended, payload, errored
+
+    def read(self, name: str) -> Any:
+        """Return the REPL-namespace value bound to ``name`` (``None`` if missing).
+
+        Symmetric to :meth:`inject`. Used by the engine to read back per-execution
+        state (``env``) after running agent code. ``LocalRuntime`` overrides
+        this with a direct dict lookup.
+        """
+        from rlmflow.runtime.repl import deserialize
+
+        return deserialize(self.call({"cmd": "read", "name": name}).get("value"))
 
     def inject(self, name: str, value: Any) -> None:
         """Bind ``name`` to ``value`` in the REPL's namespace.
@@ -213,7 +269,8 @@ class Runtime(ABC):
         new = self.__class__(workspace=workspace or self.workspace)
         for name, td in self.tools.items():
             new.tools[name] = td
-            new.inject(name, td.fn)
+            if td.fn is not None:
+                new.inject(name, td.fn)
         return new
 
     def fork(self, new_workspace: str | Path) -> Runtime:
@@ -297,11 +354,16 @@ class Runtime(ABC):
         return list(self.tools.values())
 
 
-def parse_response(resp: dict) -> tuple[bool, object]:
-    """Convert a REPL response dict into ``(suspended, payload)``."""
+def parse_response(resp: dict) -> tuple[bool, object, bool]:
+    """Convert a REPL response dict into ``(suspended, payload, errored)``."""
+    errored = bool(resp.get("errored"))
     if resp.get("suspended"):
-        return True, (
-            WaitRequest(agent_ids=resp["agent_ids"]),
-            resp.get("pre_output", ""),
+        return (
+            True,
+            (
+                WaitRequest(agent_ids=resp["agent_ids"]),
+                resp.get("pre_output", ""),
+            ),
+            errored,
         )
-    return False, resp.get("output", "")
+    return False, resp.get("output", ""), errored

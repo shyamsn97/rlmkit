@@ -1,9 +1,15 @@
-"""Release-contract tests for the current RLMFlow public surface."""
+"""Release-contract tests for the public RLMFlow surface."""
 
 from __future__ import annotations
 
-from rlmflow import LLMClient, LLMUsage, RLMConfig, RLMFlow, ResultNode, SupervisingNode
-from rlmflow.node import ActionNode, QueryNode, parse_node_json
+from rlmflow import (
+    Graph,
+    LLMClient,
+    LLMUsage,
+    RLMConfig,
+    RLMFlow,
+    is_done,
+)
 from rlmflow.runtime.local import LocalRuntime
 
 
@@ -24,15 +30,14 @@ class DoneLLM(LLMClient):
 
 
 class DelegatingLLM(LLMClient):
-    ROOT_REPLY = '''```repl
-h = delegate("child", "do the thing", "")
-results = yield wait(h)
-done(results[0])
-```'''
-
-    CHILD_REPLY = '''```repl
-done("child-answer")
-```'''
+    ROOT_REPLY = (
+        "```repl\n"
+        'h = delegate("child", "do the thing", "")\n'
+        "results = yield wait(h)\n"
+        "done(results[0])\n"
+        "```"
+    )
+    CHILD_REPLY = '```repl\ndone("child-answer")\n```'
 
     def __init__(self, input_tokens: int = 7, output_tokens: int = 3):
         self.input_tokens = input_tokens
@@ -66,10 +71,13 @@ class BudgetBusterLLM(LLMClient):
         return '```repl\nprint("still going")\n```'
 
 
-def _run(agent: RLMFlow, node):
-    while not node.finished:
-        node = agent.step(node)
-    return node
+def _run(agent: RLMFlow, graph: Graph) -> Graph:
+    while not graph.finished:
+        graph = agent.step(graph)
+    return graph
+
+
+# ── chat-style API ────────────────────────────────────────────────
 
 
 def test_chat_smoke_returns_string_and_sets_last_usage():
@@ -82,6 +90,9 @@ def test_chat_smoke_returns_string_and_sets_last_usage():
     assert agent.last_usage is not None
     assert agent.last_usage.input_tokens == 12
     assert agent.last_usage.output_tokens == 4
+
+
+# ── budget enforcement ────────────────────────────────────────────
 
 
 def test_max_budget_stops_the_loop():
@@ -98,83 +109,79 @@ def test_max_budget_stops_the_loop():
     assert llm.calls <= 3
 
 
-def test_token_propagation_parent_sees_child_tokens():
+# ── token aggregation ─────────────────────────────────────────────
+
+
+def test_graph_tokens_sum_parent_and_child_usage():
     agent = RLMFlow(
         llm_client=DelegatingLLM(input_tokens=10, output_tokens=5),
         runtime=LocalRuntime(),
         config=RLMConfig(max_depth=2),
     )
 
-    node = agent.step(agent.start("root task"))
-    assert isinstance(node.current(), SupervisingNode)
-    node = agent.step(node)
-    final = agent.step(node)
+    final = _run(agent, agent.start("root task"))
 
-    assert isinstance(final.current(), ResultNode)
-    supervising = final.children[0].children[0]
-    assert isinstance(supervising, SupervisingNode)
-    child_branches = [
-        child for child in supervising.children if child.agent_id != supervising.agent_id
-    ]
-    assert len(child_branches) == 1
-    child = child_branches[0].current()
-    tree_in, tree_out = final.tree_usage()
-    child_in, child_out = child.tree_usage()
+    assert is_done(final.current())
+    root_in, root_out = final.tokens(recursive=False)
+    child_in, child_out = final["root.child"].tokens(recursive=False)
+    tree_in, tree_out = final.tokens()
 
-    assert tree_in >= final.total_input_tokens + child_in
-    assert tree_out >= final.total_output_tokens + child_out
-    assert child_in > 0
-    assert child_out > 0
+    assert tree_in == root_in + child_in
+    assert tree_out == root_out + child_out
+    assert child_in > 0 and child_out > 0
 
 
-def test_checkpoint_round_trip_preserves_tree():
+# ── graph save / load round-trip ──────────────────────────────────
+
+
+def test_graph_save_load_round_trip(tmp_path):
     agent = RLMFlow(
         llm_client=DelegatingLLM(),
         runtime=LocalRuntime(),
         config=RLMConfig(max_depth=2),
     )
-
     final = _run(agent, agent.start("checkpoint me"))
-    restored = parse_node_json(final.model_dump_json())
 
-    assert isinstance(restored.current(), ResultNode)
-    assert restored.current().result == final.current().result
-    assert len(restored.children) == len(final.children)
-    assert restored.tree_usage() == final.tree_usage()
-    assert restored.tree(color=False) == final.tree(color=False)
+    ckpt = tmp_path / "graph.json"
+    final.save(ckpt)
+    restored = Graph.load(ckpt)
 
-
-def test_node_helpers_walk_find_replace_and_edit_immutably():
-    leaf = QueryNode(agent_id="root.plan.search", content="old")
-    plan = QueryNode(agent_id="root.plan", children=[leaf])
-    verify = QueryNode(agent_id="root.verify")
-    root = QueryNode(agent_id="root", children=[plan, verify])
-
-    assert root.find("root.plan.search") is leaf
-    assert [node.agent_id for node in root.walk()] == [
-        "root",
-        "root.plan",
-        "root.plan.search",
-        "root.verify",
-    ]
-
-    better_leaf = leaf.update(content="better")
-    edited = root.replace_many({leaf.id: better_leaf})
-
-    assert root.find("root.plan.search").content == "old"
-    assert edited.find("root.plan.search").content == "better"
+    assert restored.result() == final.result()
+    assert list(restored.agents) == list(final.agents)
+    assert restored.tree() == final.tree()
+    assert restored.tokens() == final.tokens()
 
 
-def test_tree_displays_action_model_label():
-    child = ActionNode(
-        agent_id="root.fast_worker",
-        config={"model": "fast"},
-        model="gpt-5-mini",
-        code="done('ok')",
+# ── tree rendering shows model labels ─────────────────────────────
+
+
+def test_tree_displays_model_label_per_agent():
+    class ModelAwareLLM(LLMClient):
+        model = "gpt-strong"
+
+        def chat(self, messages, *args, **kwargs):
+            return (
+                "```repl\n"
+                'h = delegate("fast_worker", "use fast", "", model="fast")\n'
+                "r = yield wait(h)\n"
+                "done(r[0])\n"
+                "```"
+            )
+
+    class FastLLM(LLMClient):
+        model = "fast-mini"
+
+        def chat(self, messages, *args, **kwargs):
+            return '```repl\ndone("fast-result")\n```'
+
+    agent = RLMFlow(
+        llm_client=ModelAwareLLM(),
+        runtime=LocalRuntime(),
+        config=RLMConfig(max_depth=1),
+        llm_clients={"fast": {"model": FastLLM(), "description": "tiny"}},
     )
-    root = QueryNode(config={"model": "default"}, children=[child])
+    final = _run(agent, agent.start("test"))
 
-    tree = root.tree()
-
-    assert "root [query] {default}" in tree
-    assert "root.fast_worker [action] {fast:gpt-5-mini}" in tree
+    tree = final.tree()
+    assert "root (default)" in tree
+    assert "root.fast_worker (fast)" in tree

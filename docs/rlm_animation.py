@@ -351,7 +351,7 @@ class RLMFlowHero(Scene):
             active_dot = dot
 
         timeline_footer = Text(
-            "checkpoint · fork · inspect at any node",
+            "workspace · fork · inspect at any node",
             font=CODE_FONT,
             font_size=FS_BODY,
             color=WHITE_C,
