@@ -57,17 +57,17 @@ from rlmflow.graph import Graph, Node, is_done, is_observation, parse_node_obj
 from rlmflow.workspace.store import Store, copy_workspace_paths, resolve_backend
 
 SESSION_VARIABLE_PROMPT = """
-**Session variable:** read-only view of every *other* agent in this recursive tree.
+`SESSION` is a read-only view of other agents in this recursive tree.
 
-- `SESSION.agent_id` / `SESSION.node_id` — your own ids.
-- `SESSION.list_agents()` → `[{agent_id, type, depth, terminal, result_preview}, ...]`.
-- `SESSION.read(agent_id)` — rendered transcript (system + query + actions + observations + result).
-- `SESSION.grep(pattern, max_results=50)` — regex across every other agent's messages; `agent_id:type:line` rows.
-- `SESSION.parent(agent_id=None)` / `SESSION.ancestors(agent_id=None)` / `SESSION.children(agent_id=None)` / `SESSION.subtree(agent_id=None)` — tree nav.
-- `SESSION.tree()` — ASCII tree of the whole run.
+- `SESSION.agent_id` / `SESSION.node_id`
+- `SESSION.list_agents()`
+- `SESSION.read(agent_id)`
+- `SESSION.grep(pattern, max_results=50)`
+- `SESSION.parent(agent_id=None)` / `SESSION.ancestors(agent_id=None)`
+- `SESSION.children(agent_id=None)` / `SESSION.subtree(agent_id=None)`
+- `SESSION.tree()`
 
-Use it to coordinate with siblings/parent: grep before redoing work, read a failed
-sibling's transcript before retrying, check `tree()` before delegating.
+Use it after delegation to inspect child results/transcripts and target repairs.
 """
 
 

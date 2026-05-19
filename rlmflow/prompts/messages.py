@@ -15,9 +15,10 @@ FIRST_ACTION = (
 )
 
 CONTINUE_ACTION = (
-    "Continue working on: {query}\n\n"
+    "The history before is your previous interactions with the REPL environment. "
+    'Think step-by-step on what to do using the REPL environment to answer the original query: "{query}".\n\n'
     "{context_hint}"
-    "Respond with one ```repl``` code block."
+    "Your next action must be one ```repl``` code block."
 )
 
 CONTEXT_HINT_PRESENT = (
@@ -43,8 +44,8 @@ NO_CODE_BLOCK = (
 EXECUTION_OUTPUT = "REPL output:\n{output}"
 
 ORPHANED_DELEGATES = (
-    "You delegated [{names}] but never called `yield wait(...)`. "
-    "You must use `yield wait(*handles)` to collect results."
+    "You delegated [{names}] but never called `yield rlm_wait(...)`. "
+    "You must use `yield rlm_wait(*handles)` to collect results."
 )
 
 STATUS_DEPTH_ROOT = (

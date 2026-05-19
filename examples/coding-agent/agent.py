@@ -12,15 +12,39 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
-
 from rlmflow.llm import AnthropicClient, OpenAIClient
 from rlmflow.rlm import RLMConfig, RLMFlow
 from rlmflow.runtime.docker import DockerRuntime
 from rlmflow.runtime.local import LocalRuntime
 from rlmflow.tools import FILE_TOOLS
 from rlmflow.workspace import Workspace
+    
+from rlmflow.prompts.default import DEFAULT_BUILDER
 
+CODING_INSTRUCTIONS = """
+- **Plan ownership before writing.** For non-trivial coding tasks, first make a compact manifest: file/component owners, shared interfaces, dependencies, and acceptance checks. The parent plans boundaries; children own implementation details.
+- **Keep plans lightweight.** Give children enough direction to own their piece without pre-writing the whole file for them.
+- **Bias toward delegation for separable work.** Do small, local tasks directly; when files, components, chunks, or checks can be owned independently, delegate them before implementing inline.
+- **Honor the requested artifact.** If the user asks for a component, app, CLI, test, script, library, config, migration, or data file, produce that artifact's expected files and behavior. Do not substitute a generic page, placeholder, README, template, or unrelated scaffold; preserve the requested runtime/API/contract in verification.
+- **Delegate focused artifact work.** Give each child one bounded file/component/chunk/check with a clear expected output. File-writing children must call `write_file(...)`, verify that file from disk, and return a short status.
+- **Pass only needed context.** Give children a spec, a relevant `CONTEXT.lines(...)` slice, or `""`; don't dump your whole view unless necessary.
+- **Combine from disk.** After children finish, read the files they wrote and verify the shared contract.
+- **Run real checks.** Syntax-check, run tests, or smoke-test the entry point before `done()` when the runtime can.
+- **Repair surgically.** After an exception, `ls`/`read_file` first; fix the broken file instead of rewriting or re-delegating everything.
+""".strip()
+
+
+CODING_BUILDER = DEFAULT_BUILDER.section(
+    "coding",
+    CODING_INSTRUCTIONS,
+    title="Coding",
+    after="builtins",
+)
+
+
+__all__ = ["CODING_BUILDER", "CODING_INSTRUCTIONS"]
 
 def main():
     parser = argparse.ArgumentParser(description="Interactive coding agent")
@@ -78,6 +102,7 @@ def main():
         llm_clients={
             "fast": {"model": fast, "description": "Cheap model for smaller subtasks"},
         },
+        prompt_builder=CODING_BUILDER,
     )
 
     print("Agent ready. Type a query, or 'quit' to exit.\n")

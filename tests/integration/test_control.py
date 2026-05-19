@@ -45,8 +45,8 @@ def _done(text: str) -> str:
 def _delegate_one(child_name: str, query: str) -> str:
     return (
         "```repl\n"
-        f"h = delegate({child_name!r}, {query!r}, '')\n"
-        "results = yield wait(h)\n"
+        f"h = rlm_delegate({child_name!r}, {query!r}, '')\n"
+        "results = yield rlm_wait(h)\n"
         "done(results[0])\n"
         "```"
     )

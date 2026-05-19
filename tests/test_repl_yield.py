@@ -1,11 +1,11 @@
-"""REPL yield protocol — only `yield wait(...)` suspends.
+"""REPL yield protocol — only `yield rlm_wait(...)` suspends.
 
 Covers the REPL yield protocol matrix in `docs/internals.md`. The engine must:
 
 1. Suspend (and surface ``WaitRequest.agent_ids``) only when the
-   block does ``yield wait(...)`` at top level.
+   block does ``yield rlm_wait(...)`` at top level.
 2. Treat every other yield (bare ``yield``, ``yield 42``,
-   ``yield handle``, ``yield delegate(...)`` without ``wait``) as a
+   ``yield handle``, ``yield rlm_delegate(...)`` without ``rlm_wait``) as a
    plain Python generator yield — discard, resume, never suspend.
 3. Leave generic generator code alone: helpers defined inside the
    block, generator expressions, and ``yield from`` inside helpers
@@ -28,11 +28,11 @@ def _yields(code: str) -> bool:
 
 
 def test_top_level_yield_detected():
-    assert _yields("yield wait(h)")
-    assert _yields("x = yield wait(h)")
+    assert _yields("yield rlm_wait(h)")
+    assert _yields("x = yield rlm_wait(h)")
     assert _yields("yield from gen()")
-    assert _yields("if cond:\n    yield wait(h)\nelse:\n    pass")
-    assert _yields("for h in handles:\n    yield wait(h)")
+    assert _yields("if cond:\n    yield rlm_wait(h)\nelse:\n    pass")
+    assert _yields("for h in handles:\n    yield rlm_wait(h)")
 
 
 def test_yield_inside_nested_function_is_not_top_level():
@@ -121,7 +121,7 @@ def test_top_level_yield_with_value_pumps_through():
 
 
 def test_top_level_yield_handle_pumps_through_does_not_crash():
-    """``yield delegate_handle`` (forgot to wrap in wait) must NOT crash
+    """``yield delegate_handle`` (forgot to wrap in rlm_wait) must NOT crash
     the engine. It pumps through silently."""
     r = _new_repl()
     handle = ChildHandle(agent_id="root.kid")
@@ -138,9 +138,9 @@ def test_top_level_yield_handle_pumps_through_does_not_crash():
 def test_yield_wait_suspends_with_correct_agent_ids():
     r = _new_repl()
     handle = ChildHandle(agent_id="root.kid")
-    r.namespace["wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
+    r.namespace["rlm_wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
     r.namespace["h"] = handle
-    suspended, payload = r.start("print('x')\nresult = yield wait(h)\n")
+    suspended, payload = r.start("print('x')\nresult = yield rlm_wait(h)\n")
     assert suspended is True
     request, pre = payload
     assert isinstance(request, WaitRequest)
@@ -150,21 +150,21 @@ def test_yield_wait_suspends_with_correct_agent_ids():
 
 def test_multiple_handles_in_one_wait():
     r = _new_repl()
-    r.namespace["wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
+    r.namespace["rlm_wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
     r.namespace["h1"] = ChildHandle(agent_id="root.a")
     r.namespace["h2"] = ChildHandle(agent_id="root.b")
-    suspended, (request, _) = r.start("yield wait(h1, h2)")
+    suspended, (request, _) = r.start("yield rlm_wait(h1, h2)")
     assert suspended is True
     assert request.agent_ids == ["root.a", "root.b"]
 
 
 def test_non_wait_yields_before_wait_are_pumped_then_suspends():
-    """A block that yields some junk and then yields a wait must
-    still suspend on the wait; the engine pumps past the junk."""
+    """A block that yields some junk and then yields a rlm_wait must
+    still suspend on the rlm_wait; the engine pumps past the junk."""
     r = _new_repl()
-    r.namespace["wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
+    r.namespace["rlm_wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
     r.namespace["h"] = ChildHandle(agent_id="root.kid")
-    code = "yield 1\nyield 'noise'\nyield wait(h)\n"
+    code = "yield 1\nyield 'noise'\nyield rlm_wait(h)\n"
     suspended, (request, _) = r.start(code)
     assert suspended is True
     assert request.agent_ids == ["root.kid"]
@@ -221,9 +221,9 @@ def test_keyboard_interrupt_in_block_is_captured():
 
 def test_resume_returns_send_value_to_block():
     r = _new_repl()
-    r.namespace["wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
+    r.namespace["rlm_wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
     r.namespace["h"] = ChildHandle(agent_id="root.kid")
-    suspended, _ = r.start("result = yield wait(h)\nprint('got', result)\n")
+    suspended, _ = r.start("result = yield rlm_wait(h)\nprint('got', result)\n")
     assert suspended is True
     suspended, out = r.resume(send_value=["payload"])
     assert suspended is False

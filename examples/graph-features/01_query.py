@@ -33,7 +33,7 @@ def build_graph() -> Graph:
         agent_id="root",
         seq=1,
         reply="splitting into two children",
-        code='delegate("write", "...", "")\ndelegate("test", "...", "")',
+        code='rlm_delegate("write", "...", "")\nrlm_delegate("test", "...", "")',
         input_tokens=120,
         output_tokens=40,
     )

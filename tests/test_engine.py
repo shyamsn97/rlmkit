@@ -61,7 +61,7 @@ def _assert_spawn_links(g: Graph, spawner_seq: int | None = None) -> None:
     """Every direct child's parent_node_id equals the spawning state's id.
 
     The spawning state is whichever :class:`ExecAction` /
-    :class:`ResumeAction` was running when ``delegate()`` was called.
+    :class:`ResumeAction` was running when ``rlm_delegate()`` was called.
     If ``spawner_seq`` is None (the default), we look it up by
     matching child IDs back to whichever action node's id they
     record as ``parent_node_id``.
@@ -167,8 +167,8 @@ class _TightChildLLM(LLMClient):
             return '```repl\ndone("c")\n```'
         return (
             "```repl\n"
-            'h = delegate("child", "child task", "")\n'
-            "results = yield wait(h)\n"
+            'h = rlm_delegate("child", "child task", "")\n'
+            "results = yield rlm_wait(h)\n"
             'done("p:" + results[0])\n'
             "```"
         )
@@ -203,13 +203,13 @@ def test_tight_pattern_with_many_siblings_shares_one_supervising():
             if "leaf task" in prompt:
                 return '```repl\ndone("leaf:" + AGENT_ID)\n```'
             delegations = "\n".join(
-                f'h{i} = delegate("c{i}", "leaf task", "")' for i in range(n)
+                f'h{i} = rlm_delegate("c{i}", "leaf task", "")' for i in range(n)
             )
             handles = ", ".join(f"h{i}" for i in range(n))
             return (
                 "```repl\n"
                 f"{delegations}\n"
-                f"results = yield wait({handles})\n"
+                f"results = yield rlm_wait({handles})\n"
                 'done(",".join(results))\n'
                 "```"
             )
@@ -238,12 +238,12 @@ def test_verify_pattern_records_resume_then_action():
             if "child task" in prompt:
                 return '```repl\ndone("c")\n```'
             prior = "\n".join(m["content"] for m in messages if m.get("role") == "assistant")
-            if "yield wait" in prior:
+            if "yield rlm_wait" in prior:
                 return '```repl\ndone("p:c-verified")\n```'
             return (
                 "```repl\n"
-                'h = delegate("child", "child task", "")\n'
-                "yield wait(h)\n"
+                'h = rlm_delegate("child", "child task", "")\n'
+                "yield rlm_wait(h)\n"
                 "```"
             )
 
@@ -270,10 +270,10 @@ def test_multi_yield_same_block_records_two_supervising_resume_pairs():
                 return '```repl\ndone("verified")\n```'
             return (
                 "```repl\n"
-                'h = delegate("child", "child task", "")\n'
-                "child_results = yield wait(h)\n"
-                'v = delegate("verify", "verify task", "")\n'
-                "verdict = yield wait(v)\n"
+                'h = rlm_delegate("child", "child task", "")\n'
+                "child_results = yield rlm_wait(h)\n"
+                'v = rlm_delegate("verify", "verify task", "")\n'
+                "verdict = yield rlm_wait(v)\n"
                 'done("parent:" + verdict[0])\n'
                 "```"
             )
@@ -309,14 +309,14 @@ def test_multi_yield_split_blocks_records_action_between_each_resume():
             if "alpha task" in joined:
                 return (
                     "```repl\n"
-                    'h2 = delegate("beta", "beta task", "")\n'
-                    "second = yield wait(h2)\n"
+                    'h2 = rlm_delegate("beta", "beta task", "")\n'
+                    "second = yield rlm_wait(h2)\n"
                     "```"
                 )
             return (
                 "```repl\n"
-                'h1 = delegate("alpha", "alpha task", "")\n'
-                "first = yield wait(h1)\n"
+                'h1 = rlm_delegate("alpha", "alpha task", "")\n'
+                "first = yield rlm_wait(h1)\n"
                 "```"
             )
 
@@ -341,15 +341,15 @@ def test_intra_agent_loop_then_delegation():
     class _Loopy(LLMClient):
         def chat(self, messages, *args, **kwargs):
             joined = "\n".join(m["content"] for m in messages)
-            if "child task" in joined.lower() and 'delegate("child"' not in joined:
+            if "child task" in joined.lower() and 'rlm_delegate("child"' not in joined:
                 return '```repl\ndone("c")\n```'
             if "READY" not in joined:
                 return "```repl\nprint('READY')\n```"
-            if 'delegate("child"' not in joined:
+            if 'rlm_delegate("child"' not in joined:
                 return (
                     "```repl\n"
-                    'h = delegate("child", "child task", "")\n'
-                    "results = yield wait(h)\n"
+                    'h = rlm_delegate("child", "child task", "")\n'
+                    "results = yield rlm_wait(h)\n"
                     'done("p:" + results[0])\n'
                     "```"
                 )
@@ -382,8 +382,8 @@ class _DeepChainLLM(LLMClient):
         if depth < self.max_child_depth:
             return (
                 "```repl\n"
-                'h = delegate("child", "go deeper", "")\n'
-                "results = yield wait(h)\n"
+                'h = rlm_delegate("child", "go deeper", "")\n'
+                "results = yield rlm_wait(h)\n"
                 'done(AGENT_ID + "->" + results[0])\n'
                 "```"
             )
@@ -436,13 +436,13 @@ def test_depth_five_mixed_branching_tree():
                 return '```repl\ndone("leaf:" + AGENT_ID)\n```'
             n = self.fanouts[depth]
             delegations = "\n".join(
-                f'h{i} = delegate("c{i}", "go", "")' for i in range(n)
+                f'h{i} = rlm_delegate("c{i}", "go", "")' for i in range(n)
             )
             handles = ", ".join(f"h{i}" for i in range(n))
             return (
                 "```repl\n"
                 f"{delegations}\n"
-                f"results = yield wait({handles})\n"
+                f"results = yield rlm_wait({handles})\n"
                 'done(AGENT_ID + "(" + ",".join(results) + ")")\n'
                 "```"
             )
@@ -480,8 +480,8 @@ def test_each_step_advances_runnable_agents_once():
             if depth < 2:
                 return (
                     "```repl\n"
-                    'h = delegate("c", "deeper", "")\n'
-                    "results = yield wait(h)\n"
+                    'h = rlm_delegate("c", "deeper", "")\n'
+                    "results = yield rlm_wait(h)\n"
                     'done("d" + str(' + str(depth) + ') + ":" + results[0])\n'
                     "```"
                 )
@@ -503,7 +503,7 @@ def test_each_step_advances_runnable_agents_once():
 
 
 def test_orphan_delegate_records_error_node():
-    """``delegate(...)`` without ``yield wait(...)`` records an ErrorOutput."""
+    """``rlm_delegate(...)`` without ``yield rlm_wait(...)`` records an ErrorOutput."""
 
     class _OrphanThenDone(LLMClient):
         def __init__(self):
@@ -512,7 +512,7 @@ def test_orphan_delegate_records_error_node():
         def chat(self, messages, *args, **kwargs):
             self.calls += 1
             if self.calls == 1:
-                return '```repl\ndelegate("c", "leaf task", "")\n```'  # no yield wait
+                return '```repl\nrlm_delegate("c", "leaf task", "")\n```'  # no yield wait
             return '```repl\ndone("recovered")\n```'
 
     agent = RLMFlow(
@@ -532,7 +532,7 @@ def test_max_depth_refusal_when_child_would_exceed_limit():
                 return '```repl\ndone("done")\n```'
             return (
                 "```repl\n"
-                'r = delegate("c", "go", "")\n'
+                'r = rlm_delegate("c", "go", "")\n'
                 'done(r if isinstance(r, str) else "ok")\n'
                 "```"
             )
@@ -580,8 +580,8 @@ def test_terminate_marks_every_running_agent():
                 return "```repl\ny = 2\n```"
             return (
                 "```repl\n"
-                'h = delegate("child", "child task", "")\n'
-                "r = yield wait(h)\n"
+                'h = rlm_delegate("child", "child task", "")\n'
+                "r = yield rlm_wait(h)\n"
                 "done(r[0])\n"
                 "```"
             )
@@ -679,13 +679,13 @@ def test_resume_node_does_not_inject_child_result_into_prompt():
             if "child task" in prompt:
                 return f'```repl\ndone("{secret}")\n```'
             prior = "\n".join(m["content"] for m in messages if m.get("role") == "assistant")
-            if "yield wait" in prior:
+            if "yield rlm_wait" in prior:
                 self.resume_messages = messages
                 return '```repl\ndone("parent:" + results[0])\n```'
             return (
                 "```repl\n"
-                'h = delegate("child", "child task", "")\n'
-                "results = yield wait(h)\n"
+                'h = rlm_delegate("child", "child task", "")\n'
+                "results = yield rlm_wait(h)\n"
                 'marker = "RESUME_" + "STDOUT_MARKER"\n'
                 "print(marker)\n"
                 "```"
@@ -716,14 +716,14 @@ def test_repl_state_persists_across_resume():
             if "child task" in prompt:
                 return '```repl\ndone("c")\n```'
             prior = "\n".join(m["content"] for m in messages if m.get("role") == "assistant")
-            if "yield wait" in prior:
+            if "yield rlm_wait" in prior:
                 # Resume turn — ``stash`` should still be in scope from prior block.
                 return '```repl\ndone("p:" + stash)\n```'
             return (
                 "```repl\n"
                 'stash = "remembered"\n'
-                'h = delegate("c", "child task", "")\n'
-                "yield wait(h)\n"
+                'h = rlm_delegate("c", "child task", "")\n'
+                "yield rlm_wait(h)\n"
                 "```"
             )
 
@@ -745,8 +745,8 @@ def test_each_child_gets_its_own_runtime_session():
                 return '```repl\nprint(AGENT_ID, DEPTH)\ndone("child")\n```'
             return (
                 "```repl\n"
-                'h = delegate("child", "child task", "")\n'
-                "results = yield wait(h)\n"
+                'h = rlm_delegate("child", "child task", "")\n'
+                "results = yield rlm_wait(h)\n"
                 "done(results[0])\n"
                 "```"
             )
@@ -781,8 +781,8 @@ def test_spawn_child_is_overridable():
                 return '```repl\ndone("c")\n```'
             return (
                 "```repl\n"
-                'h = delegate("c", "child task", "")\n'
-                "r = yield wait(h)\n"
+                'h = rlm_delegate("c", "child task", "")\n'
+                "r = yield rlm_wait(h)\n"
                 'done("p:" + r[0])\n'
                 "```"
             )
@@ -807,7 +807,7 @@ def test_spawn_child_can_refuse_via_returning_string():
                 return '```repl\ndone("ok")\n```'
             return (
                 "```repl\n"
-                'r = delegate("c", "go", "")\n'
+                'r = rlm_delegate("c", "go", "")\n'
                 "done(r)\n"
                 "```"
             )
@@ -826,8 +826,8 @@ def test_delegate_passes_child_context_payload(tmp_path):
                 return '```repl\ndone(CONTEXT.read())\n```'
             return (
                 "```repl\n"
-                'h = delegate("child", "child task", "child payload")\n'
-                "r = yield wait(h)\n"
+                'h = rlm_delegate("child", "child task", "child payload")\n'
+                "r = yield rlm_wait(h)\n"
                 "done(r[0])\n"
                 "```"
             )
@@ -847,8 +847,8 @@ def test_model_routing_is_stored_on_child_agent_meta():
                 return '```repl\ndone("c")\n```'
             return (
                 "```repl\n"
-                'h = delegate("c", "child", "", model="fast")\n'
-                "r = yield wait(h)\n"
+                'h = rlm_delegate("c", "child", "", model="fast")\n'
+                "r = yield rlm_wait(h)\n"
                 'done(r[0])\n'
                 "```"
             )

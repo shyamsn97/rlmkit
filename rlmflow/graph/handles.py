@@ -1,4 +1,4 @@
-"""REPL protocol handles emitted by ``delegate()`` and ``wait()``.
+"""REPL protocol handles emitted by ``rlm_delegate()`` and ``rlm_wait()``.
 
 These are transient objects the engine inspects to decide whether to
 suspend an agent. They are not stored on the graph; they live alongside
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 
 class ChildHandle:
-    """Opaque reference returned by ``delegate()``, passed to ``wait()``."""
+    """Opaque reference returned by ``rlm_delegate()``, passed to ``rlm_wait()``."""
 
     def __init__(self, agent_id: str) -> None:
         self.agent_id = agent_id
@@ -26,7 +26,7 @@ class ChildHandle:
 
 
 class WaitRequest:
-    """Yielded by ``wait()`` to request suspension until children finish."""
+    """Yielded by ``rlm_wait()`` to request suspension until children finish."""
 
     def __init__(self, agent_ids: list[str]) -> None:
         self.agent_ids = agent_ids

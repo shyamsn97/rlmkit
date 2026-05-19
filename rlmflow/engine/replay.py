@@ -5,7 +5,7 @@ When the engine is attached to a freshly-loaded workspace (via
 graph contains every :class:`~rlmflow.graph.SupervisingOutput` that
 was recorded — but the live Python generator that yielded inside
 the runtime is gone. This module handles re-running the action
-code with ``delegate`` in *replay mode* (returning existing child
+code with ``rlm_delegate`` in *replay mode* (returning existing child
 handles instead of spawning new ones) so the generator pauses again
 at the same yield. The regular resume path then takes over.
 
@@ -34,8 +34,8 @@ def can_resume(graph: Graph, supervising: SupervisingOutput) -> bool:
     ``graph`` is the supervising agent's sub-graph (children are inside).
     """
     if not supervising.waiting_on:
-        # Recovery for older / bad runs that wrote ``yield wait()`` with
-        # no handles. New calls are rejected in ``wait()`` before this
+        # Recovery for older / bad runs that wrote ``yield rlm_wait()`` with
+        # no handles. New calls are rejected in ``rlm_wait()`` before this
         # node ever exists.
         return True
     for aid in supervising.waiting_on:
@@ -107,7 +107,7 @@ def replay_to_yield(
     the same yield as ``target``.
 
     Used after a fork or cold start, when the engine has the graph
-    but not the live generator frame. ``delegate`` runs in replay
+    but not the live generator frame. ``rlm_delegate`` runs in replay
     mode (returns existing child handles instead of spawning), so
     the code reaches each yield with the same ``WaitRequest`` the
     original run produced. We verify the match at every yield and

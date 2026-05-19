@@ -7,15 +7,15 @@ passes the new source to `run_experiment(source)`, and decides
 what to try next. A separate `evaluate.py` — which the agent does
 not see — imports that function and prints `score: <float>`. To
 run trials in parallel, the agent uses RLMFlow's normal
-`delegate` / `wait`.
+`rlm_delegate` / `rlm_wait`.
 
 ```
 turn 0:
  → run_baseline()                         # one-shot, idempotent
 turn 1+:
  → fresh = pick_slugs(get_runs())
- → handles = [delegate(slug, hyp) for slug, hyp in fresh]
- → results = (yield wait(*handles))       # children call run_experiment
+ → handles = [rlm_delegate(slug, hyp) for slug, hyp in fresh]
+ → results = (yield rlm_wait(*handles))   # children call run_experiment
  → ...
  → done(<summary>)
 ```
@@ -29,6 +29,12 @@ history/<n>_<slug>.py` from the workspace root.
 `run_experiment`: it gets its own one-shot `run_baseline()` tool
 which evaluates the original `solution.py` once and records
 `description='baseline'`.
+
+Archived candidates are the research record. Prompt children to include
+module, target-function, and helper docstrings that explain the strategy,
+validity invariants, inputs/outputs, units, and non-obvious constants.
+This makes `history/<n>_<slug>.py` useful when the parent resumes or when
+a human reviews why one idea beat another.
 
 ## Layout
 
@@ -82,7 +88,11 @@ A target is a directory containing exactly three files:
   scope so the driver can preflight-check candidate sources for
   the right function name and signature.
 - `program.md` — the agent's brief (task description + how to use
-  `run_experiment` / `run_baseline` / `delegate`).
+  `run_experiment` / `run_baseline` / `rlm_delegate`). Include a short
+  docstring rubric for candidate sources: module docstring for the
+  strategy, target-function docstring for the algorithm and invariants,
+  helper docstrings for inputs/outputs/units, and comments for magic
+  constants.
 
 ```bash
 python examples/autoresearch/autoresearch.py \

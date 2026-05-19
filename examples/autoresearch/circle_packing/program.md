@@ -77,8 +77,8 @@ The parent plans research rounds. It should:
 2. Run `run_baseline()` once.
 3. Read `get_runs()` and identify the current best scored trial.
 4. Choose several independent, idea-named hypotheses.
-5. Spawn one child per hypothesis with `delegate(slug, query, context)`.
-6. `yield wait(*handles)`.
+5. Spawn one child per hypothesis with `rlm_delegate(slug, query, context)`.
+6. `yield rlm_wait(*handles)`.
 7. On resume, inspect the ledger. Spawn another small batch with
    fresh slugs if useful; otherwise `done(...)`.
 
@@ -124,6 +124,30 @@ Each child gets a slug and one hypothesis. It should:
 9. `done(...)` with JSON containing at least the slug, score,
    returncode, and archived source path.
 
+Children must write **thorough docstrings** in every candidate source.
+Future readers (and the parent on resume) only see the archived `.py`
+file, so the code must explain itself. Documentation quality is part of
+the trial: if two ideas score similarly, prefer the one whose archived
+source makes the strategy easiest to audit. Required:
+
+- A module-level docstring naming the strategy, the high-level idea,
+  any reference (e.g. "Packomania n=26 seed"), and the expected score
+  band.
+- A docstring on `solve()` describing the algorithm step by step:
+  initialization, the main loop, the termination condition, and how
+  `centers` and `radii` end up valid.
+- A docstring on every helper function explaining inputs, outputs,
+  units (e.g. "radius in unit-square coordinates"), and any invariant
+  it preserves (non-overlap, in-bounds, monotone improvement, etc.).
+- Inline comments for any non-obvious constant (ring counts, learning
+  rates, annealing schedules, magic offsets). A bare number with no
+  comment is a bug.
+
+If the function name does not make the behavior obvious from one
+glance, the docstring is too short. Prefer a few extra lines of prose
+over clever one-liners. On `_fixN` retries, keep docstrings accurate:
+do not leave a stale description from the previous algorithm.
+
 Children must **not** write `solution.py` directly. Children run in
 parallel and share one workspace; direct writes would clobber other
 children. Always pass your candidate as a source string to
@@ -133,7 +157,49 @@ children. Always pass your candidate as a source string to
 
 ```python
 source = '''
+"""Hexagonal lattice seed + radius inflation for n=26 circle packing.
+
+Strategy
+--------
+1. Place 26 centers on a hexagonal lattice clipped to the unit square.
+2. For each center, set its radius to the maximum value that keeps it
+   inside [0, 1]^2 and non-overlapping with every previously sized
+   circle (greedy feasible radius).
+3. Return the resulting (centers, radii).
+
+Expected score band: ~1.8-2.1. Intended as a clean baseline to beat
+with local polish in a follow-up trial.
+"""
+
+def _hex_lattice(n, rows, cols):
+    """Return the first `n` points of a `rows` x `cols` hex lattice,
+    rescaled into the unit square with a small margin.
+
+    Points are ordered row-major. Odd rows are offset by half a column
+    width, which is the defining property of a hex lattice and gives
+    tighter packing than a square grid.
+    """
+    ...
+
+def _feasible_radius(p, placed_centers, placed_radii):
+    """Largest radius for a circle at `p` that stays inside [0,1]^2
+    and does not overlap any already-placed circle.
+
+    Returns 0.0 if `p` is already inside another disk.
+    """
+    ...
+
 def solve():
+    """Build a valid (centers, radii) for n=26.
+
+    Steps:
+      - generate hex lattice candidates
+      - assign each a greedy feasible radius (see `_feasible_radius`)
+      - return arrays with shapes (26, 2) and (26,)
+
+    Postconditions enforced by the asserts below: correct shapes,
+    radii non-negative, centers in [0, 1]^2.
+    """
     import numpy as np
     N = 26
     centers = np.zeros((N, 2))
@@ -145,6 +211,9 @@ def solve():
 '''
 r = run_experiment(source, description="short_idea_slug")
 ```
+
+The skeleton above is the **minimum** docstring density. A real trial
+should have more, not less.
 
 ## Good Retry Pattern
 

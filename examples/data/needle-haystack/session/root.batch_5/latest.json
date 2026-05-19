@@ -1,8 +1,0 @@
-{
-  "agent_id": "root.batch_5",
-  "latest_node_id": "n_78e844d1c84d",
-  "seq": 4,
-  "type": "done_output",
-  "terminal": true,
-  "result": "{\"found\": false}"
-}

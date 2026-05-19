@@ -109,7 +109,7 @@ class Runtime(ABC):
         self.tools: dict[str, ToolDef] = {}
         self.proxied: dict[str, Callable] = {}
         # Per-runtime mutable state shared between the engine and any
-        # core tool closures (``done``, ``delegate``) the engine binds to
+        # core tool closures (``done``, ``rlm_delegate``) the engine binds to
         # this runtime. The engine resets this between executions.
         self.env: dict[str, Any] = {}
         # ``True`` while the REPL holds a generator paused at a ``yield``.

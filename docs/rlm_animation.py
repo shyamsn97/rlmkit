@@ -351,7 +351,7 @@ class RLMFlowHero(Scene):
             active_dot = dot
 
         timeline_footer = Text(
-            "workspace · fork · inspect at any node",
+            "replay · fork · inspect at any node",
             font=CODE_FONT,
             font_size=FS_BODY,
             color=WHITE_C,
@@ -403,15 +403,15 @@ class RLMFlowHero(Scene):
             Text(">>> chunks = CONTEXT.split(by='---')", font=CODE_FONT, font_size=FS_CAP, color=Q_C),
             Text(">>> handles = []", font=CODE_FONT, font_size=FS_CAP, color=WHITE_C),
             Text(">>> for i, chunk in enumerate(chunks):", font=CODE_FONT, font_size=FS_CAP, color=WHITE_C),
-            Text("...     h = delegate(f'chunk_{i}', 'analyze', context=chunk)", font=CODE_FONT, font_size=FS_CAP, color=A_C),
+            Text("...     h = rlm_delegate(f'chunk_{i}', 'analyze', context=chunk)", font=CODE_FONT, font_size=FS_CAP, color=A_C),
             Text("...     handles.append(h)", font=CODE_FONT, font_size=FS_CAP, color=A_C),
-            Text(">>> results = yield wait(*handles)", font=CODE_FONT, font_size=FS_CAP, color=S_C),
+            Text(">>> results = yield rlm_wait(*handles)", font=CODE_FONT, font_size=FS_CAP, color=S_C),
             Text(">>> done(combine(results))", font=CODE_FONT, font_size=FS_CAP, color=R_C),
         ).arrange(DOWN, aligned_edge=LEFT, buff=0.13)
         code_lines.move_to(code_box.get_center() + DOWN * 0.12)
 
         code_caption = Text(
-            "every delegate, wait, and result becomes an inspectable graph",
+            "every rlm_delegate, rlm_wait, and result becomes an inspectable graph",
             font=CODE_FONT,
             font_size=FS_CAP,
             color=DIM,

@@ -91,7 +91,7 @@ Strategy for long-context information retrieval:
 
 1. Split the context into chunks (e.g., by paragraphs or fixed character windows with some overlap)
 2. Write a prompt describing what to look for, then append it to each chunk to create a list of prompts
-3. Call delegate(name, query) once per chunk, then `yield wait(*handles)` to scan chunks in parallel
+3. Call rlm_delegate(name, query) once per chunk, then `yield rlm_wait(*handles)` to scan chunks in parallel
 4. Aggregate the relevant findings from the responses
 </env_tips>"""
 
@@ -112,7 +112,7 @@ Task metadata:
 
 Tools:
 - read_file, read_lines, line_count, list_files, grep, ls
-- delegate(name, query) and yield wait(*handles)
+- rlm_delegate(name, query) and yield rlm_wait(*handles)
 
 Question:
 {question}

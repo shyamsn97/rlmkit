@@ -46,21 +46,21 @@ For example, an agent that delegates two children and combines their
 results writes one REPL block like this:
 
 ```python
-h1 = delegate("search", "Find evidence", context=chunk_a)
-h2 = delegate("verify", "Check the answer", context=chunk_b)
-results = yield wait(h1, h2)
+h1 = rlm_delegate("search", "Find evidence", context=chunk_a)
+h2 = rlm_delegate("verify", "Check the answer", context=chunk_b)
+results = yield rlm_wait(h1, h2)
 done(combine(results))
 ```
 
-`yield wait(...)` is a real Python generator suspension point. Each
+`yield rlm_wait(...)` is a real Python generator suspension point. Each
 REPL block is wrapped in a synthetic generator and driven by the
 engine via `send()`:
 
 ```python
 def __rlm_gen__():
-    h1 = delegate("search", "...", context=chunk_a)
-    h2 = delegate("verify", "...", context=chunk_b)
-    results = yield wait(h1, h2)   # ← suspend here
+    h1 = rlm_delegate("search", "...", context=chunk_a)
+    h2 = rlm_delegate("verify", "...", context=chunk_b)
+    results = yield rlm_wait(h1, h2)   # ← suspend here
     done(combine(results))
 ```
 
@@ -74,13 +74,13 @@ gen.send(results)                  # resume; `results` is now the list
 ```
 
 The REPL is stateful across blocks, so the next LLM turn can still
-see `h1`, `h2`, `results`. Only `yield wait(...)` is special — any
+see `h1`, `h2`, `results`. Only `yield rlm_wait(...)` is special — any
 other top-level yield is pumped through and ignored:
 
 ```python
-yield wait(h)        # suspend, then resume with children's results
+yield rlm_wait(h)    # suspend, then resume with children's results
 yield 42             # discarded, immediately resumed
-yield handle         # discarded (forgot to wrap in wait()? no result)
+yield handle         # discarded (forgot to wrap in rlm_wait()? no result)
 ```
 
 See [`docs/internals.md`](docs/internals.md) for the full protocol.
@@ -90,7 +90,7 @@ per step):
 
 ```text
 UserQuery(root)
-  -> LLMAction -> LLMOutput(code="delegate(search) + delegate(verify); wait(...)")
+  -> LLMAction -> LLMOutput(code="rlm_delegate(search) + rlm_delegate(verify); rlm_wait(...)")
   -> ExecAction -> SupervisingOutput(waiting_on=[root.search, root.verify])
       -> UserQuery(root.search)  -> ... -> DoneOutput(root.search)
       -> UserQuery(root.verify)  -> ... -> DoneOutput(root.verify)
@@ -123,9 +123,29 @@ This example is all you need for a simple and interpretable recursive coding age
 
 ```python
 from rlmflow import OpenAIClient, RLMConfig, RLMFlow, Workspace
+from rlmflow.prompts.default import DEFAULT_BUILDER
 from rlmflow.runtime.local import LocalRuntime
 from rlmflow.tools import FILE_TOOLS
 from rlmflow.utils.viewer import open_viewer
+
+# A small prompt extension layering coding strategy guardrails on top of
+# the default protocol prompt. See examples/coding-agent/prompt.py.
+CODING_BUILDER = DEFAULT_BUILDER.section(
+    "coding",
+    """
+- **Plan ownership before writing.** For non-trivial coding tasks, first make a compact manifest: file/component owners, shared interfaces, dependencies, and acceptance checks. The parent plans boundaries; children own implementation details.
+- **Keep plans lightweight.** Give children enough direction to own their piece without pre-writing the whole file for them.
+- **Bias toward delegation for separable work.** Do small, local tasks directly; when files, components, chunks, or checks can be owned independently, delegate them before implementing inline.
+- **Honor the requested artifact.** If the user asks for a component, app, CLI, test, script, library, config, migration, or data file, produce that artifact's expected files and behavior. Do not substitute a generic page, placeholder, README, template, or unrelated scaffold; preserve the requested runtime/API/contract in verification.
+- **Delegate focused artifact work.** Give each child one bounded file/component/chunk/check with a clear expected output. File-writing children must call `write_file(...)`, verify that file from disk, and return a short status.
+- **Pass only needed context.** Give children a spec, a relevant `CONTEXT.lines(...)` slice, or `""`; don't dump your whole view unless necessary.
+- **Combine from disk.** After children finish, read the files they wrote and verify the shared contract.
+- **Run real checks.** Syntax-check, run tests, or smoke-test the entry point before `done()` when the runtime can.
+- **Repair surgically.** After an exception, `ls`/`read_file` first; fix the broken file instead of rewriting or re-delegating everything.
+""".strip(),
+    title="Coding",
+    after="builtins",
+)
 
 workspace = Workspace.create("./myproject")
 runtime = LocalRuntime(workspace=workspace)
@@ -150,6 +170,7 @@ agent = RLMFlow(
             "description": "Cheap model for smaller subtasks",
         },
     },
+    prompt_builder=CODING_BUILDER,
 )
 
 query = "Build a python text-based adventure game with combat and inventory."
@@ -594,7 +615,7 @@ in [`docs/internals.md`](docs/internals.md).
 - [Positioning](docs/positioning.md): when to use rlmflow vs
   rlm-minimal, ypi, LangGraph, CrewAI, AutoGen, SWE-agent, Aider.
 - [Control](docs/control.md): step loop, workspace resume, rewind,
-  forks, `CONTEXT.read()` / slices, `delegate(name, query, context)`,
+  forks, `CONTEXT.read()` / slices, `rlm_delegate(name, query, context)`,
   inline-first strategy, custom tools.
 - [Observability](docs/observability.md): querying the `Graph`,
   workspace layout, export helpers, live tree, gantt, topology

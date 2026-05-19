@@ -1,7 +1,7 @@
-"""Engine-bound built-in tools: ``done``, ``wait``, ``delegate``.
+"""Engine-bound built-in tools: ``done``, ``rlm_wait``, ``rlm_delegate``.
 
 Each tool is a Python closure created per-runtime and bound to a specific
-``runtime.env`` dict (and, for ``delegate``, a ``spawn_child`` callable
+``runtime.env`` dict (and, for ``rlm_delegate``, a ``spawn_child`` callable
 that creates new sub-agents). They are registered through the normal
 :meth:`Runtime.register_tool` path — ``LocalRuntime`` injects them
 straight into the REPL namespace; remote runtimes expose proxy stubs that
@@ -42,23 +42,23 @@ def make_wait():
     """Closure that packages :class:`ChildHandle`s into a :class:`WaitRequest`."""
 
     @tool("Wait for delegated children. Must be called with `yield`.")
-    def wait(*handles: ChildHandle) -> WaitRequest:
+    def rlm_wait(*handles: ChildHandle) -> WaitRequest:
         if not handles:
-            raise ValueError("wait() requires at least one child handle")
+            raise ValueError("rlm_wait() requires at least one child handle")
         bad = [(i, h) for i, h in enumerate(handles) if not isinstance(h, ChildHandle)]
         if bad:
             details = "; ".join(
                 f"handles[{i}] is {type(h).__name__}: {h!r}" for i, h in bad
             )
             raise TypeError(
-                f"wait() got non-handle arguments — `delegate()` likely refused "
-                f"those calls and returned a refusal string instead of a "
+                f"rlm_wait() got non-handle arguments — `rlm_delegate()` likely "
+                f"refused those calls and returned a refusal string instead of a "
                 f"ChildHandle. Read the string(s), fix the cause (e.g. unknown "
                 f"`model=` key, max depth reached), and retry. {details}"
             )
         return WaitRequest(agent_ids=[h.agent_id for h in handles])
 
-    return wait
+    return rlm_wait
 
 
 def make_delegate(
@@ -72,7 +72,7 @@ def make_delegate(
     Passing the callable instead of the whole engine keeps this
     module decoupled from :class:`RLMFlow`.
 
-    In *replay mode* (``env['_REPLAY_QUEUE']`` is a list), ``delegate``
+    In *replay mode* (``env['_REPLAY_QUEUE']`` is a list), ``rlm_delegate``
     does not spawn a new child — it pops the next expected agent id
     off the queue and returns a :class:`ChildHandle` to it. This lets
     the engine re-execute action code after a fork or cold start to
@@ -81,7 +81,7 @@ def make_delegate(
     """
 
     @tool("Delegate a subtask to a named child agent.")
-    def delegate(
+    def rlm_delegate(
         name: str,
         query: str,
         context: str,
@@ -93,7 +93,7 @@ def make_delegate(
         if replay_queue is not None:
             if not replay_queue:
                 return (
-                    f"[replay error: no expected child for delegate({name!r}). "
+                    f"[replay error: no expected child for rlm_delegate({name!r}). "
                     "Recorded trajectory diverges from the action code.]"
                 )
             child_aid = replay_queue.pop(0)
@@ -113,7 +113,7 @@ def make_delegate(
         env.setdefault("DELEGATED", []).append(handle.agent_id)
         return handle
 
-    return delegate
+    return rlm_delegate
 
 
 __all__ = ["DoneSignal", "make_delegate", "make_done", "make_wait"]

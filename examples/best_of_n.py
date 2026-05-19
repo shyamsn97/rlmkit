@@ -33,9 +33,9 @@ QUERY = (
 ROOT_REPLY = (
     "```repl\n"
     f"fruits = {[name for name, _ in FRUITS]!r}\n"
-    "handles = [delegate(f'classify_{name}', "
+    "handles = [rlm_delegate(f'classify_{name}', "
     "f\"Classify {name} as 'citrus' or 'not_citrus'.\", '') for name in fruits]\n"
-    "results = yield wait(*handles)\n"
+    "results = yield rlm_wait(*handles)\n"
     "done(', '.join(f'{name}={r}' for name, r in zip(fruits, results)))\n"
     "```"
 )

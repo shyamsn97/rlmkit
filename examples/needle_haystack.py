@@ -118,8 +118,7 @@ def main():
         f"There are {args.num_files} text files in the haystack/ directory "
         f"(haystack/file_0000.txt to haystack/file_{args.num_files - 1:04d}.txt). "
         f"Exactly one line across all files says 'The magic number is XXXXXXX'. "
-        f"Find it. There are too many files to grep all at once — "
-        f"split them into batches and delegate each batch to a sub-agent."
+        f"Find it. There are too many files to grep all at once - so you should split them into batches."
     )
 
     if args.no_viz:

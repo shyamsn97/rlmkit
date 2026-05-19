@@ -145,7 +145,7 @@ class ExecOutput(CodeObservation):
 
 
 class SupervisingOutput(CodeObservation):
-    """The runtime paused at a ``yield wait(...)``.
+    """The runtime paused at a ``yield rlm_wait(...)``.
 
     The parent agent's runtime is suspended and the scheduler is
     gating on the children listed in ``waiting_on``. Once they all

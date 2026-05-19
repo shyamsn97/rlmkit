@@ -1,10 +1,10 @@
 """Fork-and-resume from a ``SupervisingOutput``.
 
-Covers the scenario where a parent agent has yielded inside ``wait(...)``,
+Covers the scenario where a parent agent has yielded inside ``rlm_wait(...)``,
 its children have run to completion, the workspace is forked (or the
 process restarted), and a fresh ``RLMFlow`` is asked to continue. The
 new engine has no live generator on its runtime — it has to replay the
-parent's action code with ``delegate`` in replay mode to rebuild the
+parent's action code with ``rlm_delegate`` in replay mode to rebuild the
 suspended generator at the right yield, then drop into the normal
 resume path.
 """
@@ -66,8 +66,8 @@ def _parent_supervising_with_terminal_children(graph: Graph) -> bool:
 
 PARENT_REPLY_SINGLE = (
     "```repl\n"
-    'h = delegate("worker", "do thing", "")\n'
-    "results = yield wait(h)\n"
+    'h = rlm_delegate("worker", "do thing", "")\n'
+    "results = yield rlm_wait(h)\n"
     'done("got: " + results[0])\n'
     "```"
 )
@@ -172,10 +172,10 @@ def test_fork_lets_us_swap_a_child_result_and_re_resume(tmp_path: Path):
 
 PARENT_REPLY_MULTI = (
     "```repl\n"
-    'h = delegate("a", "step a", "")\n'
-    "first = yield wait(h)\n"
-    'v = delegate("b", "step b", "")\n'
-    "second = yield wait(v)\n"
+    'h = rlm_delegate("a", "step a", "")\n'
+    "first = yield rlm_wait(h)\n"
+    'v = rlm_delegate("b", "step b", "")\n'
+    "second = yield rlm_wait(v)\n"
     'done("p:" + first[0] + "+" + second[0])\n'
     "```"
 )

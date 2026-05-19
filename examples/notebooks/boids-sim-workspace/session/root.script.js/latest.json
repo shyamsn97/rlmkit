@@ -1,8 +1,0 @@
-{
-  "agent_id": "root.script.js",
-  "latest_node_id": "n_cd9d242a319b",
-  "seq": 4,
-  "type": "done_output",
-  "terminal": true,
-  "result": "Wrote script.js per contract (see script.js)."
-}

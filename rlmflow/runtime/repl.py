@@ -106,7 +106,7 @@ def _has_top_level_yield(tree: ast.AST) -> bool:
     block's top level (i.e. outside every nested function / async
     function / lambda / generator expression / class body).
 
-    Why "any", not "yield wait(...)"? Because this question is purely
+    Why "any", not "yield rlm_wait(...)"? Because this question is purely
     about Python *compilation*, not about the agent suspension
     protocol. ``yield`` at module level is a ``SyntaxError`` in
     plain Python — it has to live inside a function. So if the
@@ -115,7 +115,7 @@ def _has_top_level_yield(tree: ast.AST) -> bool:
     accept it. If there is no top-level yield, we exec the code
     directly. That's the only thing this function decides.
 
-    The separate question — "did the block yield a ``wait(*handles)``
+    The separate question — "did the block yield a ``rlm_wait(*handles)``
     request, meaning suspend the agent, or did it yield something
     else, meaning treat it as a plain Python generator yield" — is
     handled later in :meth:`REPL.advance`. Only ``WaitRequest``
@@ -126,7 +126,7 @@ def _has_top_level_yield(tree: ast.AST) -> bool:
 
         yield                  # bare yield at top level
         yield 1                # any value at top level
-        yield wait(h)          # the engine-suspension case
+        yield rlm_wait(h)      # the engine-suspension case
         x = yield 5            # yield as expression
         for h in hs: yield h   # inside top-level control flow
 
@@ -365,7 +365,7 @@ class REPL:
         """Drive the generator. Suspend only on ``WaitRequest`` yields.
 
         The REPL only treats a yield as suspension when its value is a
-        :class:`WaitRequest` (returned by ``wait(*handles)``). Any other
+        :class:`WaitRequest` (returned by ``rlm_wait(*handles)``). Any other
         yielded value is treated like a normal Python generator yield —
         the engine just pumps the generator forward by sending ``None``
         back. This keeps generic ``yield`` usage in REPL code working

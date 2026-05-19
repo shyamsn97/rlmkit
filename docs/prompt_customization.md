@@ -2,7 +2,7 @@
 
 `RLMFlow` builds a system prompt from named sections. Most customization should
 derive from the default builder instead of replacing the whole prompt, because
-the default includes the REPL protocol, `delegate` / `wait` rules, `CONTEXT`,
+the default includes the REPL protocol, `rlm_delegate` / `rlm_wait` rules, `CONTEXT`,
 `SESSION`, and examples that keep recursive execution well-formed.
 
 Use full replacement only when you want to own that entire protocol yourself.
@@ -115,11 +115,11 @@ prompt = DEFAULT_BUILDER.section(
 
 ### Tune Delegation Behavior
 
-The `strategy`, `recursion`, and `guardrails` sections have the biggest effect
+The `strategy`, `builtins`, and `guardrails` sections have the biggest effect
 on when the agent delegates and how it waits.
 
 ```python
-from rlmflow.prompts.default import DEFAULT_BUILDER, RECURSION_TEXT
+from rlmflow.prompts.default import BUILTINS_TEXT, DEFAULT_BUILDER
 
 prompt = (
     DEFAULT_BUILDER
@@ -132,19 +132,19 @@ prompt = (
    child per independent part.
 2. Give every child an explicit contract: filenames, signatures, output schema,
    and required checks.
-3. After `yield wait(...)`, verify the combined artifact in a fresh turn before
+3. After `yield rlm_wait(...)`, verify the combined artifact in a fresh turn before
    `done()`.
 """,
         title="Strategy",
     )
-    .section("recursion", RECURSION_TEXT, title="Recursion")
+    .section("builtins", BUILTINS_TEXT, title="Builtins")
 )
 ```
 
 ### Remove A Section
 
 You can remove sections, but be careful with protocol-heavy sections like
-`repl`, `recursion`, `context`, and `session`.
+`repl` and `builtins`.
 
 ```python
 prompt = DEFAULT_BUILDER.remove("core_examples")
@@ -201,7 +201,7 @@ You are a Python REPL agent.
 )
 ```
 
-This is the most fragile option. If the prompt omits `delegate`, `wait`,
+This is the most fragile option. If the prompt omits `rlm_delegate`, `rlm_wait`,
 `CONTEXT`, `SESSION`, or the `done(...)` rule, the model will not reliably use
 those features.
 
@@ -254,24 +254,24 @@ class MyFlow(RLMFlow):
 
 ## Child-Specific Prompts
 
-The easiest way to steer a child is the query you pass to `delegate(...)`.
+The easiest way to steer a child is the query you pass to `rlm_delegate(...)`.
 Use the global prompt for stable behavior and use child queries for local
 contracts.
 
 ```python
 handles = [
-    delegate(
+    rlm_delegate(
         "api",
         "Implement src/api.py. Return ONLY JSON {\"files\": [str], \"checks\": [str]}.",
         api_spec,
     ),
-    delegate(
+    rlm_delegate(
         "tests",
         "Implement tests for src/api.py. Return ONLY JSON {\"files\": [str], \"checks\": [str]}.",
         test_spec,
     ),
 ]
-results = yield wait(*handles)
+results = yield rlm_wait(*handles)
 ```
 
 If every child of a flow needs a different system prompt, use a subclass and
@@ -284,15 +284,12 @@ The default builder currently uses these sections, in order:
 | Section | Purpose |
 | --- | --- |
 | `role` | Agent identity and high-level job. |
-| `repl` | Required response protocol, `done(...)`, and execution rules. |
-| `strategy` | How to size up, decide, delegate, verify, and finish. |
+| `repl` | Required response protocol and execution rules. |
+| `builtins` | `CONTEXT`, `SESSION`, `rlm_delegate(...)`, `yield rlm_wait(...)`, and `done(...)`. |
 | `tools` | Runtime-generated tool list. |
-| `context` | `CONTEXT` API. |
-| `recursion` | `delegate(...)`, `yield wait(...)`, and child resume behavior. |
-| `session` | `SESSION` API for reading sibling/parent transcripts. |
 | `guardrails` | Behavioral constraints. |
 | `core_examples` | Concrete REPL patterns. |
 | `status` | Runtime-generated agent id, depth, and config status. |
 
 For most use cases, replace `role`, add one domain section, and leave `repl`,
-`context`, `recursion`, `session`, and `status` intact.
+`builtins`, `tools`, and `status` intact.

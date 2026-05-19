@@ -36,8 +36,8 @@ class _DelegatingLLM(LLMClient):
 
     ROOT = (
         "```repl\n"
-        "h = delegate('child', 'do the thing', '')\n"
-        "results = yield wait(h)\n"
+        "h = rlm_delegate('child', 'do the thing', '')\n"
+        "results = yield rlm_wait(h)\n"
         "done('root:' + results[0])\n"
         "```"
     )
@@ -219,7 +219,7 @@ def test_viz_helpers_accept_workspace_and_path(tmp_path):
 
     assert "tok over" in token_sparkline(workspace)
     assert "## Result" in report_md(workspace.root)
-    assert "delegate('child', 'do the thing', '')" in code_log(workspace.root)
+    assert "rlm_delegate('child', 'do the thing', '')" in code_log(workspace.root)
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")

@@ -7,7 +7,7 @@ import re
 
 
 class OrphanedDelegatesError(RuntimeError):
-    """Raised when delegate() is called without a matching yield wait()."""
+    """Raised when rlm_delegate() is called without a matching yield rlm_wait()."""
 
 
 _REPL_OPEN_RE = re.compile(r"```repl[ \t]*\n")
@@ -57,13 +57,13 @@ def replace_code_block(text: str, new_code: str) -> str:
 
 
 def check_yield_errors(code: str) -> str | None:
-    """Return an error string if any ``wait()`` calls lack ``yield``, else None.
+    """Return an error string if any ``rlm_wait()`` calls lack ``yield``, else None.
 
-    A ``wait(...)`` call is considered yielded if it appears anywhere inside the
-    expression tree of a ``Yield`` node. This permits idiomatic forms like::
+    A ``rlm_wait(...)`` call is considered yielded if it appears anywhere inside
+    the expression tree of a ``Yield`` node. This permits idiomatic forms like::
 
-        results = yield wait(*handles) if handles else []
-        results = yield (wait(h1), wait(h2))
+        results = yield rlm_wait(*handles) if handles else []
+        results = yield (rlm_wait(h1), rlm_wait(h2))
 
     where the syntactic value of the ``Yield`` is an ``IfExp`` / ``Tuple`` /
     parenthesized expression rather than a bare ``Call``.
@@ -80,7 +80,7 @@ def check_yield_errors(code: str) -> str | None:
                 if (
                     isinstance(sub, ast.Call)
                     and isinstance(sub.func, ast.Name)
-                    and sub.func.id == "wait"
+                    and sub.func.id == "rlm_wait"
                 ):
                     yielded.add(id(sub))
 
@@ -89,11 +89,11 @@ def check_yield_errors(code: str) -> str | None:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "wait"
+            and node.func.id == "rlm_wait"
             and id(node) not in yielded
         ):
             errors.append(
-                f"Line {node.lineno}: `wait(...)` must be prefixed with `yield`"
+                f"Line {node.lineno}: `rlm_wait(...)` must be prefixed with `yield`"
             )
 
     return "ERROR: " + "; ".join(errors) if errors else None

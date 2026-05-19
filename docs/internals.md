@@ -227,7 +227,7 @@ def step_exec(self, graph, llm_output):
 ```
 
 `_run_exec` is the long branch that calls into the runtime, handles
-`done(...)`, `delegate(...)` + `yield wait(...)`, orphaned delegates,
+`done(...)`, `rlm_delegate(...)` + `yield rlm_wait(...)`, orphaned delegates,
 and exceptions. It produces exactly one of `ExecOutput`,
 `SupervisingOutput`, `ErrorOutput`, or `DoneOutput`.
 
@@ -242,7 +242,7 @@ observation just like `step_exec`.
 
 ## The REPL `yield` protocol
 
-The engine **only** intercepts top-level `yield wait(*handles)`
+The engine **only** intercepts top-level `yield rlm_wait(*handles)`
 values. Every other `yield` — including nested generators, generator
 expressions, helpers consumed inside the block — is plain Python.
 
@@ -255,11 +255,11 @@ yielded value:
 
 | What's yielded                          | Engine reaction                                    |
 |-----------------------------------------|----------------------------------------------------|
-| `wait(handle, …)` → `WaitRequest`       | **Suspend** the agent until those children settle. |
+| `rlm_wait(handle, …)` → `WaitRequest`       | **Suspend** the agent until those children settle. |
 | Anything else (any value, or bare yield)| **Pump through.** Send `None` back, keep advancing.|
 | `StopIteration`                         | Block done; return captured stdout.                |
 
-The `WaitRequest` returned by `wait(...)` carries the child agent IDs
+The `WaitRequest` returned by `rlm_wait(...)` carries the child agent IDs
 the engine needs to schedule on. Without it the engine has no
 suspension target — so any other yielded value is treated like a
 normal Python generator yield: discard the value, resume immediately.
@@ -316,9 +316,9 @@ print("still running")     # this prints
 ✅ **Suspension:**
 
 ```python
-h1 = delegate("worker", "...")
-h2 = delegate("worker", "...")
-results = yield wait(h1, h2)   # suspends, resumes with results
+h1 = rlm_delegate("worker", "...")
+h2 = rlm_delegate("worker", "...")
+results = yield rlm_wait(h1, h2)   # suspends, resumes with results
 ```
 
 `results` is a list of strings (the children's `done(...)` payloads).
@@ -326,13 +326,13 @@ results = yield wait(h1, h2)   # suspends, resumes with results
 ❌ **Doesn't do what you want:**
 
 ```python
-yield delegate("worker", "...")   # yields a ChildHandle, not a Wait
+yield rlm_delegate("worker", "...")   # yields a ChildHandle, not a Wait
 yield handle                      # same problem.
 ```
 
 These don't crash — they're treated as plain non-Wait yields and
 silently pumped through — but you also won't get a result back.
-**Use `yield wait(handle)`.**
+**Use `yield rlm_wait(handle)`.**
 
 ### Why this design
 
@@ -376,7 +376,7 @@ suspend(result.agent_ids)          # the thing we know how to do
 So:
 
 ```python
-yield wait(h)         # WaitRequest → suspend on h
+yield rlm_wait(h)         # WaitRequest → suspend on h
 yield 42              # int → pump, immediately resume
 yield                 # None → pump, immediately resume
 yield handle          # ChildHandle → pump, immediately resume
@@ -392,12 +392,12 @@ Python generator yield — discard, resume, no engine involvement.
 |-----------------------------------------|---------------------------------------------|-----------------------------------------------------------------------------------------------|
 | Ran to completion (no yield)            | `ExecOutput` (stdout)                       | Single `ExecAction → ExecOutput` pair.                                                        |
 | Top-level non-Wait yields only          | `ExecOutput` (stdout)                       | **Same as above.** Non-Wait yields are invisible to the graph.                                |
-| Top-level `yield wait(h1, h2)`          | `SupervisingOutput(waiting_on=[h1, h2])`    | Agent suspends. Children run. When they finish, a `ResumeAction` resumes.                     |
+| Top-level `yield rlm_wait(h1, h2)`          | `SupervisingOutput(waiting_on=[h1, h2])`    | Agent suspends. Children run. When they finish, a `ResumeAction` resumes.                     |
 | `done(...)` called (any path)           | `DoneOutput`                                | Agent terminates.                                                                             |
 | Exception                               | `ErrorOutput`                               | Surfaces in the next user message as a retry observation.                                     |
 
 **Rule:** non-Wait yields never produce a new graph node. They're
-internal to one `ExecAction`'s execution. Only `yield wait(...)`
+internal to one `ExecAction`'s execution. Only `yield rlm_wait(...)`
 introduces a `SupervisingOutput` and the eventual `ResumeAction`.
 
 ### Implementation
@@ -414,7 +414,7 @@ introduces a `SupervisingOutput` and the eventual `ResumeAction`.
 
 ## Resume semantics
 
-`yield wait(...)` is a Python generator suspension point. It is
+`yield rlm_wait(...)` is a Python generator suspension point. It is
 **not** a request to copy child outputs into the next LLM prompt.
 
 ### The data path
@@ -422,14 +422,14 @@ introduces a `SupervisingOutput` and the eventual `ResumeAction`.
 For code like:
 
 ```python
-handles = [delegate("a", q_a, c_a), delegate("b", q_b, c_b)]
-results = yield wait(*handles)
+handles = [rlm_delegate("a", q_a, c_a), rlm_delegate("b", q_b, c_b)]
+results = yield rlm_wait(*handles)
 print(len(results))
 ```
 
 the flow is:
 
-1. The parent REPL runs until `yield wait(*handles)`.
+1. The parent REPL runs until `yield rlm_wait(*handles)`.
 2. The generator suspends. The assignment to `results` has **not**
    happened yet.
 3. The graph records a `SupervisingOutput(waiting_on=[a, b])`.
@@ -440,7 +440,7 @@ the flow is:
 6. The line becomes equivalent to `results = child_results`.
 7. The same stateful REPL continues and runs `print(len(results))`.
 8. If the resumed code ends without `done(...)` or another
-   `yield wait(...)`, the engine records an `ExecOutput`
+   `yield rlm_wait(...)`, the engine records an `ExecOutput`
    (`resumed_from=[...]`) and the next LLM turn continues in the same
    stateful REPL — variables assigned after the wait are still in
    scope.
@@ -487,15 +487,15 @@ jobs = [
     ("fundamentals", "Research growth, revenue, margins.", contract),
     ("analyst",      "Collect analyst targets.",           contract),
 ]
-handles = [delegate(name, q, c, model="fast") for name, q, c in jobs]
-results = yield wait(*handles)
+handles = [rlm_delegate(name, q, c, model="fast") for name, q, c in jobs]
+results = yield rlm_wait(*handles)
 print(f"got {len(results)} child results")
 ```
 
 Runtime execution:
 
-1. `delegate(...)` creates four child agents.
-2. `yield wait(*handles)` suspends the root generator.
+1. `rlm_delegate(...)` creates four child agents.
+2. `yield rlm_wait(*handles)` suspends the root generator.
 3. The graph records `SupervisingOutput(waiting_on=[...4 ids...])`.
 
 ```
@@ -514,7 +514,7 @@ root.analyst       [0] UserQuery
 ```
 
 Data location: child outputs do not exist yet. Root REPL is suspended
-at `yield wait(*handles)`. `handles` exists in the root REPL.
+at `yield rlm_wait(*handles)`. `handles` exists in the root REPL.
 `results` does not.
 
 #### Step 2 — children run
@@ -549,7 +549,7 @@ child_results = [
 line:
 
 ```python
-results = yield wait(*handles)
+results = yield rlm_wait(*handles)
 ```
 
 continues as if it were `results = child_results`. The same REPL
@@ -622,8 +622,8 @@ root.{identity,valuation,fundamentals,analyst}
 A block can yield twice:
 
 ```python
-h1 = delegate("a", ...);  r1 = yield wait(h1)
-h2 = delegate("b", ...);  r2 = yield wait(h2)
+h1 = rlm_delegate("a", ...);  r1 = yield rlm_wait(h1)
+h2 = rlm_delegate("b", ...);  r2 = yield rlm_wait(h2)
 done(combine(r1, r2))
 ```
 
@@ -635,8 +635,8 @@ times — variables persist.
 
 ```python
 # Block 1
-h = delegate("a", ...)
-yield wait(h)            # block ends right after the yield
+h = rlm_delegate("a", ...)
+yield rlm_wait(h)            # block ends right after the yield
 
 # Block 2
 done("p:" + results[0])
@@ -646,7 +646,7 @@ Same agent, two LLM turns. The first block's `LLMOutput` →
 `ExecAction` → `SupervisingOutput`. After the child settles, the
 resume produces an `ExecOutput`; then the agent runs another LLM
 turn and the second block's code runs in a *fresh* REPL submission
-(but the runtime keeps the same namespace — `delegate`,
+(but the runtime keeps the same namespace — `rlm_delegate`,
 `results`, and any prior assignment are in scope).
 
 ---
@@ -660,7 +660,7 @@ but the live Python generator that yielded inside the runtime is
 gone.
 
 `engine/replay.py::replay_to_yield(graph, target, runtime)` handles
-this. It re-runs the action code with `delegate` in *replay mode*
+this. It re-runs the action code with `rlm_delegate` in *replay mode*
 (returns existing child handles instead of spawning new ones), so the
 generator pauses again at the same yield. The regular resume path
 then takes over.
@@ -675,7 +675,7 @@ def step_after_supervising(self, graph, last):
     runtime = self.inject_env(graph, resume_action)
     if not runtime.suspended:
         # Live generator is gone — process restart, fork, etc.
-        # Replay action code with delegate in replay mode so the
+        # Replay action code with rlm_delegate in replay mode so the
         # generator pauses at the same yield we recorded.
         replay_to_yield(graph, last, runtime)
     # Now the runtime is suspended at the right yield; resume.
@@ -774,7 +774,7 @@ hits    = CONTEXT.grep(r"TODO") # lineno:line rows
 full    = CONTEXT.read()        # full payload
 ```
 
-`delegate(name, query, context)` writes the child's context payload
+`rlm_delegate(name, query, context)` writes the child's context payload
 under `context/<child_id>/context.txt` before the child's first
 `UserQuery` is appended.
 
@@ -805,8 +805,8 @@ Three methods own the lifecycle:
   `PARENT_NODE_ID`, `DONE_RESULT`, `DELEGATED`, plus `CONTEXT` /
   `SESSION` proxies.
 
-`register_tools(runtime)` binds the core `done` / `wait` /
-`delegate` closures to `runtime.env`. The `delegate` closure
+`register_tools(runtime)` binds the core `done` / `rlm_wait` /
+`rlm_delegate` closures to `runtime.env`. The `rlm_delegate` closure
 captures `self.spawn_child` so it can call back into engine state.
 
 See [`runtimes.md`](runtimes.md) for the `Runtime` protocol and
@@ -917,12 +917,12 @@ A few edge cases that crop up in real runs:
 
 ### Orphaned delegates
 
-If a block calls `delegate(...)` but never `yield wait(...)`'s on the
+If a block calls `rlm_delegate(...)` but never `yield rlm_wait(...)`'s on the
 handle, the engine surfaces an `ErrorOutput(error="orphaned_delegates")`
 and re-raises the corresponding exception inside the REPL on the next
 turn so the LLM sees the failure inline. Children that were already
 spawned stay in the graph (their work isn't discarded) but the parent
-has to call `wait(...)` to consume their results.
+has to call `rlm_wait(...)` to consume their results.
 
 ### No code block
 
@@ -973,7 +973,7 @@ if parent.depth >= self.config.max_depth:
     return f"[refused: max depth {self.config.max_depth}] Do this directly."
 ```
 
-The string return is the documented refusal protocol — `delegate(...)`
+The string return is the documented refusal protocol — `rlm_delegate(...)`
 in the REPL gets back a string instead of a `ChildHandle`, so the
 parent's code can detect it (`isinstance(h, str)`) and recover.
 

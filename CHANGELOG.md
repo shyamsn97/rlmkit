@@ -31,6 +31,15 @@ each one is called out under **Breaking** below.
 
 ### Breaking
 
+- **`delegate` / `wait` renamed to `rlm_delegate` / `rlm_wait`.** The
+  two engine-bound REPL tools used names that were too generic and
+  shadowed common identifiers in agent code. They are now namespaced as
+  `rlm_delegate(name, query, context, *, max_iterations=None,
+  model="default")` and `rlm_wait(*handles)`. The default system prompt,
+  built-in examples, error messages (`OrphanedDelegatesError`,
+  refusal strings), and the AST check that enforces `yield` before
+  `wait` all use the new names. Update agent prompts, custom prompt
+  builders, and any test fixtures that script REPL code by hand.
 - **Node taxonomy expanded to a 9-leaf, 4-base-class hierarchy with
   strict obs → action alternation.** Every action is now followed by
   exactly one observation; outputs no longer share a node with the

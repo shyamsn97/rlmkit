@@ -44,6 +44,7 @@ from uuid import uuid4
 from rlmflow.engine.actions import Action, CallLLM, Exec, Resume, act
 from rlmflow.engine.config import RLMConfig
 from rlmflow.engine.replay import can_resume, replay_to_yield, results_for_supervise
+from rlmflow.engine.scheduler import NodeScheduler
 from rlmflow.engine.seq import (
     ROOT_RUNTIME_ID,
     append_node,
@@ -73,7 +74,7 @@ from rlmflow.graph import (
     is_user_query,
 )
 from rlmflow.llm import LLMClient, LLMUsage
-from rlmflow.prompts.default import BASELINE_BUILDER, DEFAULT_BUILDER
+from rlmflow.prompts.default import DEFAULT_BUILDER
 from rlmflow.prompts.messages import (
     CONTEXT_HINT_ABSENT,
     CONTEXT_HINT_PRESENT,
@@ -90,7 +91,6 @@ from rlmflow.prompts.messages import (
     TRUNCATION_SUMMARY,
 )
 from rlmflow.runtime import LocalRuntime, Runtime
-from rlmflow.engine.scheduler import NodeScheduler
 from rlmflow.tools.builtins import make_delegate, make_done, make_wait
 from rlmflow.utils import OrphanedDelegatesError, check_yield_errors, find_code_blocks
 from rlmflow.workspace import (
@@ -191,10 +191,7 @@ class RLMFlow(LLMClient):
         self.context: Context = workspace.context if workspace else InMemoryContext()
         self.config = config or RLMConfig()
         self.runtime_factory = runtime_factory
-        default_builder = (
-            BASELINE_BUILDER if self.config.max_depth == 0 else DEFAULT_BUILDER
-        )
-        self.prompt_builder = prompt_builder or default_builder
+        self.prompt_builder = prompt_builder or DEFAULT_BUILDER
         self.pool = create_pool(self.config, pool)
         self.node_scheduler = node_scheduler or NodeScheduler()
 
@@ -512,7 +509,7 @@ class RLMFlow(LLMClient):
         Drives the supervising agent forward after its waited-on
         children have settled. On a cold start (process restart or
         fork), the live generator is gone — we replay the action code
-        with ``delegate`` in replay mode so the generator pauses at
+        with ``rlm_delegate`` in replay mode so the generator pauses at
         the same yield before the regular resume path takes over.
         """
         if not can_resume(graph, last):
@@ -534,7 +531,7 @@ class RLMFlow(LLMClient):
         if not runtime.suspended:
             # The live generator is gone — process restart, fork, or
             # any other cold start. Re-execute the action code with
-            # delegate in replay mode so the generator is paused at the
+            # rlm_delegate in replay mode so the generator is paused at the
             # same yield we recorded, then drop into the regular resume
             # path.
             replay_to_yield(graph, last, runtime)
@@ -846,13 +843,15 @@ class RLMFlow(LLMClient):
         baseline = self.config.max_depth == 0
         tool_defs = self.runtime.get_tool_defs()
         if baseline:
-            tool_defs = [t for t in tool_defs if t.name not in ("delegate", "wait")]
+            tool_defs = [
+                t for t in tool_defs if t.name not in ("rlm_delegate", "rlm_wait")
+            ]
         lines = [
             f"- `{tool_def.name}{tool_def.signature}`: {tool_def.description}"
             for tool_def in tool_defs
         ]
         if len(self.llm_clients) > 1 and not baseline:
-            lines.append("\nAvailable models for `delegate(model=...)`:")
+            lines.append("\nAvailable models for `rlm_delegate(model=...)`:")
             for key in sorted(self.llm_clients):
                 desc = self.model_descriptions.get(key)
                 lines.append(f"- `{key}`: {desc}" if desc else f"- `{key}`")
@@ -922,7 +921,7 @@ class RLMFlow(LLMClient):
         """Reset per-execution state on the runtime and seed env-style vars.
 
         ``runtime.env`` is the host-side dict shared with ``done`` /
-        ``delegate`` closures (cleared + seeded each call). The same
+        ``rlm_delegate`` closures (cleared + seeded each call). The same
         per-agent facts plus ``CONTEXT`` / ``SESSION`` are also pushed
         into the REPL namespace so user code can reference them by
         bare name.
@@ -953,9 +952,9 @@ class RLMFlow(LLMClient):
         return runtime
 
     def register_tools(self, runtime: Runtime | None = None) -> None:
-        """Bind ``done`` / ``wait`` / ``delegate`` closures to ``runtime.env``.
+        """Bind ``done`` / ``rlm_wait`` / ``rlm_delegate`` closures to ``runtime.env``.
 
-        The ``delegate`` tool needs a way to spawn child agents — we
+        The ``rlm_delegate`` tool needs a way to spawn child agents — we
         pass :meth:`spawn_child` (bound to ``self``) so the tool can
         call back into engine state.
 
@@ -988,7 +987,7 @@ class RLMFlow(LLMClient):
     ) -> ChildHandle | str:
         """Spawn a child agent under ``parent_agent_id``.
 
-        Public seam invoked by the ``delegate(...)`` REPL closure.
+        Public seam invoked by the ``rlm_delegate(...)`` REPL closure.
         Creates a child :class:`~rlmflow.graph.Graph`, allocates a new
         runtime session, writes the initial seed action, and returns
         a :class:`~rlmflow.graph.ChildHandle`. Returns a refusal

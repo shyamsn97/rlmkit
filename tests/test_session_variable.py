@@ -63,7 +63,7 @@ def test_list_agents_excludes_self_and_summarizes_siblings(tmp_path: Path):
         agent_id="root",
         system="root prompt",
         query="build a thing",
-        code='delegate("html", "...")',
+        code='rlm_delegate("html", "...")',
         observation="ok",
         result="all done",
     )
@@ -124,7 +124,7 @@ def test_grep_searches_across_agents_but_skips_self(tmp_path: Path):
         session,
         agent_id="root",
         query="self should be skipped",
-        code='delegate("html", "...")',
+        code='rlm_delegate("html", "...")',
         observation="self_only_marker",
         result="self_only_marker",
     )

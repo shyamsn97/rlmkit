@@ -43,9 +43,9 @@ You are running recursive autoresearch.
 **Parent agent:** your query points at `program.md`. Read it, run
 `run_baseline()` once, inspect `get_runs()`, choose idea-named
 slugs, then spawn one child per hypothesis with
-`delegate(slug, query, context)`. The parent does not write or run
+`rlm_delegate(slug, query, context)`. The parent does not write or run
 candidate code directly. End the block exactly at
-`results = yield wait(*handles)`. On the resumed turn, inspect the
+`results = yield rlm_wait(*handles)`. On the resumed turn, inspect the
 ledger, then either spawn another small batch of children with fresh
 slugs or `done(...)`. Child agents have a small turn cap set by the
 engine; do not try to simulate your own budget system.
@@ -89,6 +89,8 @@ Hard contract:
 - return centers, radii with shapes (26, 2), (26,)
 - valid non-overlapping circles in [0, 1]^2; maximize sum(radii)
 - no program imports, env vars, CLI/main/stdout, or generic adapters
+- include docstrings that explain the strategy, helper invariants, and
+  non-obvious constants
 Run run_experiment(source, description=slug, budget_s=<numeric budget
 from kickoff, for example 45; do not leave a placeholder in code>).
 If it returns a numeric score, done.
@@ -99,11 +101,11 @@ Do not stop after a quick crash until you have either produced a score
 or exhausted the three targeted fixes.'''
 
 handles = [
-    delegate(slug, child_query(slug, hyp), context)
+    rlm_delegate(slug, child_query(slug, hyp), context)
     for slug, hyp in ideas
     if slug not in prior
 ]
-results = yield wait(*handles)
+results = yield rlm_wait(*handles)
 ```
 
 ```repl
@@ -124,6 +126,16 @@ string for `solution.py` and call
 other. Do not delegate to grandchildren unless the parent explicitly
 asked for that.
 
+Candidate sources are archived research notes, not throwaway snippets.
+Write docstrings as part of the experiment result. A good candidate has:
+a module docstring naming the slug/strategy and expected score band;
+a docstring on the target function explaining the algorithm steps,
+termination condition, and validity invariants; docstrings on helpers
+covering inputs, outputs, units, and invariants they preserve; and short
+comments for magic constants, seeds, schedules, or thresholds. On
+`_fixN` retries, update stale docstrings/comments when the algorithm
+changes.
+
 For circle packing children: do not generalize. Hard-code `N = 26`.
 Do not infer `N`, import `program`, read environment variables, write
 `if __name__ == "__main__"`, print/serialize a CLI answer, or support
@@ -137,7 +149,20 @@ print(read_file("program.md"))
 base_src = read_file("solution.py")
 
 source = '''
+\"\"\"Hexagonal lattice trial for 26-circle packing.
+
+Strategy: place candidate centers on a compact grid, then assign
+feasible radii. Expected score band: baseline-quality; intended as a
+clear starting point for local polish.
+\"\"\"
+
 def solve():
+    \"\"\"Return valid `(centers, radii)` arrays for the 26-circle task.
+
+    The implementation initializes all centers/radii, enforces the
+    required shapes, and leaves every radius non-negative and in-bounds.
+    Replace this skeleton with the full strategy before running.
+    \"\"\"
     import numpy as np
     # full implementation here; obey program.md exactly
     centers = np.zeros((26, 2))
@@ -176,7 +201,7 @@ def build_prompt_builder():
         "autoresearch_recursion",
         AUTORESEARCH_RECURSION_TEXT,
         title="Autoresearch",
-        after="recursion",
+        after="builtins",
     )
 
 
@@ -295,7 +320,9 @@ def make_run_experiment(
         f"syntax errors or non-zero exit; the failure row is still on "
         f"the ledger. Children should call this with their own source "
         f"string instead of writing `{solution}`, so parallel trials "
-        f"do not clobber each other."
+        f"do not clobber each other. Archived sources should include "
+        f"module/function/helper docstrings explaining the strategy, "
+        f"invariants, and non-obvious constants."
     )
     def run_experiment(
         source: str, description: str, budget_s: int = 300,
@@ -532,7 +559,7 @@ def main() -> None:
     # recursive parent/child mechanics live in the system prompt.
     query = (
         f"Read `program.md`, run the baseline, then fan out "
-        f"{args.branches_per_turn} child trials with `delegate`. "
+        f"{args.branches_per_turn} child trials with `rlm_delegate`. "
         f"Each child is capped at {args.child_iterations} turns by "
         f"the engine. Per-trial budget is {args.budget_s}s; put "
         f"`budget_s={args.budget_s}` in each child query. If a "

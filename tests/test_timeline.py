@@ -30,8 +30,8 @@ class _OneChild(LLMClient):
 
     ROOT = (
         "```repl\n"
-        "h = delegate('child', 'do thing', '')\n"
-        "results = yield wait(h)\n"
+        "h = rlm_delegate('child', 'do thing', '')\n"
+        "results = yield rlm_wait(h)\n"
         "done('root:' + results[0])\n"
         "```"
     )
@@ -55,10 +55,10 @@ class _ParallelChildren(LLMClient):
 
     ROOT = (
         "```repl\n"
-        "ha = delegate('a', 'task a', '')\n"
-        "hb = delegate('b', 'task b', '')\n"
-        "hc = delegate('c', 'task c', '')\n"
-        "results = yield wait(ha, hb, hc)\n"
+        "ha = rlm_delegate('a', 'task a', '')\n"
+        "hb = rlm_delegate('b', 'task b', '')\n"
+        "hc = rlm_delegate('c', 'task c', '')\n"
+        "results = yield rlm_wait(ha, hb, hc)\n"
         "done(' '.join(results))\n"
         "```"
     )

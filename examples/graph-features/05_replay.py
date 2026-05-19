@@ -29,9 +29,9 @@ from rlmflow import LLMClient, LLMUsage, RLMConfig, RLMFlow, Workspace
 
 ROOT_SPLIT = (
     "```repl\n"
-    'h1 = delegate("a", "do A", "")\n'
-    'h2 = delegate("b", "do B", "")\n'
-    "results = yield wait(h1, h2)\n"
+    'h1 = rlm_delegate("a", "do A", "")\n'
+    'h2 = rlm_delegate("b", "do B", "")\n'
+    "results = yield rlm_wait(h1, h2)\n"
     'done("/".join(results))\n'
     "```"
 )

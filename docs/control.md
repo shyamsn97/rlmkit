@@ -76,7 +76,7 @@ The engine reads from `graph.states`, appends new states through the
 session, and produces a fresh snapshot on every `step`. There is no
 in-memory node graph to keep in sync with disk.
 
-For the runtime contract around `yield wait(...)` and `ResumeAction`,
+For the runtime contract around `yield rlm_wait(...)` and `ResumeAction`,
 the full REPL/yield protocol, persistence layout, and engine
 extension surface, see [`internals.md`](internals.md).
 
@@ -107,12 +107,17 @@ Or pass a list to `runtime.register_tools([...])`.
 For a fuller guide, see [`prompt_customization.md`](prompt_customization.md).
 
 ```python
-from rlmflow.prompts.default import DEFAULT_BUILDER, GUARDRAILS_TEXT
+from rlmflow.prompts.default import DEFAULT_BUILDER
+
+GUARDRAILS = """
+- Verify before `done()`. Empty/zero/surprising results → one sanity check first.
+- Ask children for structured output (JSON / list / count), parsed mechanically.
+"""
 
 agent = RLMFlow(..., prompt_builder=(
     DEFAULT_BUILDER
     .section("role", "You are a security auditor.", title="Role")
-    .section("guardrails", GUARDRAILS_TEXT, title="Guardrails", after="recursion")
+    .section("guardrails", GUARDRAILS, title="Guardrails", after="builtins")
 ))
 ```
 
@@ -176,7 +181,7 @@ full    = CONTEXT.read()        # full payload for handoff to a child
 Children are spawned with a positional, mandatory `context`:
 
 ```python
-delegate(name, query, context, *, model=None)
+rlm_delegate(name, query, context, *, model=None)
 ```
 
 - Pass `""` when the child works from the query alone (the most common
@@ -190,7 +195,7 @@ delegate(name, query, context, *, model=None)
 The default prompt biases toward **inline first**: if you (the parent)
 already know how to produce the answer end-to-end — a known multi-file
 artifact, a familiar algorithm, a self-contained transform — write it
-yourself with `write_file` / direct compute. Reserve `delegate(...)`
+yourself with `write_file` / direct compute. Reserve `rlm_delegate(...)`
 for work that is both parallel **and** requires distinct reasoning per
 child (different data slices, different sources, separate verification).
 Cross-file schema drift between siblings is the #1 multi-file failure
