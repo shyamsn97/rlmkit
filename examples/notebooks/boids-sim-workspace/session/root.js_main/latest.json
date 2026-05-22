@@ -1,8 +1,0 @@
-{
-  "agent_id": "root.js_main",
-  "latest_node_id": "n_76ce45696bd7",
-  "seq": 4,
-  "type": "done_output",
-  "terminal": true,
-  "result": "Wrote 6431 bytes to js/main.js"
-}

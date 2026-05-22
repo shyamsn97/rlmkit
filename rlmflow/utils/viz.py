@@ -50,6 +50,8 @@ class LiveView:
             console=self._console,
             vertical_overflow="visible",
             auto_refresh=False,
+            redirect_stdout=False,
+            redirect_stderr=False,
         )
         self._live.__enter__()
         return self
@@ -88,6 +90,7 @@ def _render_rich_tree(graph: Graph):
         cur = sub.current()
         info = Text()
         info.append(aid, style="bold")
+        info.append(f" [{sub.model_label}]", style="cyan")
         if cur is not None:
             info.append(
                 f" [{cur.type}]", style="magenta" if not cur.terminal else "green"
@@ -98,10 +101,14 @@ def _render_rich_tree(graph: Graph):
             info.append(f" | children running {active}/{total}", style="cyan")
         return info
 
+    def populate(tree: Tree, aid: str) -> None:
+        for child_aid in graph.agents[aid].children:
+            child = tree.add(label_for(child_aid), guide_style="dim")
+            populate(child, child_aid)
+
     def build(aid: str) -> Tree:
         tree = Tree(label_for(aid), guide_style="dim")
-        for child_aid in graph.agents[aid].children:
-            tree.add(build(child_aid))
+        populate(tree, aid)
         return tree
 
     return build(graph.root_agent_id)

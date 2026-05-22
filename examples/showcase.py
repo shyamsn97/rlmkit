@@ -46,7 +46,7 @@ class DemoLLM(LLMClient):
                 "```repl\n"
                 'h1 = rlm_delegate(name="hello", query="Create hello.py", context="")\n'
                 'h2 = rlm_delegate(name="goodbye", query="Create goodbye.py", context="")\n'
-                "results = yield rlm_wait(h1, h2)\n"
+                "results = await rlm_wait(h1, h2)\n"
                 'done("\\n".join(results))\n'
                 "```"
             )

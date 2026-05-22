@@ -127,7 +127,7 @@ root_action = LLMOutput(
         'h1 = rlm_delegate(name="index_html", query="Write index.html", context="")\n'
         'h2 = rlm_delegate(name="style_css", query="Write style.css", context="")\n'
         'h3 = rlm_delegate(name="script_js", query="Write script.js with boids logic", context="")\n'
-        "results = yield rlm_wait(h1, h2, h3)\n"
+        "results = await rlm_wait(h1, h2, h3)\n"
         'done("\\n".join(results))'
     ),
 )
@@ -182,7 +182,7 @@ script_action = LLMOutput(
         'a = rlm_delegate(name="boids_core", query="Core boids", context="")\n'
         'b = rlm_delegate(name="renderer", query="Canvas renderer", context="")\n'
         'c = rlm_delegate(name="controls", query="UI controls", context="")\n'
-        "yield rlm_wait(a, b, c)"
+        "await rlm_wait(a, b, c)"
     ),
 )
 script_sup = SupervisingOutput(

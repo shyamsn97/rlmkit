@@ -1,3 +1,5 @@
+import threading
+
 from rlmflow.utils.pool import CallablePool, SequentialPool, ThreadPool
 from rlmflow.rlm import RLMConfig, create_pool
 
@@ -53,3 +55,69 @@ def test_create_pool_wraps_callable_pool():
 
     assert isinstance(pool, CallablePool)
     assert pool.execute([("x", lambda: 1)]) == {"x": 1}
+
+
+def test_threadpool_run_until_idle_refills_before_slow_sibling_finishes():
+    pool = ThreadPool(max_concurrency=2)
+    events: list[str] = []
+    fast_done = threading.Event()
+    fast_second_started = threading.Event()
+
+    def fast_first():
+        events.append("fast_first_start")
+        fast_done.set()
+        return "fast1"
+
+    def fast_second():
+        events.append("fast_second_start")
+        fast_second_started.set()
+        return "fast2"
+
+    def slow():
+        events.append("slow_start")
+        assert fast_done.wait(timeout=2)
+        assert fast_second_started.wait(timeout=2)
+        events.append("slow_done")
+        return "slow"
+
+    def refill(task_id, _result, active_ids):
+        if task_id == "fast_first":
+            assert "slow" in active_ids
+            return [("fast_second", fast_second)]
+        return []
+
+    try:
+        results = pool.run_until_idle(
+            [("fast_first", fast_first), ("slow", slow)],
+            refill,
+        )
+    finally:
+        pool.shutdown()
+
+    assert results == {
+        "fast_first": "fast1",
+        "fast_second": "fast2",
+        "slow": "slow",
+    }
+    assert events.index("fast_second_start") < events.index("slow_done")
+
+
+def test_callable_pool_run_until_idle_uses_execute_fallback():
+    calls: list[list[str]] = []
+
+    def run(tasks):
+        calls.append([task_id for task_id, _ in tasks])
+        return {task_id: fn() for task_id, fn in tasks}
+
+    pool = CallablePool(run)
+
+    def refill(task_id, _result, _active_ids):
+        if task_id == "first":
+            return [("second", lambda: 2)]
+        return []
+
+    assert pool.run_until_idle([("first", lambda: 1)], refill) == {
+        "first": 1,
+        "second": 2,
+    }
+    assert calls == [["first"], ["second"]]

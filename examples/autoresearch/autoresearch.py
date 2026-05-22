@@ -45,7 +45,7 @@ You are running recursive autoresearch.
 slugs, then spawn one child per hypothesis with
 `rlm_delegate(name=slug, query=query, context=context)`. The parent does not write or run
 candidate code directly. End the block exactly at
-`results = yield rlm_wait(*handles)`. On the resumed turn, inspect the
+`results = await rlm_wait(*handles)`. On the resumed turn, inspect the
 ledger, then either spawn another small batch of children with fresh
 slugs or `done(...)`. Child agents have a small turn cap set by the
 engine; do not try to simulate your own budget system.
@@ -105,7 +105,7 @@ handles = [
     for slug, hyp in ideas
     if slug not in prior
 ]
-results = yield rlm_wait(*handles)
+results = await rlm_wait(*handles)
 ```
 
 ```repl
@@ -123,8 +123,14 @@ Read `CONTEXT` and `program.md`, then build one complete source
 string for `solution.py` and call
 `run_experiment(source, description=slug)`. Do not write
 `solution.py`; children run in parallel and would clobber each
-other. Do not delegate to grandchildren unless the parent explicitly
-asked for that.
+other.
+
+**Only delegate if children would explore a different approach
+than yours.** If you'd just be re-asking your own query and returning
+the answer, do the work yourself. Spawn children only when each
+one is doing something genuinely different from your assigned idea
+(different hyperparameters, an algorithmic variant, a sub-question)
+that you'd then aggregate.
 
 Candidate sources are archived research notes, not throwaway snippets.
 Write docstrings as part of the experiment result. A good candidate has:
@@ -201,7 +207,7 @@ def build_prompt_builder():
         "autoresearch_recursion",
         AUTORESEARCH_RECURSION_TEXT,
         title="Autoresearch",
-        after="builtins",
+        after="examples",
     )
 
 

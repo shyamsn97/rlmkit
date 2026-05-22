@@ -11,7 +11,7 @@ import importlib.util
 import pytest
 
 from rlmflow import Graph, LLMClient, LLMUsage, RLMConfig, RLMFlow, Workspace
-from rlmflow.graph import DoneOutput, SupervisingOutput, UserQuery
+from rlmflow.graph import DoneOutput, LLMOutput, SupervisingOutput, UserQuery
 from rlmflow.runtime.local import LocalRuntime
 from rlmflow.utils import (
     render_html,
@@ -21,7 +21,7 @@ from rlmflow.utils import (
     save_image,
     save_steps,
 )
-from rlmflow.utils.viz import code_log, report_md, token_sparkline
+from rlmflow.utils.viz import LiveView, code_log, report_md, token_sparkline
 from rlmflow.utils.viz import _render_rich_tree
 from rlmflow.utils.viewer import _scale_figure_elements
 
@@ -39,7 +39,7 @@ class _DelegatingLLM(LLMClient):
     ROOT = (
         "```repl\n"
         "h = rlm_delegate(name='child', query='do the thing', context='')\n"
-        "results = yield rlm_wait(h)\n"
+        "results = await rlm_wait(h)\n"
         "done('root:' + results[0])\n"
         "```"
     )
@@ -138,6 +138,64 @@ def test_live_tree_shows_running_children_count():
     tree = _render_rich_tree(graph)
 
     assert "children running 1/2" in tree.label.plain
+
+
+def test_live_tree_displays_model_label_and_state():
+    graph = Graph(
+        agent_id="root",
+        config={"model": "default"},
+        states=[
+            UserQuery(agent_id="root", seq=0, content="do work"),
+            LLMOutput(agent_id="root", seq=1, model="gpt-5", reply="", code=""),
+        ],
+        children={
+            "root.fast": Graph(
+                agent_id="root.fast",
+                parent_agent_id="root",
+                config={"model": "fast"},
+                states=[
+                    UserQuery(agent_id="root.fast", seq=0, content="fast work"),
+                    LLMOutput(
+                        agent_id="root.fast",
+                        seq=1,
+                        model="gpt-5-mini",
+                        reply="",
+                        code="",
+                    ),
+                ],
+            ),
+        },
+    )
+
+    tree = _render_rich_tree(graph)
+
+    assert "root [default:gpt-5] [llm_output]" in tree.label.plain
+    child = tree.children[0]
+    assert "root.fast [fast:gpt-5-mini] [llm_output]" in child.label.plain
+
+
+def test_live_view_does_not_redirect_notebook_streams(monkeypatch):
+    calls = {}
+
+    class FakeLive:
+        def __init__(self, **kwargs):
+            calls.update(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+    import rich.live
+
+    monkeypatch.setattr(rich.live, "Live", FakeLive)
+
+    with LiveView(console=object()):
+        pass
+
+    assert calls["redirect_stdout"] is False
+    assert calls["redirect_stderr"] is False
 
 
 # ── transcripts / sessions (text views over Graph) ───────────────────

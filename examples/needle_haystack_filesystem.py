@@ -54,7 +54,7 @@ def main():
         "--viewer", action="store_true", help="Open the state viewer after finishing"
     )
     parser.add_argument("--model", default="gpt-5-mini")
-    parser.add_argument("--fast-model", default=None)
+    parser.add_argument("--fast-model", default="gpt-5-nano")
     parser.add_argument(
         "--docker-image",
         default=None,
@@ -74,6 +74,8 @@ def main():
     haystack_path = workspace / "haystack"
     workspace.mkdir(parents=True, exist_ok=True)
     haystack_path.mkdir(parents=True, exist_ok=True)
+    for stale in haystack_path.glob("*.txt"):
+        stale.unlink()
     answer = generate_haystack(haystack_path, num_files=args.num_files)
     print(f"Generated {args.num_files} files in {haystack_path}")
 
@@ -115,11 +117,8 @@ def main():
     )
 
     graph = agent.start(
-        f"There are {args.num_files} text files in the haystack/ directory "
-        f"Exactly one line across all files says 'The magic number is XXXXXXX'. "
-        "Find it. You cannot grep all the files at once, but you can grep batches. "
-        "`ls('haystack')` returns absolute paths already usable by file tools; "
-        "pass those returned paths directly."
+        f"There are {args.num_files} text files in haystack/. "
+        f"Exactly one line in one file matches the pattern `The magic number is <number>`. Find and return the number. There are too many files to search manually, so you should split the work into batches and delegate."
     )
 
     if args.no_viz:

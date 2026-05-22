@@ -58,7 +58,7 @@ def main():
         "--viewer", action="store_true", help="Open the state viewer after finishing"
     )
     parser.add_argument("--model", default="gpt-5-mini")
-    parser.add_argument("--fast-model", default=None)
+    parser.add_argument("--fast-model", default="gpt-5-nano")
     parser.add_argument(
         "--docker-image",
         default=None,

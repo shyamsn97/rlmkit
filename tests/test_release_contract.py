@@ -33,7 +33,7 @@ class DelegatingLLM(LLMClient):
     ROOT_REPLY = (
         "```repl\n"
         'h = rlm_delegate(name="child", query="do the thing", context="")\n'
-        "results = yield rlm_wait(h)\n"
+        "results = await rlm_wait(h)\n"
         "done(results[0])\n"
         "```"
     )
@@ -163,7 +163,7 @@ def test_tree_displays_model_label_per_agent():
             return (
                 "```repl\n"
                 'h = rlm_delegate(name="fast_worker", query="use fast", context="", model="fast")\n'
-                "r = yield rlm_wait(h)\n"
+                "r = await rlm_wait(h)\n"
                 "done(r[0])\n"
                 "```"
             )
@@ -183,5 +183,5 @@ def test_tree_displays_model_label_per_agent():
     final = _run(agent, agent.start("test"))
 
     tree = final.tree()
-    assert "root (default)" in tree
-    assert "root.fast_worker (fast)" in tree
+    assert "root (default:gpt-strong)" in tree
+    assert "root.fast_worker (fast:fast-mini)" in tree

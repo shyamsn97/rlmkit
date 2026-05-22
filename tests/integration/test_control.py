@@ -46,7 +46,7 @@ def _delegate_one(child_name: str, query: str) -> str:
     return (
         "```repl\n"
         f"h = rlm_delegate(name={child_name!r}, query={query!r}, context='')\n"
-        "results = yield rlm_wait(h)\n"
+        "results = await rlm_wait(h)\n"
         "done(results[0])\n"
         "```"
     )

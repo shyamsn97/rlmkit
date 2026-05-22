@@ -53,7 +53,17 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from rlmflow.graph import Graph, Node, is_done, is_observation, parse_node_obj
+from rlmflow.graph import (
+    Graph,
+    Node,
+    is_done,
+    is_errored,
+    is_exec_output,
+    is_llm_output,
+    is_observation,
+    is_user_query,
+    parse_node_obj,
+)
 from rlmflow.workspace.store import Store, copy_workspace_paths, resolve_backend
 
 
@@ -325,6 +335,26 @@ class SessionVariable:
 
         return agent_transcript(graph[agent_id], include_system=True)
 
+    def messages(self, agent_id: str) -> list[dict[str, str]]:
+        """Return flat chat messages for one agent as ``{role, content}`` dicts."""
+        graph = self._graph()
+        if agent_id not in graph.agents:
+            return []
+        transcript = self.store.read_transcript(agent_id)
+        if transcript and transcript.get("messages"):
+            return [
+                {"role": str(msg["role"]), "content": str(msg["content"])}
+                for msg in transcript["messages"]
+            ]
+        return _messages_from_graph(graph[agent_id])
+
+    def recent(self, agent_id: str, n: int = 5) -> list[dict[str, str]]:
+        """Return the last ``n`` chat messages for one agent."""
+        if n <= 0:
+            return []
+        msgs = self.messages(agent_id)
+        return msgs[-n:]
+
     _SEARCH_FIELDS: tuple[str, ...] = (
         "content",
         "reply",
@@ -419,6 +449,27 @@ def _summarize(
             out.append(summary)
     out.sort(key=lambda r: (r["depth"], r["agent_id"]))
     return out
+
+
+def _messages_from_graph(agent: Graph) -> list[dict[str, str]]:
+    """Project one agent's state log into chat-style messages."""
+    msgs: list[dict[str, str]] = []
+    if agent.system_prompt:
+        msgs.append({"role": "system", "content": agent.system_prompt})
+    for state in agent.states:
+        if is_user_query(state):
+            msgs.append({"role": "user", "content": state.content})
+        elif is_llm_output(state):
+            msgs.append({"role": "assistant", "content": state.reply})
+        elif is_exec_output(state):
+            body = state.content or state.output or ""
+            if body:
+                msgs.append({"role": "user", "content": body})
+        elif is_errored(state):
+            body = state.content or ""
+            if body:
+                msgs.append({"role": "user", "content": body})
+    return msgs
 
 
 def _summarize_agent(agent: Graph) -> dict[str, Any] | None:

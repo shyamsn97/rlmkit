@@ -41,7 +41,7 @@ def make_done(env: dict[str, Any]):
 def make_wait():
     """Closure that packages :class:`ChildHandle`s into a :class:`WaitRequest`."""
 
-    @tool("Wait for delegated children. Must be called with `yield`.")
+    @tool("Wait for delegated children. Must be called with `await`.")
     def rlm_wait(*handles: ChildHandle) -> WaitRequest:
         if not handles:
             raise ValueError("rlm_wait() requires at least one child handle")

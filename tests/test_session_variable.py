@@ -145,6 +145,103 @@ def test_read_unknown_agent_returns_clear_message():
     assert var.read("root.missing") == "(no nodes for agent 'root.missing')"
 
 
+def test_messages_projects_graph_states_when_no_transcript(tmp_path: Path):
+    session = FileSession(tmp_path / "workspace")
+    _seed_agent(
+        session,
+        agent_id="root.html",
+        depth=1,
+        system="child prompt",
+        query="write index.html",
+        code='write_file("index.html", "<!DOCTYPE html>")',
+        observation="REPL output:\nNone",
+        result="wrote index.html",
+    )
+
+    var = SessionVariable(session, agent_id="root")
+    msgs = var.messages("root.html")
+
+    assert msgs[0] == {"role": "system", "content": "child prompt"}
+    assert msgs[1] == {"role": "user", "content": "write index.html"}
+    assert msgs[2]["role"] == "assistant"
+    assert "write_file" in msgs[2]["content"]
+    assert msgs[3] == {"role": "user", "content": "REPL output:\nNone"}
+    assert var.messages("root.missing") == []
+
+
+def test_messages_prefers_stored_transcript(tmp_path: Path):
+    session = FileSession(tmp_path / "workspace")
+    _seed_agent(
+        session,
+        agent_id="root.html",
+        depth=1,
+        system="child prompt",
+        query="write index.html",
+        code='write_file("index.html", "<!DOCTYPE html>")',
+        observation="REPL output:\nNone",
+        result="wrote index.html",
+    )
+    session.write_transcript(
+        "root.html",
+        {
+            "agent_id": "root.html",
+            "messages": [
+                {"role": "system", "content": "stored system"},
+                {"role": "user", "content": "stored user"},
+                {"role": "assistant", "content": "stored assistant"},
+            ],
+            "metadata": [{}, {}, {}],
+        },
+    )
+
+    var = SessionVariable(session, agent_id="root")
+    assert var.messages("root.html") == [
+        {"role": "system", "content": "stored system"},
+        {"role": "user", "content": "stored user"},
+        {"role": "assistant", "content": "stored assistant"},
+    ]
+
+
+def test_recent_returns_tail_of_messages(tmp_path: Path):
+    session = FileSession(tmp_path / "workspace")
+    _seed_agent(
+        session,
+        agent_id="root.html",
+        depth=1,
+        system="child prompt",
+        query="write index.html",
+        code='write_file("index.html", "<!DOCTYPE html>")',
+        observation="REPL output:\nNone",
+        result="wrote index.html",
+    )
+
+    var = SessionVariable(session, agent_id="root")
+    recent = var.recent("root.html", n=2)
+
+    assert recent == [
+        {"role": "assistant", "content": 'write_file("index.html", "<!DOCTYPE html>")'},
+        {"role": "user", "content": "REPL output:\nNone"},
+    ]
+    assert var.recent("root.html", n=0) == []
+    assert var.recent("root.missing", n=3) == []
+
+
+def test_messages_can_read_self(tmp_path: Path):
+    session = FileSession(tmp_path / "workspace")
+    _seed_agent(
+        session,
+        agent_id="root",
+        system="root prompt",
+        query="build a thing",
+        code='print("hello")',
+        observation="REPL output:\nhello",
+        result="done",
+    )
+
+    var = SessionVariable(session, agent_id="root")
+    assert var.messages("root")[1]["content"] == "build a thing"
+
+
 def test_grep_searches_across_agents_but_skips_self(tmp_path: Path):
     session = FileSession(tmp_path / "workspace")
     _seed_agent(
@@ -314,4 +411,6 @@ def test_session_variable_injected_via_inject_env(tmp_path: Path):
     assert callable(handle.list_agents)
     assert callable(handle.summarize_agent)
     assert callable(handle.read)
+    assert callable(handle.messages)
+    assert callable(handle.recent)
     assert callable(handle.grep)

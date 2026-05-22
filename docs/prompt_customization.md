@@ -2,8 +2,9 @@
 
 `RLMFlow` builds a system prompt from named sections. Most customization should
 derive from the default builder instead of replacing the whole prompt, because
-the default includes the REPL protocol, `rlm_delegate` / `rlm_wait` rules, `CONTEXT`,
-`SESSION`, and examples that keep recursive execution well-formed.
+the default sections carry the REPL protocol, `rlm_delegate` / `rlm_wait` rules,
+`CONTEXT`, `SESSION`, and the worked examples that keep recursive execution
+well-formed.
 
 Use full replacement only when you want to own that entire protocol yourself.
 
@@ -33,37 +34,40 @@ first call:
 print(graph.system_prompt)
 ```
 
+## Default Builder Shape
+
+The default builder has seven sections, in order:
+
+| Section | Purpose |
+| --- | --- |
+| `role` | Opening contract + REPL namespace (`CONTEXT`, `llm_query_batched`, `rlm_delegate`, `rlm_wait`, `SESSION`, `SHOW_VARS`, `print`, `done`). |
+| `strategy` | When to use `llm_query_batched` vs `rlm_delegate`, "break down problems", REPL-for-computation with an inline physics example, truncation + long-context guidance. |
+| `format` | REPL block fence rules + tiny inline demo. |
+| `examples` | Five worked recipes (chunked scan, batched chunks, branch on delegate, program-style fanout, parallel fanout). |
+| `final` | `done(...)` contract, `SHOW_VARS` reminder, closing exhortation. |
+| `tools` | Runtime-generated tool list (custom user tools registered with the engine). |
+| `status` | Runtime-generated agent id, depth, and config status. |
+
+The first five render headless and back-to-back, so the rendered prompt reads
+as one continuous narrative; the split exists so each piece is independently
+swappable via `DEFAULT_BUILDER.update(name, ...)`. `tools` and `status` are
+filled in by `RLMFlow` at build time.
+
 ## Recommended: Derive From `DEFAULT_BUILDER`
 
 The default prompt is a `PromptBuilder`: an ordered list of named sections.
 `.section(...)` returns a new builder, so the module-level default is never
 mutated.
 
+### Add Project Rules
+
+Add a new section anywhere relative to the existing ones:
+
 ```python
 from rlmflow import RLMFlow
-from rlmflow.prompts.default import DEFAULT_BUILDER, ROLE_TEXT
-
-auditor_prompt = DEFAULT_BUILDER.section(
-    "role",
-    "You are a recursive security auditor. Find concrete risks, reproduce them "
-    "when possible, and propose minimal fixes.\n\n" + ROLE_TEXT,
-    title="Role",
-)
-
-agent = RLMFlow(
-    llm_client=llm,
-    workspace=workspace,
-    prompt_builder=auditor_prompt,
-)
-```
-
-Replacing a section with the same name preserves its position. Adding a new
-name appends by default, or you can place it with `before=` / `after=`.
-
-```python
 from rlmflow.prompts.default import DEFAULT_BUILDER
 
-domain_rules = """
+project_rules = """
 - Preserve API compatibility unless the task explicitly asks for a breaking change.
 - Prefer small patches with focused tests.
 - When changing public behavior, update docs in the same pass.
@@ -71,87 +75,56 @@ domain_rules = """
 
 prompt = DEFAULT_BUILDER.section(
     "project_rules",
-    domain_rules,
+    project_rules,
     title="Project Rules",
-    after="strategy",
+    after="final",
+)
+
+agent = RLMFlow(
+    llm_client=llm,
+    workspace=workspace,
+    prompt_builder=prompt,
 )
 ```
 
-## Common Recipes
+### Swap A Single Section
 
-### Replace The Role
-
-Use this when the agent should have a different job but still follow the normal
-RLMFlow execution protocol.
+Replace just the piece you want to customize. The rest of the prompt is unchanged:
 
 ```python
 from rlmflow.prompts.default import DEFAULT_BUILDER
 
-prompt = DEFAULT_BUILDER.section(
-    "role",
-    "You are a recursive data analyst. Split independent analyses into child "
-    "calls, verify aggregates mechanically, and return concise conclusions.",
-    title="Role",
-)
+domain_strategy = """
+**When to delegate:** spawn one child per independent file/module. Keep the root
+agent's job to planning, dispatch, and integration. Verify children mechanically
+before `done()`.
+"""
+
+prompt = DEFAULT_BUILDER.update("strategy", domain_strategy)
 ```
 
-### Add Domain Rules
+### Prepend A Persona
 
-Use a new section when the default sections are right, but your project needs
-extra constraints.
+Slip a small role section before `role` rather than overwriting the protocol:
 
 ```python
 prompt = DEFAULT_BUILDER.section(
-    "domain",
-    """
-- All SQL must be read-only unless the user explicitly requests mutation.
-- Prefer parameterized queries.
-- Report row counts and any filters applied.
-""",
-    title="Domain Rules",
-    after="guardrails",
-)
-```
-
-### Tune Delegation Behavior
-
-The `strategy`, `builtins`, and `guardrails` sections have the biggest effect
-on when the agent delegates and how it waits.
-
-```python
-from rlmflow.prompts.default import BUILTINS_TEXT, DEFAULT_BUILDER
-
-prompt = (
-    DEFAULT_BUILDER
-    .section(
-        "strategy",
-        """
-**Size up -> split independent work -> delegate -> verify -> done.**
-
-1. If the user asks for separate files, components, or chunks, delegate one
-   child per independent part.
-2. Give every child an explicit contract: filenames, signatures, output schema,
-   and required checks.
-3. After `yield rlm_wait(...)`, verify the combined artifact in a fresh turn before
-   `done()`.
-""",
-        title="Strategy",
-    )
-    .section("builtins", BUILTINS_TEXT, title="Builtins")
+    "persona",
+    "You are a recursive security auditor. Reproduce concrete risks and "
+    "propose minimal fixes.",
+    title="Persona",
+    before="role",
 )
 ```
 
 ### Remove A Section
 
-You can remove sections, but be careful with protocol-heavy sections like
-`repl` and `builtins`.
+You can remove sections, but only the ones you added — removing `system`
+removes the entire delegation protocol.
 
 ```python
-prompt = DEFAULT_BUILDER.remove("core_examples")
+prompt = DEFAULT_BUILDER.remove("project_rules")
 ```
-
-Removing `core_examples` can make malformed delegation more likely, so prefer
-replacing it with smaller examples before deleting it entirely.
 
 ### Build A Prompt From Scratch
 
@@ -201,9 +174,9 @@ You are a Python REPL agent.
 )
 ```
 
-This is the most fragile option. If the prompt omits `rlm_delegate`, `rlm_wait`,
-`CONTEXT`, `SESSION`, or the `done(...)` rule, the model will not reliably use
-those features.
+This is the most fragile option. If the prompt omits `rlm_delegate`,
+`rlm_wait`, `CONTEXT`, `SESSION`, or the `done(...)` rule, the model will
+not reliably use those features.
 
 ## Dynamic Prompts
 
@@ -220,11 +193,11 @@ from rlmflow.prompts.default import DEFAULT_BUILDER
 
 class AuditFlow(RLMFlow):
     def build_system_prompt(self, graph: Graph) -> str:
-        extra = ""
-        if graph.depth == 0:
-            extra = "At root depth, produce an executive summary after verification."
-        else:
-            extra = "As a child call, return only structured findings."
+        extra = (
+            "At root depth, produce an executive summary after verification."
+            if graph.depth == 0
+            else "As a child call, return only structured findings."
+        )
 
         builder = DEFAULT_BUILDER.section(
             "audit_depth_rules",
@@ -271,25 +244,8 @@ handles = [
         context=test_spec,
     ),
 ]
-results = yield rlm_wait(*handles)
+results = await rlm_wait(*handles)
 ```
 
 If every child of a flow needs a different system prompt, use a subclass and
 branch on `graph.depth`, `graph.agent_id`, or `graph.query`.
-
-## Section Reference
-
-The default builder currently uses these sections, in order:
-
-| Section | Purpose |
-| --- | --- |
-| `role` | Agent identity and high-level job. |
-| `repl` | Required response protocol and execution rules. |
-| `builtins` | `CONTEXT`, `SESSION`, `rlm_delegate(...)`, `yield rlm_wait(...)`, and `done(...)`. |
-| `tools` | Runtime-generated tool list. |
-| `guardrails` | Behavioral constraints. |
-| `core_examples` | Concrete REPL patterns. |
-| `status` | Runtime-generated agent id, depth, and config status. |
-
-For most use cases, replace `role`, add one domain section, and leave `repl`,
-`builtins`, `tools`, and `status` intact.

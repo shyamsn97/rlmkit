@@ -48,39 +48,37 @@ results writes one REPL block like this:
 ```python
 h1 = rlm_delegate(name="search", query="Find evidence", context=chunk_a)
 h2 = rlm_delegate(name="verify", query="Check the answer", context=chunk_b)
-results = yield rlm_wait(h1, h2)
+results = await rlm_wait(h1, h2)
 done(combine(results))
 ```
 
-`yield rlm_wait(...)` is a real Python generator suspension point. Each
-REPL block is wrapped in a synthetic generator and driven by the
-engine via `send()`:
+`await rlm_wait(...)` is the supervision point. The REPL supports
+top-level await and the engine drives the resulting coroutine:
 
 ```python
-def __rlm_gen__():
-    h1 = rlm_delegate(name="search", query="...", context=chunk_a)
-    h2 = rlm_delegate(name="verify", query="...", context=chunk_b)
-    results = yield rlm_wait(h1, h2)   # ← suspend here
-    done(combine(results))
+h1 = rlm_delegate(name="search", query="...", context=chunk_a)
+h2 = rlm_delegate(name="verify", query="...", context=chunk_b)
+results = await rlm_wait(h1, h2)   # ← suspend here
+done(combine(results))
 ```
 
 The engine's loop, roughly:
 
 ```python
-out = gen.send(None)               # run until the yield
-# out is a WaitRequest([h1, h2]) → suspend the parent, run children
+out = coro.send(None)              # run until the await
+# out is a WaitRequest([h1, h2]) -> suspend the parent, run children
 results = [c.result() for c in children]
-gen.send(results)                  # resume; `results` is now the list
+coro.send(results)                 # resume; `results` is now the list
 ```
 
 The REPL is stateful across blocks, so the next LLM turn can still
-see `h1`, `h2`, `results`. Only `yield rlm_wait(...)` is special — any
-other top-level yield is pumped through and ignored:
+see `h1`, `h2`, `results`. Use `await rlm_wait(...)` to supervise
+children; bare `rlm_wait(...)` and top-level `yield` are errors.
 
 ```python
-yield rlm_wait(h)    # suspend, then resume with children's results
-yield 42             # discarded, immediately resumed
-yield handle         # discarded (forgot to wrap in rlm_wait()? no result)
+await rlm_wait(h)    # suspend, then resume with children's results
+rlm_wait(h)          # error: forgot await
+yield 42             # error: top-level yield is not part of the REPL protocol
 ```
 
 See [`docs/internals.md`](docs/internals.md) for the full protocol.
@@ -161,6 +159,29 @@ while not graph.finished:
 print(graph.result())
 open_viewer(workspace)
 ```
+
+To let child agents drain work-conservingly after a parent reaches
+`await rlm_wait(...)`, enable `async_children`:
+
+```python
+agent = RLMFlow(
+    llm_client=OpenAIClient("gpt-5"),
+    runtime=runtime,
+    config=RLMConfig(
+        max_depth=2,
+        max_iterations=30,
+        max_concurrency=8,
+        async_children=True,
+    ),
+)
+```
+
+With `async_children=False`, a fast child that finishes `task_1` waits for
+the rest of that parallel step before it can start `task_2`. With
+`async_children=True`, the fast child's `task_2` can start while a slow
+sibling is still running `task_1`. See
+[`examples/async_children.py`](./examples/async_children.py) for a
+deterministic timestamped demo.
 
 `Workspace.create("./myproject")` writes a debuggable workspace as it runs:
 `session/<agent-id>/` holds the per-agent state log (`session.jsonl`,

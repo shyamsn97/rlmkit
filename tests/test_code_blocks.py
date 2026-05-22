@@ -1,6 +1,6 @@
 """Test find_code_blocks and replace_code_block edge cases."""
 
-from rlmflow.utils.code import check_yield_errors, find_code_blocks, replace_code_block
+from rlmflow.utils.code import check_wait_syntax, find_code_blocks, replace_code_block
 
 
 def test_standard_fence():
@@ -88,37 +88,34 @@ def test_replace_no_block():
     print("  replace no block: OK")
 
 
-def test_yield_check_accepts_direct_call():
-    assert check_yield_errors("x = yield rlm_wait(h)") is None
-    assert check_yield_errors("yield rlm_wait(*handles)") is None
-    print("  yield direct call: OK")
+def test_wait_check_accepts_direct_await():
+    assert check_wait_syntax("x = await rlm_wait(h)") is None
+    assert check_wait_syntax("await rlm_wait(*handles)") is None
+    print("  await direct call: OK")
 
 
-def test_yield_check_accepts_conditional():
-    """`yield rlm_wait(...) if cond else other` parses as `yield (IfExp)` — still yielded."""
-    code = "results = yield rlm_wait(*handles) if handles else []"
-    assert check_yield_errors(code) is None
-    code = "x = yield other if cond else rlm_wait(h)"
-    assert check_yield_errors(code) is None
-    print("  yield ternary: OK")
+def test_wait_check_accepts_conditional():
+    code = "results = await rlm_wait(*handles) if handles else []"
+    assert check_wait_syntax(code) is None
+    print("  await ternary: OK")
 
 
-def test_yield_check_accepts_tuple():
-    code = "results = yield (rlm_wait(h1), rlm_wait(h2))"
-    assert check_yield_errors(code) is None
-    print("  yield tuple: OK")
+def test_wait_check_rejects_yield():
+    err = check_wait_syntax("x = yield rlm_wait(h)")
+    assert err is not None and "use `await rlm_wait(...)`" in err
+    print("  yield rejected: OK")
 
 
-def test_yield_check_rejects_naked_wait():
-    err = check_yield_errors("results = rlm_wait(h)")
-    assert err is not None and "must be prefixed with `yield`" in err
-    err = check_yield_errors("results = rlm_wait(*handles) if handles else []")
+def test_wait_check_rejects_naked_wait():
+    err = check_wait_syntax("results = rlm_wait(h)")
+    assert err is not None and "must be awaited" in err
+    err = check_wait_syntax("results = rlm_wait(*handles) if handles else []")
     assert err is not None
     print("  naked wait rejected: OK")
 
 
-def test_yield_check_rejects_wait_in_comprehension():
-    err = check_yield_errors("[rlm_wait(h) for h in handles]")
+def test_wait_check_rejects_wait_in_comprehension():
+    err = check_wait_syntax("[await rlm_wait(h) for h in handles]")
     assert err is not None
     print("  comprehension wait rejected: OK")
 
@@ -135,9 +132,9 @@ if __name__ == "__main__":
     test_replace_standard()
     test_replace_glued()
     test_replace_no_block()
-    test_yield_check_accepts_direct_call()
-    test_yield_check_accepts_conditional()
-    test_yield_check_accepts_tuple()
-    test_yield_check_rejects_naked_wait()
-    test_yield_check_rejects_wait_in_comprehension()
+    test_wait_check_accepts_direct_await()
+    test_wait_check_accepts_conditional()
+    test_wait_check_rejects_yield()
+    test_wait_check_rejects_naked_wait()
+    test_wait_check_rejects_wait_in_comprehension()
     print("\nAll tests passed.")

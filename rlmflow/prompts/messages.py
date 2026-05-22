@@ -1,7 +1,12 @@
 """Message templates used by the RLMFlow engine.
 
 All user-facing text lives here so rlm.py stays logic-only.
+
+Mirrors the prompts in alexzhang13/rlm (`rlm/utils/prompts.py`):
+https://github.com/alexzhang13/rlm/blob/main/rlm/utils/prompts.py
 """
+
+from __future__ import annotations
 
 from typing import Any
 
@@ -13,50 +18,85 @@ REPL_BLOCK_RULE = """Use exactly one fenced REPL code block per assistant messag
 ```
 Do not write bare `repl` without the opening and closing triple backticks."""
 
-FIRST_ACTION = f"""Query: {{query}}
+# USER_PROMPT = """Think step-by-step on what to do using the REPL environment (which contains the context) to answer the prompt.
 
-Use the REPL to inspect/decompose and act now. Choose the lane in code: `llm_query_batched(prompts)` for independent one-shot LLM prompts that do not need tools/files/iteration; `rlm_delegate(...)` plus `yield rlm_wait(*handles)` for independent units that need tools, files, execution, repair, verification, or multi-turn work. For multi-file or multi-component artifacts, spawn the child batch before writing unit outputs in root unless there is a hard sequential dependency. When delegating artifacts/components, keep each child `query` short and put the shared brief, owned scope, dependencies, interfaces, and acceptance checks in `context`; do not pass only the filename/unit name as context. Work directly only for one small local scope or truly sequential work. Do not call `done(...)` until the needed REPL work is complete.
+# Continue using the REPL environment, which has the `CONTEXT` variable, and querying sub-LLMs / sub-agents by writing to ```repl``` tags, and determine your answer. Your next action:"""
 
-{{context_hint}}{REPL_BLOCK_RULE}"""
+USER_PROMPT_WITH_ROOT = """Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original prompt: "{query}".
 
-CONTINUE_ACTION = """Continue working on the original query: "{query}". Use saved REPL variables, `CONTEXT`, `llm_query_batched(...)`, and `rlm_delegate(...)` as appropriate. If independent units remain, batch them before waiting; if a prior step failed, repair the specific failure. Your next action:
-
-{context_hint}"""
-
-RESUME_VERIFY_ACTION = """Your previous `yield rlm_wait(...)` has resumed; children finished: {child_ids}. Use the wait-result variables already saved by your code and any other saved REPL variables to verify the child outputs. Then call `done(answer)`, repair only failed pieces, or explain why another delegation batch is needed.
-
-{context_hint}"""
-
-CONTEXT_HINT_PRESENT = """Relevant data is available as the `CONTEXT` REPL variable - inspect it with `CONTEXT.info/read/lines/grep`. If `CONTEXT` contains references or assigned scope rather than the target data itself, use available tools/functions to inspect those referenced items; do not treat the reference list itself as the evidence.
-
-"""
-CONTEXT_HINT_ABSENT = ""
+Continue using the REPL environment, which has the `CONTEXT` variable, and querying sub-LLMs / sub-agents by writing to ```repl``` tags, and determine your answer. Your next action:"""
 
 
-def format_context_hint(
-    info: dict[str, Any] | None = None,
-    *,
+def build_context_metadata(
+    info: dict[str, Any] | None,
     context_keys: list[str] | None = None,
 ) -> str:
-    """Render compact context metadata for first/continue action messages."""
+    """`Your CONTEXT contains ...` size signal + optional extra-keys note.
 
-    keys = sorted(context_keys or [])
-    if not info and not keys:
-        return CONTEXT_HINT_ABSENT
+    Mirrors the size hint in alexzhang13/rlm's `build_rlm_system_prompt`
+    (https://github.com/alexzhang13/rlm/blob/main/rlm/utils/prompts.py).
+    Returns ``""`` when there is nothing to say (empty/missing CONTEXT and no
+    extra keys). Called once per agent, prepended to the iteration-0 user
+    message so the model knows the size of what it's been handed before
+    deciding on a chunking strategy.
+    """
+    lines: list[str] = []
+    chars = int(info.get("chars", 0)) if info else 0
+    if chars > 0:
+        approx_tokens = int(info.get("approx_tokens", chars // 4))
+        n_lines = int(info.get("lines", 0))
+        lines.append(
+            f"Your `CONTEXT` contains {chars} characters across {n_lines} "
+            f"lines (~{approx_tokens} tokens)."
+        )
 
-    lines = [CONTEXT_HINT_PRESENT.rstrip()]
-    if info:
-        parts = []
-        for key in ("chars", "approx_tokens", "lines"):
-            if key in info:
-                parts.append(f"{key}={info[key]}")
-        if parts:
-            lines.append("Context metadata: " + ", ".join(parts) + ".")
-    if keys:
-        shown = ", ".join(keys[:8])
-        suffix = f", ... +{len(keys) - 8} more" if len(keys) > 8 else ""
-        lines.append(f"Available context keys: {shown}{suffix}.")
-    return "\n".join(lines) + "\n\n"
+    extra_keys = sorted(k for k in (context_keys or []) if k != "context")
+    if extra_keys:
+        shown = ", ".join(extra_keys[:8])
+        suffix = f", ... +{len(extra_keys) - 8} more" if len(extra_keys) > 8 else ""
+        lines.append(f"Additional context keys: {shown}{suffix}.")
+
+    return "\n\n".join(lines)
+
+
+CONTINUE_ACTION = "Continue. Your next action:"
+
+
+def build_user_prompt(
+    *,
+    query: str | None = None,
+    iteration: int = 0,
+    depth: int = 0,
+    max_depth: int = 0,
+    context_keys: list[str] | None = None,
+    context_info: dict[str, Any] | None = None,
+) -> str:
+    if iteration == 0:
+        safeguard = (
+            "You have not interacted with the REPL environment or seen your "
+            "prompt / context yet. Your next action should be to look through "
+            "and figure out how to answer the prompt, so don't just provide a "
+            "final answer yet."
+        )
+        body = USER_PROMPT_WITH_ROOT.format(query=query)
+        metadata = build_context_metadata(context_info, context_keys)
+        parts = [safeguard]
+        if metadata:
+            parts.append(metadata)
+        parts.append(body)
+        prompt = "\n\n".join(parts)
+    else:
+        # Continue turns: the REPL output above already carries all the
+        # substantive context. The model knows it's in a loop and what
+        # the original query was (from history). A minimal nudge is enough.
+        prompt = CONTINUE_ACTION
+
+    if max_depth > 0 and depth >= max_depth:
+        prompt += (
+            "\n\nNote: You are at the recursion limit; you cannot spawn sub-agents."
+        )
+
+    return prompt
 
 
 FINAL_ANSWER_ACTION = """You have used the full iteration budget without calling done().
@@ -65,14 +105,12 @@ Based on the work above, provide the final answer now. The block must call done(
 
 NO_CODE_BLOCK = f"ERROR: Your previous reply did not contain a ```repl``` code block. {REPL_BLOCK_RULE} Try again."
 
-EXECUTION_OUTPUT = "REPL output:\n{output}"
+EXECUTION_OUTPUT = "REPL output for previous block:\n{output}"
 
-ORPHANED_DELEGATES = "You delegated [{names}] but never called `yield rlm_wait(...)`. You must use `yield rlm_wait(*handles)` to collect results."
+ORPHANED_DELEGATES = "You delegated [{names}] but never called `await rlm_wait(...)`. You must use `await rlm_wait(*handles)` to collect results."
 
 STATUS_DEPTH_ROOT = " You have the full recursion budget available."
-
 STATUS_DEPTH_MID = " Some recursion budget remains available."
-
 STATUS_DEPTH_NEAR_MAX = " You are near the recursion limit."
 
 TRUNCATION_SUMMARY = """## Query

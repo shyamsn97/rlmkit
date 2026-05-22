@@ -1,6 +1,6 @@
 """Runtime — ship a JSON message to a REPL, get the response back.
 
-The REPL itself (code execution, generator suspension, tool-call
+The REPL itself (code execution, await suspension, tool-call
 proxying) lives in :mod:`rlmflow.runtime.repl`.  A :class:`Runtime`
 subclass just decides *how* to talk to it: in-process, over a
 subprocess pipe, over a container's stdio, over SSH, whatever.
@@ -112,10 +112,10 @@ class Runtime(ABC):
         # core tool closures (``done``, ``rlm_delegate``) the engine binds to
         # this runtime. The engine resets this between executions.
         self.env: dict[str, Any] = {}
-        # ``True`` while the REPL holds a generator paused at a ``yield``.
+        # ``True`` while the REPL holds a block paused at ``await rlm_wait``.
         # The engine reads this to detect a lost suspension (e.g. after
         # fork or process restart) and trigger replay-of-one to rebuild
-        # the generator before calling ``resume_code``.
+        # the coroutine before calling ``resume_code``.
         self.suspended: bool = False
 
     # ── subclasses implement these two ────────────────────────────────
@@ -180,7 +180,7 @@ class Runtime(ABC):
         return self.call({"cmd": "run", "code": code}).get("output", "")
 
     def start_code(self, code: str) -> tuple[bool, object, bool]:
-        """Run code that may ``yield``.
+        """Run code that may await ``rlm_wait``.
 
         Returns ``(suspended, payload, errored)``. ``payload`` is
         ``(WaitRequest, pre_output)`` when ``suspended`` else captured
@@ -195,7 +195,7 @@ class Runtime(ABC):
         return suspended, payload, errored
 
     def resume_code(self, send_value=None) -> tuple[bool, object, bool]:
-        """Resume a suspended generator. Same return shape as :meth:`start_code`."""
+        """Resume a suspended block. Same return shape as :meth:`start_code`."""
         suspended, payload, errored = parse_response(
             self.call({"cmd": "resume", "value": send_value})
         )

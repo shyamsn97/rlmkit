@@ -15,7 +15,7 @@ turn 0:
 turn 1+:
  → fresh = pick_slugs(get_runs())
  → handles = [rlm_delegate(name=slug, query=hyp, context=ctx) for slug, hyp, ctx in fresh]
- → results = (yield rlm_wait(*handles))   # children call run_experiment
+ → results = await rlm_wait(*handles)     # children call run_experiment
  → ...
  → done(<summary>)
 ```

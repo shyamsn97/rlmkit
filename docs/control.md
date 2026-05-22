@@ -26,6 +26,44 @@ finest-grained reproducible step the engine exposes — see
 [`internal/node_model.md`](internal/node_model.md) for the full
 state-machine spec and worked simulations.
 
+## Async Children
+
+By default, children advance in synchronized `step(...)` batches. If child A's
+current step takes 10 seconds and child B's current step takes 2 seconds,
+child B's next step waits until child A's current step finishes.
+
+Set `async_children=True` when you want a work-conserving drain after a parent
+hits `await rlm_wait(...)`:
+
+```python
+agent = RLMFlow(
+    llm_client=...,
+    runtime=...,
+    config=RLMConfig(
+        max_depth=2,
+        max_iterations=30,
+        max_concurrency=8,
+        async_children=True,
+    ),
+)
+```
+
+With that flag, children still do not run before the parent reaches
+`await rlm_wait(...)`. Once the parent is supervising, runnable children use
+the configured pool's `run_until_idle(...)` behavior:
+
+```text
+childa.task_1 starts  # slow, 10s
+childb.task_1 starts  # fast, 2s
+childb.task_1 finishes
+childb.task_2 starts  # starts before childa.task_1 finishes
+childa.task_1 finishes
+parent resumes when all waited-on children are done
+```
+
+See [`examples/async_children.py`](../examples/async_children.py) for a
+deterministic offline demo that prints both modes side by side.
+
 ## Workspace Resume
 
 ```python
@@ -76,8 +114,8 @@ The engine reads from `graph.states`, appends new states through the
 session, and produces a fresh snapshot on every `step`. There is no
 in-memory node graph to keep in sync with disk.
 
-For the runtime contract around `yield rlm_wait(...)` and `ResumeAction`,
-the full REPL/yield protocol, persistence layout, and engine
+For the runtime contract around `await rlm_wait(...)` and `ResumeAction`,
+the full REPL/await protocol, persistence layout, and engine
 extension surface, see [`internals.md`](internals.md).
 
 ## Custom runtime

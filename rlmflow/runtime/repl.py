@@ -1,6 +1,6 @@
-"""REPL — code execution with generator-based suspension.
+"""REPL — code execution with top-level-await suspension.
 
-Handles stdout capture, generator wrapping, the yield/resume protocol,
+Handles stdout capture, coroutine suspension, the await/resume protocol,
 and the JSON-over-stdio bridge used by remote runtimes.
 
 Container entrypoint: ``python -m rlmflow.runtime.repl [--workdir DIR]``.
@@ -12,7 +12,7 @@ Commands:
   - ``{"cmd": "inject_object_proxy", "name": N, "methods": [...]}``    bind ``N`` with each method as a proxy fn
   - ``{"cmd": "read",                "name": N}``                      returns ``{"value": namespace.get(N)}``
   - ``{"cmd": "run",                 "code": src}``                    exec; may suspend
-  - ``{"cmd": "resume",              "value": v}``                     resume suspended gen
+  - ``{"cmd": "resume",              "value": v}``                     resume suspended block
 
 Responses for run/resume: ``{"suspended": true, "agent_ids": [...]}`` or
 ``{"suspended": false, "output": "..."}``.
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import inspect
 import io
 import itertools
 import json
@@ -37,6 +38,7 @@ from typing import Any, TextIO
 
 from rlmflow.graph import ChildHandle, WaitRequest
 from rlmflow.tools.builtins import DoneSignal
+from rlmflow.utils.code import check_wait_syntax
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _THIS_FILE = os.path.normpath(__file__)
@@ -72,89 +74,23 @@ def _format_repl_traceback(exc: BaseException) -> str:
     return "".join(te.format()).rstrip()
 
 
-class _AnnotationStripper(ast.NodeTransformer):
-    """Rewrite ``x: T = v`` to ``x = v`` on bare names, and drop ``x: T``.
+def _has_top_level_await(tree: ast.AST) -> bool:
+    """True iff ``tree`` has top-level ``await`` outside nested scopes."""
 
-    Needed because the generator wrapper declares assigned names ``global``,
-    and Python forbids a name being annotated and ``global`` in the same
-    function scope. We stop at nested ``def`` / ``async def`` / ``class``
-    because those open their own scopes.
-    """
-
-    def visit_FunctionDef(self, node):  # noqa: N802
-        return node
-
-    visit_AsyncFunctionDef = visit_FunctionDef
-    visit_ClassDef = visit_FunctionDef
-    visit_Lambda = visit_FunctionDef
-
-    def visit_AnnAssign(self, node):  # noqa: N802
-        if not isinstance(node.target, ast.Name):
-            return node
-        if node.value is None:
-            return None
-        new = ast.Assign(targets=[node.target], value=node.value)
-        return ast.copy_location(new, node)
-
-
-def _strip_name_annotations(stmt: ast.stmt) -> ast.stmt | None:
-    return _AnnotationStripper().visit(stmt)
-
-
-def _has_top_level_yield(tree: ast.AST) -> bool:
-    """True iff ``tree`` has any ``yield`` / ``yield from`` at the
-    block's top level (i.e. outside every nested function / async
-    function / lambda / generator expression / class body).
-
-    Why "any", not "yield rlm_wait(...)"? Because this question is purely
-    about Python *compilation*, not about the agent suspension
-    protocol. ``yield`` at module level is a ``SyntaxError`` in
-    plain Python — it has to live inside a function. So if the
-    block contains any top-level yield, we must wrap the whole
-    thing in a synthetic ``def __rlm_gen__():`` for ``compile()`` to
-    accept it. If there is no top-level yield, we exec the code
-    directly. That's the only thing this function decides.
-
-    The separate question — "did the block yield a ``rlm_wait(*handles)``
-    request, meaning suspend the agent, or did it yield something
-    else, meaning treat it as a plain Python generator yield" — is
-    handled later in :meth:`REPL.advance`. Only ``WaitRequest``
-    yields suspend; everything else is pumped past silently. See
-    ``docs/internals.md`` for the full picture.
-
-    Examples that wrap (return ``True``)::
-
-        yield                  # bare yield at top level
-        yield 1                # any value at top level
-        yield rlm_wait(h)      # the engine-suspension case
-        x = yield 5            # yield as expression
-        for h in hs: yield h   # inside top-level control flow
-
-    Examples that don't wrap (return ``False``) because the yield
-    belongs to a nested scope, which is itself a perfectly valid
-    Python generator/function definition the block can use::
-
-        def squares(n):                   # ordinary helper generator
-            yield n*n
-        xs = list(i*i for i in range(3))  # generator expression
-        f = lambda: (yield 1)             # lambda body
-        class C:                          # method body
-            def __iter__(self):
-                yield 1
-
-    Why we walk the AST instead of using ``ast.walk``: ``ast.walk``
-    descends into nested function bodies, so it would flag the
-    ``def squares`` cases as having a yield and we'd wrap them. The
-    wrap would then fail to behave as a generator (``__rlm_gen__``
-    has no actual top-level yield) and return ``None`` from
-    ``__rlm_gen__()``, which would later crash
-    ``REPL.advance`` on ``None.agent_ids``.
-    """
-    boundary = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    boundary = (
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.Lambda,
+        ast.ClassDef,
+        ast.ListComp,
+        ast.SetComp,
+        ast.DictComp,
+        ast.GeneratorExp,
+    )
     stack: list[ast.AST] = [tree]
     while stack:
         node = stack.pop()
-        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+        if isinstance(node, ast.Await):
             return True
         for child in ast.iter_child_nodes(node):
             if isinstance(child, boundary):
@@ -210,9 +146,8 @@ def deserialize(val: Any) -> Any:
 
 
 class REPL:
-    """Execute code in a Python namespace with generator suspension.
+    """Execute code in a Python namespace with top-level-await suspension.
 
-    Wraps code in a generator function so ``yield`` suspends execution.
     Captures stdout via a thread-local proxy so parallel REPLs running in
     a thread pool don't clobber each other's output.
 
@@ -227,7 +162,7 @@ class REPL:
     ) -> None:
         self.namespace = namespace or {"__builtins__": __builtins__}
         self.protocol_out = protocol_out or sys.stdout
-        self.gen = None
+        self.coro = None
         self.buf: io.StringIO | None = None
         self.errored: bool = False
         self._repl_id = next(_REPL_ID_COUNTER)
@@ -295,104 +230,65 @@ class REPL:
             exec(compile(code, filename, "exec"), self.namespace)
         return strip_ansi(self.buf.getvalue().strip())
 
-    def _wrap_generator(self, tree: ast.Module, filename: str):
-        """Wrap parsed ``tree`` in a generator fn; ``global`` every assigned
-        name so variables persist in ``self.namespace`` across yields.
-
-        ``from X import *`` is illegal inside functions, so any such
-        statements are hoisted out and exec'd at module level first;
-        the imported names then live on ``self.namespace`` and are
-        visible to the generator via globals.
-
-        ``AnnAssign`` on a bare name (``x: int = 1``) is rewritten to a
-        plain ``Assign`` because Python forbids a name being both
-        ``global`` and annotated in the same scope.
-        """
-        star_imports: list[ast.stmt] = []
-        body_stmts: list[ast.stmt] = []
-        for stmt in tree.body:
-            if isinstance(stmt, ast.ImportFrom) and any(
-                a.name == "*" for a in stmt.names
-            ):
-                star_imports.append(stmt)
-            else:
-                body_stmts.append(_strip_name_annotations(stmt))
-        body_stmts = [s for s in body_stmts if s is not None]
-
-        if star_imports:
-            imports_mod = ast.Module(body=star_imports, type_ignores=[])
-            ast.fix_missing_locations(imports_mod)
-            exec(compile(imports_mod, filename, "exec"), self.namespace)
-
-        assigned = {
-            node.id
-            for stmt in body_stmts
-            for node in ast.walk(stmt)
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-        }
-        func = ast.parse("def __rlm_gen__(): pass").body[0]
-        body: list[ast.stmt] = []
-        if assigned:
-            body.append(ast.Global(names=sorted(assigned)))
-        body.extend(body_stmts or [ast.Pass()])
-        func.body = body
-        module = ast.Module(body=[func], type_ignores=[])
-        ast.fix_missing_locations(module)
-        exec(compile(module, filename, "exec"), self.namespace)
-        return self.namespace.pop("__rlm_gen__")
-
     def start(self, code: str) -> tuple[bool, object]:
-        """Execute ``code``. Returns ``(True, yielded)`` or ``(False, stdout)``."""
+        """Execute ``code``. Returns ``(True, awaited)`` or ``(False, stdout)``."""
         self.buf = io.StringIO()
         self.errored = False
+        self.coro = None
         try:
             tree = ast.parse(code)
         except SyntaxError as exc:
             self.buf.write(f"\nSyntaxError: {exc}")
             self.errored = True
             return False, self.buf.getvalue().strip()
+        if err := check_wait_syntax(code):
+            self.buf.write(err)
+            self.errored = True
+            return False, self.buf.getvalue().strip()
 
-        has_yield = _has_top_level_yield(tree)
         filename = self._source_filename(code)
 
-        if not has_yield:
+        if not _has_top_level_await(tree):
             with self.captured():
                 exec(compile(code, filename, "exec"), self.namespace)
             return False, strip_ansi(self.buf.getvalue().strip())
 
-        fn = self._wrap_generator(tree, filename)
-        self.gen = fn()
+        with self.captured():
+            code_obj = compile(
+                code,
+                filename,
+                "exec",
+                flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+            )
+            result = eval(code_obj, self.namespace)
+            if not inspect.iscoroutine(result):
+                return False, strip_ansi(self.buf.getvalue().strip())
+            self.coro = result
+        if self.errored:
+            return False, strip_ansi(self.buf.getvalue().strip())
         return self.advance()
 
     def resume(self, send_value=None) -> tuple[bool, object]:
-        """Resume a suspended generator. Same return convention as :meth:`start`."""
+        """Resume a suspended top-level-await block."""
         self.buf = io.StringIO()
         self.errored = False
         return self.advance(send_value)
 
     def advance(self, send_value=None) -> tuple[bool, object]:
-        """Drive the generator. Suspend only on ``WaitRequest`` yields.
-
-        The REPL only treats a yield as suspension when its value is a
-        :class:`WaitRequest` (returned by ``rlm_wait(*handles)``). Any other
-        yielded value is treated like a normal Python generator yield —
-        the engine just pumps the generator forward by sending ``None``
-        back. This keeps generic ``yield`` usage in REPL code working
-        (data pipelines, generator helpers consumed at top level, etc.)
-        and only intercepts the specific delegate→wait protocol the
-        engine knows how to schedule.
-        """
+        """Drive the coroutine. Suspend only on awaited ``WaitRequest`` values."""
+        if self.coro is None:
+            self.buf.write("\nRuntimeError: no suspended awaitable")
+            self.errored = True
+            return False, strip_ansi(self.buf.getvalue().strip())
         with self.captured():
             try:
-                request = self.gen.send(send_value)
-                while not isinstance(request, WaitRequest):
-                    # Non-Wait top-level yield: behave like a plain
-                    # Python generator — discard the value, resume.
-                    request = self.gen.send(None)
+                request = self.coro.send(send_value)
+                if not isinstance(request, WaitRequest):
+                    raise TypeError("Only `await rlm_wait(...)` is supported")
                 pre_output = strip_ansi(self.buf.getvalue().strip())
                 return True, (request, pre_output)
             except StopIteration:
-                pass
+                self.coro = None
         return False, strip_ansi(self.buf.getvalue().strip())
 
     # ── JSON-over-stdio protocol (remote containers) ──────────────────

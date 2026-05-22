@@ -1,62 +1,55 @@
-"""REPL yield protocol — only `yield rlm_wait(...)` suspends.
+"""REPL await protocol — only `await rlm_wait(...)` suspends.
 
 Covers the REPL yield protocol matrix in `docs/internals.md`. The engine must:
 
 1. Suspend (and surface ``WaitRequest.agent_ids``) only when the
-   block does ``yield rlm_wait(...)`` at top level.
-2. Treat every other yield (bare ``yield``, ``yield 42``,
-   ``yield handle``, ``yield rlm_delegate(...)`` without ``rlm_wait``) as a
-   plain Python generator yield — discard, resume, never suspend.
+   block does ``await rlm_wait(...)`` at top level.
+2. Reject top-level ``yield``; it is no longer part of the action language.
 3. Leave generic generator code alone: helpers defined inside the
    block, generator expressions, and ``yield from`` inside helpers
-   must not trigger generator wrapping or any engine intervention.
+   must not trigger await handling or any engine intervention.
 """
 
 from __future__ import annotations
 
-import ast
-
 from rlmflow.graph import ChildHandle, WaitRequest
 from rlmflow.runtime.local import LocalRuntime
-from rlmflow.runtime.repl import REPL, _has_top_level_yield
+from rlmflow.runtime.repl import REPL, _has_top_level_await
 from rlmflow.tools.builtins import SHOW_VARS
 
 
-# ── _has_top_level_yield ─────────────────────────────────────────────
+# ── _has_top_level_await ─────────────────────────────────────────────
 
 
-def _yields(code: str) -> bool:
-    return _has_top_level_yield(ast.parse(code))
+def _awaits(code: str) -> bool:
+    import ast
+
+    return _has_top_level_await(ast.parse(code))
 
 
-def test_top_level_yield_detected():
-    assert _yields("yield rlm_wait(h)")
-    assert _yields("x = yield rlm_wait(h)")
-    assert _yields("yield from gen()")
-    assert _yields("if cond:\n    yield rlm_wait(h)\nelse:\n    pass")
-    assert _yields("for h in handles:\n    yield rlm_wait(h)")
+def test_top_level_await_detected():
+    assert _awaits("await rlm_wait(h)")
+    assert _awaits("x = await rlm_wait(h)")
+    assert _awaits("if cond:\n    await rlm_wait(h)\nelse:\n    pass")
+    assert _awaits("for h in handles:\n    await rlm_wait(h)")
 
 
-def test_yield_inside_nested_function_is_not_top_level():
-    assert not _yields("def squares(n):\n    for i in range(n):\n        yield i")
-    assert not _yields("async def f():\n    yield 1")
-    assert not _yields("f = lambda: (yield 1)")
-    assert not _yields(
-        "class C:\n    def __iter__(self):\n        yield 1\n"
+def test_await_inside_nested_function_is_not_top_level():
+    assert not _awaits("async def f():\n    await other()")
+    assert not _awaits(
+        "class C:\n    async def run(self):\n        await other()\n"
     )
 
 
-def test_yield_inside_genexp_is_not_top_level():
-    # generator expressions are syntactically a hidden function;
-    # their internal yields should not gate wrapping
-    assert not _yields("xs = list(i*i for i in range(10))")
+def test_await_inside_comprehension_is_not_top_level():
+    assert not _awaits("xs = [await f(i) for i in range(10)]")
 
 
-def test_no_yield_anywhere():
-    assert not _yields("x = 1\nprint(x)")
+def test_no_await_anywhere():
+    assert not _awaits("x = 1\nprint(x)")
 
 
-# ── REPL.start / advance — non-Wait yields don't suspend ─────────────
+# ── REPL.start / advance ─────────────────────────────────────────────
 
 
 def _new_repl():
@@ -123,44 +116,44 @@ def test_yield_from_inside_helper_does_not_suspend():
     assert "[0, 1, 2, 10, 20]" in out
 
 
-def test_top_level_bare_yield_pumps_through():
+def test_top_level_bare_yield_is_rejected():
     r = _new_repl()
     code = "print('before')\nyield\nprint('after')\n"
     suspended, out = r.start(code)
     assert suspended is False
-    assert "before" in out and "after" in out
+    assert r.errored is True
+    assert "top-level `yield`" in out
 
 
-def test_top_level_yield_with_value_pumps_through():
+def test_top_level_yield_with_value_is_rejected():
     r = _new_repl()
     code = "print('a')\nyield 42\nprint('b')\nyield 'hello'\nprint('c')\n"
     suspended, out = r.start(code)
     assert suspended is False
-    for tok in ("a", "b", "c"):
-        assert tok in out
+    assert r.errored is True
+    assert "top-level `yield`" in out
 
 
-def test_top_level_yield_handle_pumps_through_does_not_crash():
-    """``yield delegate_handle`` (forgot to wrap in rlm_wait) must NOT crash
-    the engine. It pumps through silently."""
+def test_top_level_yield_handle_is_rejected():
     r = _new_repl()
     handle = ChildHandle(agent_id="root.kid")
     r.namespace["h"] = handle
     code = "print('before')\nyield h\nprint('after')\n"
     suspended, out = r.start(code)
     assert suspended is False
-    assert "before" in out and "after" in out
+    assert r.errored is True
+    assert "top-level `yield`" in out
 
 
-# ── REPL.start / advance — only WaitRequest suspends ─────────────────
+# ── REPL.start / advance — only awaited WaitRequest suspends ─────────
 
 
-def test_yield_wait_suspends_with_correct_agent_ids():
+def test_await_wait_suspends_with_correct_agent_ids():
     r = _new_repl()
     handle = ChildHandle(agent_id="root.kid")
     r.namespace["rlm_wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
     r.namespace["h"] = handle
-    suspended, payload = r.start("print('x')\nresult = yield rlm_wait(h)\n")
+    suspended, payload = r.start("print('x')\nresult = await rlm_wait(h)\n")
     assert suspended is True
     request, pre = payload
     assert isinstance(request, WaitRequest)
@@ -173,21 +166,18 @@ def test_multiple_handles_in_one_wait():
     r.namespace["rlm_wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
     r.namespace["h1"] = ChildHandle(agent_id="root.a")
     r.namespace["h2"] = ChildHandle(agent_id="root.b")
-    suspended, (request, _) = r.start("yield rlm_wait(h1, h2)")
+    suspended, (request, _) = r.start("await rlm_wait(h1, h2)")
     assert suspended is True
     assert request.agent_ids == ["root.a", "root.b"]
 
 
-def test_non_wait_yields_before_wait_are_pumped_then_suspends():
-    """A block that yields some junk and then yields a rlm_wait must
-    still suspend on the rlm_wait; the engine pumps past the junk."""
+def test_unsupported_await_errors():
     r = _new_repl()
-    r.namespace["rlm_wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
-    r.namespace["h"] = ChildHandle(agent_id="root.kid")
-    code = "yield 1\nyield 'noise'\nyield rlm_wait(h)\n"
-    suspended, (request, _) = r.start(code)
-    assert suspended is True
-    assert request.agent_ids == ["root.kid"]
+    code = "async def f():\n    return 1\nresult = await f()\n"
+    suspended, out = r.start(code)
+    assert suspended is False
+    assert r.errored is True
+    assert "only `await rlm_wait(...)` is supported" in out
 
 
 def test_system_exit_in_block_is_captured_not_propagated():
@@ -243,7 +233,7 @@ def test_resume_returns_send_value_to_block():
     r = _new_repl()
     r.namespace["rlm_wait"] = lambda *hs: WaitRequest([h.agent_id for h in hs])
     r.namespace["h"] = ChildHandle(agent_id="root.kid")
-    suspended, _ = r.start("result = yield rlm_wait(h)\nprint('got', result)\n")
+    suspended, _ = r.start("result = await rlm_wait(h)\nprint('got', result)\n")
     assert suspended is True
     suspended, out = r.resume(send_value=["payload"])
     assert suspended is False
