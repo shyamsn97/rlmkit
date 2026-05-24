@@ -182,6 +182,14 @@ def test_plot_repeated_fanouts_keep_horizontal_span():
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
+def test_plot_moderate_runs_keep_all_agent_labels():
+    graph = _multi_batch_fanout_graph(batch_size=6)
+    fig = _build_graph_figure(graph)
+
+    assert len(fig.layout.annotations or ()) == len(graph.agents)
+
+
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_plot_dense_runs_cap_scaled_marker_and_label_size():
     fig = _multi_batch_fanout_graph(batch_size=45).plot(
         marker_mult=10.0,
@@ -190,10 +198,10 @@ def test_plot_dense_runs_cap_scaled_marker_and_label_size():
     markers, font, edge, marker_line = _marker_text_sizes(fig)
 
     assert markers is not None
-    assert max(markers) <= 10
+    assert 12 <= max(markers) <= 18
     assert font is not None and font <= 8
     assert edge == 1
-    assert marker_line is not None and marker_line <= 0.6
+    assert marker_line is not None and marker_line <= 1.2
     assert len(fig.layout.annotations or ()) > 1
 
 

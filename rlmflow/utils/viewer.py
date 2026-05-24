@@ -70,10 +70,12 @@ _AGENT_LABEL_COLOR = "#3fb950"
 # Plotly annotations apply ``yshift`` in screen pixels regardless of the
 # figure's data-coordinate range, so this is a stable visual gap.
 _AGENT_LABEL_YSHIFT = 10
-_DENSE_NODE_THRESHOLD = 50
-_DENSE_MIN_MARKER_SIZE = 3
-_DENSE_MAX_MARKER_SIZE = 10
-_DENSE_MAX_MARKER_LINE_WIDTH = 0.6
+_DENSE_NODE_THRESHOLD = 24
+_DENSE_LABEL_NODE_THRESHOLD = 80
+_DENSE_LABEL_AGENT_THRESHOLD = 24
+_DENSE_MIN_MARKER_SIZE = 12
+_DENSE_MAX_MARKER_SIZE = 18
+_DENSE_MAX_MARKER_LINE_WIDTH = 1.2
 _DENSE_MAX_AGENT_LABEL_SIZE = 8
 
 
@@ -440,7 +442,7 @@ def _dense_marker_cap(fig: Any) -> float:
         return float(_DENSE_MAX_MARKER_SIZE)
 
     row_px = plot_height * _Y_SPACING / y_span
-    return max(_DENSE_MIN_MARKER_SIZE, min(_DENSE_MAX_MARKER_SIZE, row_px * 0.28))
+    return max(_DENSE_MIN_MARKER_SIZE, min(_DENSE_MAX_MARKER_SIZE, row_px * 0.6))
 
 
 def _build_graph_figure(
@@ -664,7 +666,7 @@ def _build_graph_figure(
     is_agent_entry = [agent_first_id.get(n.agent_id) == n.id for n in ordered]
     colors = [_NODE_COLORS.get(_display_kind(n), "#8b949e") for n in ordered]
     symbols = [_NODE_SYMBOLS.get(_display_kind(n), "circle") for n in ordered]
-    sizes = [14 for _ in ordered]
+    sizes = [24 for _ in ordered]
     hover = [_state_hover_text(n, graph.agents[n.agent_id]) for n in ordered]
 
     node_trace = go.Scatter(
@@ -678,7 +680,7 @@ def _build_graph_figure(
             "color": colors,
             "symbol": symbols,
             "size": sizes,
-            "line": {"color": "#0d1117", "width": 1.5},
+            "line": {"color": "#0d1117", "width": 2.0},
         },
         cliponaxis=False,
         showlegend=False,
@@ -695,7 +697,10 @@ def _build_graph_figure(
     # above it. State kinds are conveyed by the legend (color +
     # symbol), so no per-state text is rendered.
     entry_nodes = [node for node, entry in zip(ordered, is_agent_entry) if entry]
-    dense_labels = len(ordered) >= _DENSE_NODE_THRESHOLD or len(entry_nodes) >= 24
+    dense_labels = (
+        len(ordered) >= _DENSE_LABEL_NODE_THRESHOLD
+        or len(entry_nodes) >= _DENSE_LABEL_AGENT_THRESHOLD
+    )
     label_limit = 9 if dense_labels else 22
     labeled_bounds_by_row: dict[float, list[tuple[float, float]]] = {}
 
@@ -738,7 +743,7 @@ def _build_graph_figure(
                 marker={
                     "color": color,
                     "symbol": _NODE_SYMBOLS.get(ntype, "circle"),
-                    "size": 11,
+                    "size": 14,
                     "line": {"color": "#0d1117", "width": 1},
                 },
                 name=ntype,
@@ -997,7 +1002,7 @@ def save_image(
     width: int = 1800,
     height: int = 1350,
     scale: float = 2.0,
-    element_mult: float = 3.0,
+    element_mult: float = 1.0,
     marker_mult: float | None = None,
     text_mult: float | None = None,
     normalize_labels: bool = True,
@@ -1036,7 +1041,7 @@ def save_steps(
     width: int = 1800,
     height: int = 1350,
     scale: float = 2.0,
-    element_mult: float = 3.0,
+    element_mult: float = 1.0,
     marker_mult: float | None = None,
     text_mult: float | None = None,
     normalize_labels: bool = True,
@@ -1239,7 +1244,7 @@ def render_html(
     title: str = "rlmflow run",
     height: int = 720,
     include_plotlyjs: str | bool = "cdn",
-    element_mult: float = 2.0,
+    element_mult: float = 1.0,
     marker_mult: float | None = None,
     text_mult: float | None = None,
     normalize_labels: bool = True,
@@ -1340,7 +1345,7 @@ def save_gif(
     width: int = 1200,
     height: int = 900,
     scale: float = 1.0,
-    element_mult: float = 2.0,
+    element_mult: float = 1.0,
     marker_mult: float | None = None,
     text_mult: float | None = None,
     normalize_labels: bool = True,
