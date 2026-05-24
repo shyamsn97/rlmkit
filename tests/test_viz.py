@@ -23,7 +23,7 @@ from rlmflow.utils import (
 )
 from rlmflow.utils.viz import LiveView, code_log, report_md, token_sparkline
 from rlmflow.utils.viz import _render_rich_tree
-from rlmflow.utils.viewer import _scale_figure_elements
+from rlmflow.utils.viewer import _build_graph_figure, _scale_figure_elements
 
 KALEIDO_INSTALLED = importlib.util.find_spec("kaleido") is not None
 PIL_INSTALLED = importlib.util.find_spec("PIL") is not None
@@ -85,6 +85,59 @@ def _final() -> Graph:
     return _run_steps()[-1]
 
 
+def _multi_batch_fanout_graph(
+    batch_size: int = 6,
+    *,
+    child_chain_len: int = 2,
+) -> Graph:
+    first_batch = [f"root.batch1_{i}" for i in range(batch_size)]
+    second_batch = [f"root.batch2_{i}" for i in range(batch_size)]
+    q = UserQuery(id="root_q", agent_id="root", seq=0, content="start")
+    sup1 = SupervisingOutput(
+        id="root_sup1",
+        agent_id="root",
+        seq=1,
+        waiting_on=first_batch,
+    )
+    sup2 = SupervisingOutput(
+        id="root_sup2",
+        agent_id="root",
+        seq=2,
+        waiting_on=second_batch,
+    )
+    done = DoneOutput(id="root_done", agent_id="root", seq=3, result="done")
+
+    children: dict[str, Graph] = {}
+    for aid in first_batch + second_batch:
+        states = [UserQuery(id=f"{aid}_q", agent_id=aid, seq=0, content=aid)]
+        for seq in range(1, child_chain_len - 1):
+            states.append(
+                LLMOutput(id=f"{aid}_llm_{seq}", agent_id=aid, seq=seq)
+            )
+        states.append(
+            DoneOutput(
+                id=f"{aid}_done",
+                agent_id=aid,
+                seq=child_chain_len - 1,
+                result=aid,
+            )
+        )
+        parent = sup1 if aid in first_batch else sup2
+        children[aid] = Graph(
+            agent_id=aid,
+            depth=1,
+            parent_agent_id="root",
+            parent_node_id=parent.id,
+            states=states,
+        )
+
+    return Graph(
+        agent_id="root",
+        states=[q, sup1, sup2, done],
+        children=children,
+    )
+
+
 # ── Graph.plot: every supported format ───────────────────────────────
 
 
@@ -108,6 +161,40 @@ def test_plot_returns_plotly_figure_with_title():
     fig = _final().plot(title="sample")
     assert fig.layout.title.text.startswith("<b>sample</b>")
     assert len(fig.data) >= 2
+
+
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
+def test_plot_repeated_fanouts_keep_horizontal_span():
+    fig = _build_graph_figure(_multi_batch_fanout_graph())
+    node_trace = next(trace for trace in fig.data if getattr(trace, "customdata", None))
+    x_by_id = dict(zip(node_trace.customdata, node_trace.x))
+
+    first_span = (
+        max(x_by_id[f"root.batch1_{i}_q"] for i in range(6))
+        - min(x_by_id[f"root.batch1_{i}_q"] for i in range(6))
+    )
+    second_span = (
+        max(x_by_id[f"root.batch2_{i}_q"] for i in range(6))
+        - min(x_by_id[f"root.batch2_{i}_q"] for i in range(6))
+    )
+
+    assert second_span >= first_span * 0.8
+
+
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
+def test_plot_dense_runs_cap_scaled_marker_and_label_size():
+    fig = _multi_batch_fanout_graph(batch_size=45).plot(
+        marker_mult=10.0,
+        text_mult=10.0,
+    )
+    markers, font, edge, marker_line = _marker_text_sizes(fig)
+
+    assert markers is not None
+    assert max(markers) <= 10
+    assert font is not None and font <= 8
+    assert edge == 1
+    assert marker_line is not None and marker_line <= 0.6
+    assert len(fig.layout.annotations or ()) > 1
 
 
 def test_live_tree_shows_running_children_count():
@@ -332,7 +419,7 @@ def test_graph_save_html_shorthand_writes_single_slide(tmp_path):
 
 
 def _marker_text_sizes(fig):
-    """Return (marker.size, annotation_font_size) for the node trace.
+    """Return (marker.size, annotation_font_size, edge_width, marker_line_width).
 
     The figure renders nodes as a markers-only Scatter (state kinds are
     in the legend, not on the markers) and agent-name labels as
@@ -340,8 +427,15 @@ def _marker_text_sizes(fig):
     fonts, not trace text.
     """
     sizes = None
+    edge_width = None
+    marker_line_width = None
     for trace in fig.data:
         mode = getattr(trace, "mode", "") or ""
+        line = getattr(trace, "line", None)
+        if mode == "lines" and line is not None:
+            width = getattr(line, "width", None)
+            if width is not None:
+                edge_width = width if edge_width is None else max(edge_width, width)
         marker = getattr(trace, "marker", None)
         if (
             "markers" in mode
@@ -350,6 +444,9 @@ def _marker_text_sizes(fig):
             and getattr(trace, "showlegend", True) is False
         ):
             sizes = marker.size
+            marker_line = getattr(marker, "line", None)
+            if marker_line is not None:
+                marker_line_width = getattr(marker_line, "width", None)
             break
     annotations = getattr(fig.layout, "annotations", ()) or ()
     font_size = None
@@ -358,26 +455,30 @@ def _marker_text_sizes(fig):
         if font is not None and getattr(font, "size", None) is not None:
             font_size = font.size
             break
-    return sizes, font_size
+    return sizes, font_size, edge_width, marker_line_width
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_plot_marker_and_text_mults_scale_independently():
     g = _final()
-    base_markers, base_font = _marker_text_sizes(g.plot())
-    big_markers, big_font = _marker_text_sizes(g.plot(marker_mult=4.0, text_mult=2.0))
+    base_markers, base_font, base_edge, _ = _marker_text_sizes(g.plot())
+    big_markers, big_font, big_edge, _ = _marker_text_sizes(
+        g.plot(marker_mult=4.0, text_mult=2.0)
+    )
     assert base_markers and big_markers
     assert all(b == n * 4.0 for n, b in zip(base_markers, big_markers))
     if base_font is not None:
         assert big_font == base_font * 2.0
-    # element_mult shorthand is a uniform scale
-    elt_markers, _ = _marker_text_sizes(g.plot(element_mult=2.0))
+    assert big_edge == base_edge
+    # element_mult shorthand scales markers and labels, but keeps edges stable.
+    elt_markers, _, elt_edge, _ = _marker_text_sizes(g.plot(element_mult=2.0))
     assert all(e == n * 2.0 for n, e in zip(base_markers, elt_markers))
+    assert elt_edge == base_edge
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_plot_marker_size_is_uniform_not_token_weighted():
-    sizes, _ = _marker_text_sizes(_final().plot())
+    sizes, _, _, _ = _marker_text_sizes(_final().plot())
     assert sizes is not None
     assert len(set(sizes)) == 1
 

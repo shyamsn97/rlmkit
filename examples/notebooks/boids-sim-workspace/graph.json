@@ -4,7 +4,9 @@
     "root",
     "root.html",
     "root.css",
-    "root.boids",
+    "root.state",
+    "root.boid",
+    "root.view",
     "root.main"
   ]
 }
