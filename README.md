@@ -103,6 +103,7 @@ UserQuery(root)
 pip install rlmflow               # core
 pip install rlmflow[openai]       # + OpenAI client
 pip install rlmflow[anthropic]    # + Anthropic client
+pip install rlmflow[dspy]         # + DSPy adapter
 pip install rlmflow[viewer]       # + Gradio viewer (plotly)
 pip install rlmflow[image]        # + static image / GIF export (kaleido)
 pip install rlmflow[all]          # all of the above
@@ -428,27 +429,23 @@ graph.save_html("viewer.html")
 
 #### Why the scaling knobs exist
 
-The on-screen Plotly figure is laid out for ~420 px tall, with 11 px
-markers and 10 px labels — sized to look right on a Jupyter cell. A
-naive 1800 px PNG export keeps those pixel sizes literal, so every
-marker shrinks to a speck and every label to a thread.
+The Plotly viewer, static image export, GIF export, and HTML stepper now
+share the same default element scale (`element_mult=1.0`), so a saved
+PNG looks much closer to the Gradio/Jupyter view. Dense graphs still
+adaptively cap marker and label sizes to avoid turning large runs into
+solid blobs.
 
-The save helpers compensate with three knobs:
+Use these knobs only when a target medium needs a different balance:
 
-| Knob               | Default (image/steps/gif) | Default (html) | Effect                                                                                     |
-|--------------------|---------------------------|----------------|---------------------------------------------------------------------------------------------|
-| `element_mult`     | `3.0`                     | `2.0`          | Uniform multiplier on markers + edges + fonts. The simplest "make it bigger" knob.         |
-| `marker_mult`      | _(inherits)_              | _(inherits)_   | Override just the marker size + edge width. Bump higher than `text_mult` on dense trees.    |
-| `text_mult`        | _(inherits)_              | _(inherits)_   | Override just the label font size. Smaller text = fewer collisions when nodes are close.    |
-| `normalize_labels` | `True`                    | `True`         | Force every label to `bottom center` so adjacent depths can't share a vertical band.        |
+| Knob               | Default | Effect                                                                                  |
+|--------------------|---------|------------------------------------------------------------------------------------------|
+| `element_mult`     | `1.0`   | Uniform multiplier on markers and fonts. The simplest "make it bigger" knob.            |
+| `marker_mult`      | _(inherits)_ | Override just marker size and outline width. Useful when dots need more visual weight. |
+| `text_mult`        | _(inherits)_ | Override just label font size. Smaller text means fewer label collisions.              |
+| `normalize_labels` | `True`  | Force every label to `bottom center` so adjacent depths can't share a vertical band.     |
 
-The HTML stepper additionally defaults to `height=720` (vs the
-~420 px on-screen default) so its native marker sizes land in the
-same proportion to the canvas as a `save_image` PNG.
-
-`element_mult` is the lazy default; pass `marker_mult` and/or
-`text_mult` to break the symmetry when labels are colliding even at
-3× scale.
+Pass `marker_mult` and/or `text_mult` to break the symmetry when labels
+are colliding or nodes are too subtle for a specific export.
 
 #### Recipes
 
@@ -457,7 +454,7 @@ same proportion to the canvas as a `save_image` PNG.
 ```python
 graph.save_image("hero.png")
 # == save_image(graph, "hero.png", width=1800, height=1350,
-#               scale=2.0, element_mult=3.0, normalize_labels=True)
+#               scale=2.0, element_mult=1.0, normalize_labels=True)
 ```
 
 **Blog slideshow with dense subtrees** — fat markers, small labels,
@@ -496,7 +493,6 @@ save_gif(
     duration=600,          # ms per frame; lower = faster
     loop=0,                # 0 = forever; 1 = play once
     width=1200, height=900,
-    element_mult=2.0,
 )
 ```
 
@@ -524,12 +520,11 @@ rlmflow render ./myproject \
   -f html  -o stepper.html --no-normalize-labels
 ```
 
-The CLI auto-picks `element_mult=2.0` for `-f html` (so the live
-stepper's native 14 px markers stay readable) and `element_mult=3.0`
-for `-f image` / `-f steps` (where the much larger PNG canvas would
-otherwise shrink markers to specks). Node sizes are uniform; token
-counts stay in hover/details, not marker size. Override either with
-`--element-mult`.
+The CLI uses `element_mult=1.0` by default for `html`, `image`, `steps`,
+and `gif` so static exports stay visually consistent with the interactive
+viewer. Node sizes are uniform; token counts stay in hover/details, not
+marker size. Override with `--element-mult`, `--marker-mult`, or
+`--text-mult` for a specific medium.
 
 #### Dependencies
 
@@ -540,6 +535,36 @@ counts stay in hover/details, not marker size. Override either with
 - `save_html` and `render_html` have **no static-image dependency** —
   they emit a single HTML file that embeds Plotly from CDN.
 
+## DSPy Adapter
+
+`RLMFlowLM` lets DSPy use an `RLMFlow` agent anywhere it expects a
+language model:
+
+```python
+from pathlib import Path
+
+import dspy
+
+from rlmflow import OpenAIClient, RLMConfig, RLMFlow, Workspace
+from rlmflow.integrations.dspy import RLMFlowLM
+from rlmflow.runtime.local import LocalRuntime
+
+workspace = Workspace.create(Path("examples/example-workspaces/dspy-workspace"))
+agent = RLMFlow(
+    llm_client=OpenAIClient("gpt-4o-mini"),
+    runtime=LocalRuntime(workspace=workspace),
+    config=RLMConfig(max_depth=1, max_iterations=5),
+)
+
+dspy.configure(lm=RLMFlowLM(agent, model="rlmflow/gpt-4o-mini"))
+qa = dspy.ChainOfThought("question -> answer")
+print(qa(question="What is 17 * 23?").answer)
+```
+
+Install it with `pip install rlmflow[openai,dspy]`. See
+[`examples/dspy_drop_in.py`](examples/dspy_drop_in.py) for the runnable
+version.
+
 ## Examples
 
 All examples share flags like `--no-viz`, `--docker-image rlmflow:local`,
@@ -549,6 +574,7 @@ All examples share flags like `--no-viz`, `--docker-image rlmflow:local`,
 |---|---|
 | [`showcase.py`](examples/showcase.py) | `Graph` snapshots, workspace persistence, session reads, time travel, gym-style stepping. |
 | [`drop_in_llm.py`](examples/drop_in_llm.py) | `RLMFlow` as an `LLMClient`. Nested agents. |
+| [`dspy_drop_in.py`](examples/dspy_drop_in.py) | Use an `RLMFlow` agent as the LM behind a DSPy program. |
 | [`coding-agent/agent.py`](examples/coding-agent/agent.py) | Interactive coding agent that writes and edits files. |
 | [`needle_haystack.py`](examples/needle_haystack.py) | Needle-in-a-haystack over a massive in-memory `CONTEXT`, using parallel child chunks. |
 | [`needle_haystack_filesystem.py`](examples/needle_haystack_filesystem.py) | Needle-in-a-haystack across many files with custom tools and `runtime_factory`. |
