@@ -34,9 +34,8 @@ class ContextVariable:
     def read(self, start: int = 0, end: int | None = None) -> str:
         return self.store.read(self.key, agent_id=self.agent_id)[start:end]
 
-    def lines(self, start: int = 0, end: int | None = None) -> str:
-        lines = self.store.read(self.key, agent_id=self.agent_id).splitlines(True)
-        return "".join(lines[start:end])
+    def lines(self, start: int = 0, end: int | None = None) -> list[str]:
+        return self.store.read(self.key, agent_id=self.agent_id).splitlines()[start:end]
 
     def line_count(self) -> int:
         return len(self.store.read(self.key, agent_id=self.agent_id).splitlines())

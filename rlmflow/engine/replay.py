@@ -1,13 +1,13 @@
-"""Replay-of-one: rebuild a suspended generator after a fork or restart.
+"""Replay-of-one: rebuild a suspended awaitable after a fork or restart.
 
 When the engine is attached to a freshly-loaded workspace (via
 ``Workspace.fork`` or just opening a saved run later), the durable
 graph contains every :class:`~rlmflow.graph.SupervisingOutput` that
-was recorded — but the live Python generator that yielded inside
+was recorded — but the live Python coroutine that awaited inside
 the runtime is gone. This module handles re-running the action
 code with ``rlm_delegate`` in *replay mode* (returning existing child
-handles instead of spawning new ones) so the generator pauses again
-at the same yield. The regular resume path then takes over.
+handles instead of spawning new ones) so the coroutine pauses again
+at the same await. The regular resume path then takes over.
 
 All public functions take only the explicit dependencies they
 need; nothing in this module imports :class:`~rlmflow.rlm.RLMFlow`.
@@ -34,7 +34,7 @@ def can_resume(graph: Graph, supervising: SupervisingOutput) -> bool:
     ``graph`` is the supervising agent's sub-graph (children are inside).
     """
     if not supervising.waiting_on:
-        # Recovery for older / bad runs that wrote ``yield rlm_wait()`` with
+        # Recovery for older / bad runs that wrote ``await rlm_wait()`` with
         # no handles. New calls are rejected in ``rlm_wait()`` before this
         # node ever exists.
         return True
@@ -61,10 +61,10 @@ def supervise_history(
     graph: Graph,
     current: SupervisingOutput,
 ) -> tuple[list[SupervisingOutput], str]:
-    """Walk back through prior resume/yielded pairs to the originating LLMOutput.
+    """Walk back through prior resume/supervise pairs to the originating LLMOutput.
 
     Returns ``(chain, code)`` where ``chain`` is every
-    :class:`SupervisingOutput` in the same yield/resume sequence
+    :class:`SupervisingOutput` in the same await/resume sequence
     (chronological, last element is ``current``) and ``code`` is the
     code from the :class:`LLMOutput` that started the sequence.
 
@@ -98,19 +98,18 @@ def supervise_history(
     return chain, code
 
 
-def replay_to_yield(
+def replay_to_suspension(
     graph: Graph,
     target: SupervisingOutput,
     runtime: Runtime,
 ) -> None:
-    """Re-execute action code so ``runtime``'s generator is paused at
-    the same yield as ``target``.
+    """Re-execute action code so ``runtime`` is paused at the same wait as ``target``.
 
     Used after a fork or cold start, when the engine has the graph
-    but not the live generator frame. ``rlm_delegate`` runs in replay
+    but not the live coroutine frame. ``rlm_delegate`` runs in replay
     mode (returns existing child handles instead of spawning), so
-    the code reaches each yield with the same ``WaitRequest`` the
-    original run produced. We verify the match at every yield and
+    the code reaches each await with the same ``WaitRequest`` the
+    original run produced. We verify the match at every await and
     raise on divergence.
     """
     chain, code = supervise_history(graph, target)
@@ -124,9 +123,9 @@ def replay_to_yield(
     if not suspended:
         raise RuntimeError(
             f"replay: action code for agent {graph.agent_id!r} finished "
-            "without suspending; trajectory expects a yield"
+            "without suspending; trajectory expects an await"
         )
-    _verify_replay_yield(raw, chain[0], graph.agent_id)
+    _verify_replay_wait(raw, chain[0], graph.agent_id)
 
     for prev, nxt in zip(chain[:-1], chain[1:]):
         prev_results = results_for_supervise(graph, prev)
@@ -135,14 +134,14 @@ def replay_to_yield(
         if not suspended:
             raise RuntimeError(
                 f"replay: code for agent {graph.agent_id!r} finished at "
-                f"supervise seq={nxt.seq}; expected another yield"
+                f"supervise seq={nxt.seq}; expected another await"
             )
-        _verify_replay_yield(raw, nxt, graph.agent_id)
+        _verify_replay_wait(raw, nxt, graph.agent_id)
 
     runtime.env.pop("_REPLAY_QUEUE", None)
 
 
-def _verify_replay_yield(
+def _verify_replay_wait(
     raw: object,
     supervising: SupervisingOutput,
     agent_id: str,
@@ -162,7 +161,7 @@ def _verify_replay_yield(
 
 __all__ = [
     "can_resume",
-    "replay_to_yield",
+    "replay_to_suspension",
     "results_for_supervise",
     "supervise_history",
 ]

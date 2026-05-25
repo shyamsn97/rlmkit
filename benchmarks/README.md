@@ -29,6 +29,7 @@ for the broader landscape and rationale for the picks in this directory.
 ```
 benchmarks/
   README.md              # this file
+  comparison/            # rlmflow vs alexzhang13/rlm synthetic smoke comparison
   oolong/                # RLM paper: long-context aggregation
   ...                    # more suites added over time
 ```

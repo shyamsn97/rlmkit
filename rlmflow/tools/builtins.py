@@ -41,7 +41,7 @@ def make_done(env: dict[str, Any]):
 def make_wait():
     """Closure that packages :class:`ChildHandle`s into a :class:`WaitRequest`."""
 
-    @tool("Wait for delegated children. Must be called with `yield`.")
+    @tool("Wait for delegated children. Must be called with `await`.")
     def rlm_wait(*handles: ChildHandle) -> WaitRequest:
         if not handles:
             raise ValueError("rlm_wait() requires at least one child handle")
@@ -116,12 +116,17 @@ def make_delegate(
     that already exist in the graph.
     """
 
-    @tool("Delegate a subtask to a named child agent.")
+    @tool(
+        "Delegate one independent unit of work to a named child agent. "
+        "Use for multi-file/component/chunk/trial fanout; the parent should "
+        "pass shared requirements/data in context, then integrate and verify "
+        "child results."
+    )
     def rlm_delegate(
         *,
         name: str,
         query: str,
-        context: str,
+        context: str | list[str],
         max_iterations: int | None = None,
         model: str = "default",
     ) -> ChildHandle | str:
@@ -135,12 +140,13 @@ def make_delegate(
             child_aid = replay_queue.pop(0)
             env.setdefault("DELEGATED", []).append(child_aid)
             return ChildHandle(child_aid)
+        context_text = "\n".join(context) if isinstance(context, list) else context
         handle = spawn_child(
             env["AGENT_ID"],
             env["PARENT_NODE_ID"],
             name,
             query,
-            context,
+            context_text,
             max_iterations=max_iterations,
             model=model,
         )

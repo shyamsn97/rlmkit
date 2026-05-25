@@ -70,6 +70,14 @@ _AGENT_LABEL_COLOR = "#3fb950"
 # Plotly annotations apply ``yshift`` in screen pixels regardless of the
 # figure's data-coordinate range, so this is a stable visual gap.
 _AGENT_LABEL_YSHIFT = 10
+_DENSE_NODE_THRESHOLD = 24
+_DENSE_LABEL_NODE_THRESHOLD = 80
+_DENSE_LABEL_AGENT_THRESHOLD = 24
+_DENSE_MIN_MARKER_SIZE = 12
+_DENSE_MAX_MARKER_SIZE = 18
+_DENSE_MAX_MARKER_LINE_WIDTH = 1.2
+_DENSE_MAX_AGENT_LABEL_SIZE = 8
+_MIN_COLUMN_GAP = 0.75
 
 
 def is_bookkeeping(state: Node, successor: Node | None) -> bool:
@@ -398,6 +406,46 @@ def _agent_display_label(agent: Graph, *, limit: int = 22) -> str:
     return label
 
 
+def _visible_node_count(fig: Any) -> int:
+    """Return the plotted state-node count from the marker trace."""
+
+    best = 0
+    for trace in getattr(fig, "data", ()):
+        customdata = getattr(trace, "customdata", None)
+        if customdata is None:
+            continue
+        try:
+            best = max(best, len(customdata))
+        except TypeError:
+            continue
+    return best
+
+
+def _dense_marker_cap(fig: Any) -> float:
+    """Cap marker size using the rendered pixel spacing between rows."""
+
+    layout = getattr(fig, "layout", None)
+    if layout is None:
+        return float(_DENSE_MAX_MARKER_SIZE)
+
+    height = getattr(layout, "height", None) or 420
+    margin = getattr(layout, "margin", None)
+    margin_top = getattr(margin, "t", 0) or 0
+    margin_bottom = getattr(margin, "b", 0) or 0
+    plot_height = max(120.0, float(height) - float(margin_top) - float(margin_bottom))
+
+    yaxis = getattr(layout, "yaxis", None)
+    yrange = getattr(yaxis, "range", None)
+    if yrange is None or len(yrange) < 2:
+        return float(_DENSE_MAX_MARKER_SIZE)
+    y_span = abs(float(yrange[1]) - float(yrange[0]))
+    if y_span <= 0:
+        return float(_DENSE_MAX_MARKER_SIZE)
+
+    row_px = plot_height * _Y_SPACING / y_span
+    return max(_DENSE_MIN_MARKER_SIZE, min(_DENSE_MAX_MARKER_SIZE, row_px * 0.6))
+
+
 def _build_graph_figure(
     graph: Graph,
     *,
@@ -537,19 +585,25 @@ def _build_graph_figure(
             right_spawns = spawns[half:]
             span = right - left
             unit = span / max(n_spawn + 1, 2)
+            # Repeated fanouts from the same parent spine can otherwise reuse
+            # the same horizontal slots while earlier child chains are still
+            # descending, causing exact node-on-node collisions. A small
+            # depth-based phase keeps later batches visually distinct without
+            # expanding the graph's vertical range.
+            fanout_phase = 0.0
+            if depth > 2:
+                fanout_phase = ((by_id[eid].seq % 5) + 1) * unit * 0.13
             for i, cid in enumerate(reversed(left_spawns)):
-                cx = center_x - unit * (i + 1)
+                cx = center_x - unit * (i + 1) + fanout_phase
                 place(cid, cx - unit / 2, cx + unit / 2, depth + 1, seen)
             for i, cid in enumerate(right_spawns):
-                cx = center_x + unit * (i + 1)
+                cx = center_x + unit * (i + 1) + fanout_phase
                 place(cid, cx - unit / 2, cx + unit / 2, depth + 1, seen)
-            place(
-                chain_child[eid],
-                center_x - unit / 2,
-                center_x + unit / 2,
-                depth + 2,
-                seen,
-            )
+            # Keep the parent trajectory's future layout budget intact. A
+            # recursive run may fan out repeatedly from the same parent; if the
+            # chain child inherits only a narrow center slot, later fanouts get
+            # squeezed into a hairball under the parent spine.
+            place(chain_child[eid], left, right, depth + 2, seen)
             return
         # Otherwise: equal-slot tidy tree based on leaf counts.
         widths = [leaf_count(k, set()) for k in kids]
@@ -572,8 +626,47 @@ def _build_graph_figure(
             cursor_left += 1.0
             pos[eid] = (cursor_left, 0.0)
 
-    edge_x: list[float | None] = []
-    edge_y: list[float | None] = []
+    def shift_agent_subtree(agent_id: str, dx: float) -> None:
+        """Shift an agent column and any descendant columns together."""
+
+        prefix = f"{agent_id}."
+        for nid, node in by_id.items():
+            if nid not in pos:
+                continue
+            if node.agent_id != agent_id and not node.agent_id.startswith(prefix):
+                continue
+            x, y = pos[nid]
+            pos[nid] = (x + dx, y)
+
+    # Repeated parent fanouts can put a later child column nearly on top of an
+    # earlier still-descending child column. Preserve the tree layout, but run a
+    # small same-row spacing pass so same-level markers do not visually collide.
+    for _ in range(6):
+        moved = False
+        rows: dict[float, list[str]] = {}
+        for nid, (_x, y) in pos.items():
+            rows.setdefault(round(y, 6), []).append(nid)
+        for row_ids in rows.values():
+            row_ids.sort(key=lambda nid: pos[nid][0])
+            for left_id, right_id in zip(row_ids, row_ids[1:]):
+                left_x = pos[left_id][0]
+                right_x = pos[right_id][0]
+                gap = right_x - left_x
+                if gap >= _MIN_COLUMN_GAP:
+                    continue
+                left_agent = by_id[left_id].agent_id
+                right_agent = by_id[right_id].agent_id
+                if left_agent == right_agent:
+                    continue
+                shift_agent_subtree(right_agent, _MIN_COLUMN_GAP - gap)
+                moved = True
+        if not moved:
+            break
+
+    chain_edge_x: list[float | None] = []
+    chain_edge_y: list[float | None] = []
+    spawn_edge_x: list[float | None] = []
+    spawn_edge_y: list[float | None] = []
     for eid in by_id:
         if eid not in pos:
             continue
@@ -583,14 +676,26 @@ def _build_graph_figure(
             if cid not in pos:
                 continue
             x1, y1 = pos[cid]
-            edge_x.extend([x0, x1, None])
-            edge_y.extend([y0, y1, None])
+            if chain_child.get(eid) == cid:
+                chain_edge_x.extend([x0, x1, None])
+                chain_edge_y.extend([y0, y1, None])
+            else:
+                spawn_edge_x.extend([x0, x1, None])
+                spawn_edge_y.extend([y0, y1, None])
 
-    edge_trace = go.Scatter(
-        x=edge_x,
-        y=edge_y,
+    chain_edge_trace = go.Scatter(
+        x=chain_edge_x,
+        y=chain_edge_y,
         mode="lines",
         line={"color": "#30363d", "width": 1},
+        hoverinfo="skip",
+        showlegend=False,
+    )
+    spawn_edge_trace = go.Scatter(
+        x=spawn_edge_x,
+        y=spawn_edge_y,
+        mode="lines",
+        line={"color": "rgba(48,54,61,0.55)", "width": 0.6},
         hoverinfo="skip",
         showlegend=False,
     )
@@ -607,7 +712,7 @@ def _build_graph_figure(
     is_agent_entry = [agent_first_id.get(n.agent_id) == n.id for n in ordered]
     colors = [_NODE_COLORS.get(_display_kind(n), "#8b949e") for n in ordered]
     symbols = [_NODE_SYMBOLS.get(_display_kind(n), "circle") for n in ordered]
-    sizes = [14 for _ in ordered]
+    sizes = [24 for _ in ordered]
     hover = [_state_hover_text(n, graph.agents[n.agent_id]) for n in ordered]
 
     node_trace = go.Scatter(
@@ -621,13 +726,13 @@ def _build_graph_figure(
             "color": colors,
             "symbol": symbols,
             "size": sizes,
-            "line": {"color": "#0d1117", "width": 1.5},
+            "line": {"color": "#0d1117", "width": 2.0},
         },
         cliponaxis=False,
         showlegend=False,
     )
 
-    fig = go.Figure(data=[edge_trace, node_trace])
+    fig = go.Figure(data=[spawn_edge_trace, chain_edge_trace, node_trace])
 
     # Agent-name headers are emitted as Plotly annotations rather than
     # part of the marker text so we can offset them by a fixed pixel
@@ -637,22 +742,39 @@ def _build_graph_figure(
     # parent's terminal / supervising marker that may sit directly
     # above it. State kinds are conveyed by the legend (color +
     # symbol), so no per-state text is rendered.
-    for node, entry in zip(ordered, is_agent_entry):
-        if not entry:
-            continue
+    entry_nodes = [node for node, entry in zip(ordered, is_agent_entry) if entry]
+    dense_labels = (
+        len(ordered) >= _DENSE_LABEL_NODE_THRESHOLD
+        or len(entry_nodes) >= _DENSE_LABEL_AGENT_THRESHOLD
+    )
+    label_limit = 9 if dense_labels else 22
+    labeled_bounds_by_row: dict[float, list[tuple[float, float]]] = {}
+
+    for node in entry_nodes:
         x, y = pos[node.id]
+        label = _agent_display_label(graph.agents[node.agent_id], limit=label_limit)
+        # Dense runs can have dozens of sibling agents on the same row. Keep
+        # labels where they fit, and rely on hover text for omitted agent names.
+        if dense_labels and node.agent_id != graph.root_agent_id:
+            row = round(y, 3)
+            half_width = max(0.25, min(1.0, len(label) * 0.06))
+            bounds = (x - half_width, x + half_width)
+            occupied = labeled_bounds_by_row.setdefault(row, [])
+            if any(bounds[0] < hi and bounds[1] > lo for lo, hi in occupied):
+                continue
+            occupied.append(bounds)
         fig.add_annotation(
             x=x,
             y=y,
-            text=_agent_display_label(graph.agents[node.agent_id]),
+            text=label,
             showarrow=False,
             xanchor="center",
             yanchor="bottom",
-            yshift=_AGENT_LABEL_YSHIFT,
+            yshift=14 if dense_labels else _AGENT_LABEL_YSHIFT,
             font={
                 "color": _AGENT_LABEL_COLOR,
                 "family": "ui-monospace, SFMono-Regular, Menlo, monospace",
-                "size": 11,
+                "size": 9 if dense_labels else 11,
             },
         )
     visible_kinds = {_display_kind(n) for n in ordered}
@@ -667,7 +789,7 @@ def _build_graph_figure(
                 marker={
                     "color": color,
                     "symbol": _NODE_SYMBOLS.get(ntype, "circle"),
-                    "size": 11,
+                    "size": 14,
                     "line": {"color": "#0d1117", "width": 1},
                 },
                 name=ntype,
@@ -676,7 +798,7 @@ def _build_graph_figure(
             )
         )
 
-    n_edges = sum(1 for e in edge_x if e is None)
+    n_edges = sum(1 for e in chain_edge_x + spawn_edge_x if e is None)
     if node_x:
         x_span = max(node_x) - min(node_x)
         x_pad = max(1.0, x_span * 0.18)
@@ -731,27 +853,37 @@ def _scale_figure_elements(
     marker_mult: float,
     text_mult: float | None = None,
 ) -> None:
-    """Multiply marker / edge / font pixel sizes in-place."""
+    """Multiply marker and font pixel sizes in-place."""
     if text_mult is None:
         text_mult = marker_mult
     if marker_mult == 1.0 and text_mult == 1.0:
         return
     if fig is None:
         return
+    node_count = _visible_node_count(fig)
+    dense_graph = node_count >= _DENSE_NODE_THRESHOLD
+    dense_marker_cap = _dense_marker_cap(fig) if dense_graph else None
+
+    def scale_marker_size(size: Any) -> Any:
+        scaled = size * marker_mult
+        if dense_marker_cap is not None:
+            return min(scaled, dense_marker_cap)
+        return scaled
+
     for trace in getattr(fig, "data", ()):
         marker = getattr(trace, "marker", None)
         if marker is not None:
             size = getattr(marker, "size", None)
             if isinstance(size, (list, tuple)):
-                marker.size = [s * marker_mult for s in size]
+                marker.size = [scale_marker_size(s) for s in size]
             elif isinstance(size, (int, float)):
-                marker.size = size * marker_mult
+                marker.size = scale_marker_size(size)
             mline = getattr(marker, "line", None)
             if mline is not None and getattr(mline, "width", None) is not None:
-                mline.width = mline.width * marker_mult
-        line = getattr(trace, "line", None)
-        if line is not None and getattr(line, "width", None) is not None:
-            line.width = line.width * marker_mult
+                scaled = mline.width * marker_mult
+                mline.width = (
+                    min(scaled, _DENSE_MAX_MARKER_LINE_WIDTH) if dense_graph else scaled
+                )
         textfont = getattr(trace, "textfont", None)
         if textfont is not None and getattr(textfont, "size", None) is not None:
             textfont.size = textfont.size * text_mult
@@ -769,7 +901,10 @@ def _scale_figure_elements(
     for ann in getattr(layout, "annotations", ()) or ():
         font = getattr(ann, "font", None)
         if font is not None and getattr(font, "size", None) is not None:
-            font.size = font.size * text_mult
+            scaled = font.size * text_mult
+            font.size = (
+                min(scaled, _DENSE_MAX_AGENT_LABEL_SIZE) if dense_graph else scaled
+            )
 
 
 def _normalize_label_positions(fig: Any) -> None:
@@ -913,7 +1048,7 @@ def save_image(
     width: int = 1800,
     height: int = 1350,
     scale: float = 2.0,
-    element_mult: float = 3.0,
+    element_mult: float = 1.0,
     marker_mult: float | None = None,
     text_mult: float | None = None,
     normalize_labels: bool = True,
@@ -952,7 +1087,7 @@ def save_steps(
     width: int = 1800,
     height: int = 1350,
     scale: float = 2.0,
-    element_mult: float = 3.0,
+    element_mult: float = 1.0,
     marker_mult: float | None = None,
     text_mult: float | None = None,
     normalize_labels: bool = True,
@@ -1155,7 +1290,7 @@ def render_html(
     title: str = "rlmflow run",
     height: int = 720,
     include_plotlyjs: str | bool = "cdn",
-    element_mult: float = 2.0,
+    element_mult: float = 1.0,
     marker_mult: float | None = None,
     text_mult: float | None = None,
     normalize_labels: bool = True,
@@ -1256,7 +1391,7 @@ def save_gif(
     width: int = 1200,
     height: int = 900,
     scale: float = 1.0,
-    element_mult: float = 2.0,
+    element_mult: float = 1.0,
     marker_mult: float | None = None,
     text_mult: float | None = None,
     normalize_labels: bool = True,

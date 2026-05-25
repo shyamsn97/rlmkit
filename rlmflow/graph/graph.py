@@ -124,6 +124,15 @@ class Graph:
     @property
     def model_label(self) -> str:
         actual = self.model
+        if actual is None:
+            actual = next(
+                (
+                    str(model)
+                    for state in reversed(self.states)
+                    if (model := getattr(state, "model", None))
+                ),
+                None,
+            )
         if actual and actual != self.model_key:
             return f"{self.model_key}:{actual}"
         return self.model_key

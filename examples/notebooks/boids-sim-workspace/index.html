@@ -2,20 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Boids Demo</title>
-  <link rel="stylesheet" href="css/styles.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Boids</title>
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main>
-    <h1>Boids Demo</h1>
-    <p>Toggle fullscreen or resize the window to see the flocking simulation.</p>
-    <!-- Canvas for rendering boids -->
-    <canvas id="flock" width="800" height="600" aria-label="Boids simulation canvas"></canvas>
-  </main>
-
-  <!-- Core boids engine, then application bootstrap -->
-  <script src="js/boids.js"></script>
-  <script src="js/main.js"></script>
+  <canvas id="boids"></canvas>
+  <script src="scripts/state.js"></script>
+  <script src="scripts/boid.js"></script>
+  <script src="scripts/view.js"></script>
+  <script src="scripts/main.js"></script>
 </body>
 </html>

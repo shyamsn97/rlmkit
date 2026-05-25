@@ -58,7 +58,7 @@ def main():
         "--viewer", action="store_true", help="Open the state viewer after finishing"
     )
     parser.add_argument("--model", default="gpt-5-mini")
-    parser.add_argument("--fast-model", default=None)
+    parser.add_argument("--fast-model", default="gpt-5-nano")
     parser.add_argument(
         "--docker-image",
         default=None,
@@ -116,8 +116,7 @@ def main():
     )
 
     graph = agent.start(
-        "I'm looking for a magic number in CONTEXT. Exactly one line says "
-        "'The magic number is XXXXXXX'. YOU CANNOT USE CONTEXT.grep! You can probably process around 1000 lines at a time.",
+        "I'm looking for a magic number. What is it? You cannot use CONTEXT methods, you have to just use CONTEXT.read()!",
         context=context,
         context_metadata={"num_lines": args.num_lines, "needle_line": needle_line},
     )

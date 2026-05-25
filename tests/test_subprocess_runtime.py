@@ -2,7 +2,7 @@
 
 Spawns a real ``python -m rlmflow.runtime.repl`` subprocess and exercises
 the full JSON-over-stdio protocol: execute, inject (value + proxy), and
-generator-based suspension with proxied tool calls during yield/resume.
+await-based suspension with proxied tool calls during resume.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def test_inject_proxy_callable_roundtrip(runtime):
     assert calls == [(2, 3)]
 
 
-def test_start_code_no_yield(runtime):
+def test_start_code_no_await(runtime):
     suspended, result, errored = runtime.start_code("print('ran')")
     assert suspended is False
     assert errored is False
@@ -116,22 +116,22 @@ def test_start_code_syntax_error_sets_errored(runtime):
     assert "SyntaxError" in result
 
 
-def test_start_code_with_yield_and_resume(runtime):
+def test_start_code_with_await_and_resume(runtime):
     """Exercise the full delegate/wait cycle over the wire."""
 
     def delegate(prompt: str) -> ChildHandle:
         return ChildHandle(agent_id=f"child-{prompt}")
 
-    def wait(handles):
+    def rlm_wait(handles):
         return WaitRequest(agent_ids=[h.agent_id for h in handles])
 
     runtime.inject("delegate", delegate)
-    runtime.inject("wait", wait)
+    runtime.inject("rlm_wait", rlm_wait)
 
     code = (
         "print('before')\n"
         "h = delegate('q1')\n"
-        "results = yield wait([h])\n"
+        "results = await rlm_wait([h])\n"
         "print('after:', results)\n"
     )
     suspended, payload, errored = runtime.start_code(code)
@@ -148,23 +148,22 @@ def test_start_code_with_yield_and_resume(runtime):
     assert result == "after: {'child-q1': 'answer'}"
 
 
-def test_star_import_inside_yielding_block(runtime):
-    """`from X import *` is illegal inside functions, but the generator
-    wrapper hoists it out so agent code with ``yield`` can still use it."""
+def test_star_import_inside_awaiting_block(runtime):
+    """Top-level await keeps `from X import *` legal."""
 
     def delegate(prompt: str) -> ChildHandle:
         return ChildHandle(agent_id="c")
 
-    def wait(handles):
+    def rlm_wait(handles):
         return WaitRequest(agent_ids=[h.agent_id for h in handles])
 
     runtime.inject("delegate", delegate)
-    runtime.inject("wait", wait)
+    runtime.inject("rlm_wait", rlm_wait)
 
     code = (
         "from math import *\n"
         "h = delegate('q')\n"
-        "yield wait([h])\n"
+        "await rlm_wait([h])\n"
         "print(int(pi * 100))\n"
     )
     suspended, _, _ = runtime.start_code(code)
@@ -216,20 +215,17 @@ def test_repl_code_sees_workspace_as_cwd(tmp_path, monkeypatch):
         rt.close()
 
 
-def test_annotated_assignment_inside_yielding_block(runtime):
-    """``x: T = v`` must not clash with the generator wrapper's implicit
-    ``global x``. Python raises ``SyntaxError: annotated name 'x' can't be
-    global`` unless the wrapper strips the annotation first.
-    """
+def test_annotated_assignment_inside_awaiting_block(runtime):
+    """Top-level await should preserve ordinary annotation semantics."""
 
     def delegate(prompt: str) -> ChildHandle:
         return ChildHandle(agent_id="c")
 
-    def wait(handles):
+    def rlm_wait(handles):
         return WaitRequest(agent_ids=[h.agent_id for h in handles])
 
     runtime.inject("delegate", delegate)
-    runtime.inject("wait", wait)
+    runtime.inject("rlm_wait", rlm_wait)
 
     code = (
         "errors: list[str] = []\n"
@@ -238,7 +234,7 @@ def test_annotated_assignment_inside_yielding_block(runtime):
         "    tag: str = f'e{i}'\n"
         "    errors.append(tag)\n"
         "h = delegate('q')\n"
-        "yield wait([h])\n"
+        "await rlm_wait([h])\n"
         "count = len(errors)\n"
         "print(count, errors)\n"
     )

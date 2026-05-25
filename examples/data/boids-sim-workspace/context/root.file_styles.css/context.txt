@@ -1,7 +1,0 @@
-Create the stylesheet for the boids page.
-
-Contract:
-- Path: styles.css
-- Provide a colorful background gradient, full-window canvas sizing, and styling for a small overlay UI.
-- Return only the path when done.
-Create and write the file using write_file(path, content).

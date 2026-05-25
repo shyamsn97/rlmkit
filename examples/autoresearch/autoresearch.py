@@ -45,10 +45,14 @@ You are running recursive autoresearch.
 slugs, then spawn one child per hypothesis with
 `rlm_delegate(name=slug, query=query, context=context)`. The parent does not write or run
 candidate code directly. End the block exactly at
-`results = yield rlm_wait(*handles)`. On the resumed turn, inspect the
+`results = await rlm_wait(*handles)`. On the resumed turn, inspect the
 ledger, then either spawn another small batch of children with fresh
 slugs or `done(...)`. Child agents have a small turn cap set by the
 engine; do not try to simulate your own budget system.
+Check `submission_status()` before spawning children. If
+`remaining_submissions` is zero, summarize the best ledger entry and
+`done(...)`. When `remaining_submissions` is not `None`, never spawn
+more children than that number.
 
 When creating child queries, keep them narrow. Do not ask children to
 infer the task type or build generic adapters. For circle packing, say
@@ -66,6 +70,7 @@ then `_fix2`, then `_fix3`.
 program = read_file("program.md")
 base = run_baseline()
 prior = get_runs()
+status = submission_status()
 context = (
     program
     + "\\n\\nCurrent ledger summary:\\n"
@@ -79,6 +84,10 @@ ideas = [
     ("sa_anneal", "try simulated annealing over centers with feasible radii"),
     ("greedy_maximin", "place centers greedily by largest empty-space clearance"),
 ]
+remaining = status["remaining_submissions"]
+if remaining == 0:
+    done(f"submission cap reached; runs={len(prior)}")
+ideas = ideas[:remaining] if remaining is not None else ideas
 
 def child_query(slug, hyp):
     return f'''slug={slug!r}. Circle packing only.
@@ -105,7 +114,7 @@ handles = [
     for slug, hyp in ideas
     if slug not in prior
 ]
-results = yield rlm_wait(*handles)
+results = await rlm_wait(*handles)
 ```
 
 ```repl
@@ -123,8 +132,14 @@ Read `CONTEXT` and `program.md`, then build one complete source
 string for `solution.py` and call
 `run_experiment(source, description=slug)`. Do not write
 `solution.py`; children run in parallel and would clobber each
-other. Do not delegate to grandchildren unless the parent explicitly
-asked for that.
+other.
+
+**Only delegate if children would explore a different approach
+than yours.** If you'd just be re-asking your own query and returning
+the answer, do the work yourself. Spawn children only when each
+one is doing something genuinely different from your assigned idea
+(different hyperparameters, an algorithmic variant, a sub-question)
+that you'd then aggregate.
 
 Candidate sources are archived research notes, not throwaway snippets.
 Write docstrings as part of the experiment result. A good candidate has:
@@ -201,7 +216,7 @@ def build_prompt_builder():
         "autoresearch_recursion",
         AUTORESEARCH_RECURSION_TEXT,
         title="Autoresearch",
-        after="builtins",
+        after="examples",
     )
 
 
@@ -223,6 +238,10 @@ class ExperimentCrashed(RuntimeError):
             f"returncode={row.get('returncode')} "
             f"description={row.get('description')!r}\n{tail}"
         )
+
+
+class SubmissionError(RuntimeError):
+    """Raised when the run has exhausted its experiment submission cap."""
 
 
 def _run_evaluator(
@@ -267,6 +286,7 @@ def _check_syntax(source: str) -> str | None:
 def make_run_experiment(
     workspace_root: Path, solution: str,
     evaluator: str, lower_is_better: bool,
+    max_submissions: int | None = None,
 ):
     """Build the agent-facing experiment tools."""
     root = workspace_root.resolve()
@@ -274,6 +294,7 @@ def make_run_experiment(
     ledger = history / "ledger.jsonl"
     history.mkdir(parents=True, exist_ok=True)
     lock = threading.RLock()
+    pending_submissions = 0
     stem = Path(solution).stem
     path_key = f"{stem}_path"
 
@@ -299,10 +320,42 @@ def make_run_experiment(
             fh.write(json.dumps(row) + "\n")
 
     def _next_n() -> int:
-        # Count from the ledger (not the history/ filesystem) so the
-        # baseline's ``n=0`` doesn't collide with the first trial.
+        # Count from the ledger (not the history/ filesystem) so archived
+        # filenames track the research log, including pending parallel trials.
         with lock:
-            return len(_read_ledger())
+            return len(_read_ledger()) + pending_submissions
+
+    def _submission_count() -> int:
+        return sum(
+            1
+            for row in _read_ledger()
+            if row.get("description") != "baseline"
+        )
+
+    def _remaining_submissions() -> int | None:
+        if max_submissions is None:
+            return None
+        return max(0, max_submissions - _submission_count() - pending_submissions)
+
+    def _reserve_submission_slot() -> int:
+        nonlocal pending_submissions
+        used = _submission_count() + pending_submissions
+        if max_submissions is not None and used >= max_submissions:
+            raise SubmissionError(
+                f"too many submissions: max_submissions={max_submissions}"
+            )
+        n = _next_n()
+        pending_submissions += 1
+        return n
+
+    def _release_submission_slot() -> None:
+        nonlocal pending_submissions
+        pending_submissions = max(0, pending_submissions - 1)
+
+    def _append_submission(row: dict) -> None:
+        with lock:
+            _append(row)
+            _release_submission_slot()
 
     def _parse_score(stdout: str) -> float | None:
         m = SCORE_RE.search(stdout or "")
@@ -322,7 +375,14 @@ def make_run_experiment(
         f"string instead of writing `{solution}`, so parallel trials "
         f"do not clobber each other. Archived sources should include "
         f"module/function/helper docstrings explaining the strategy, "
-        f"invariants, and non-obvious constants."
+        f"invariants, and non-obvious constants. "
+        + (
+            f"This run has a hard cap of {max_submissions} experiment "
+            f"submissions; once exhausted, this raises SubmissionError "
+            f"without writing a new ledger row."
+            if max_submissions is not None
+            else "This run has no explicit experiment submission cap."
+        )
     )
     def run_experiment(
         source: str, description: str, budget_s: int = 300,
@@ -342,44 +402,61 @@ def make_run_experiment(
         description = description.strip()[:500]
         budget_s = max(10, min(int(budget_s), 3600))
 
-        with lock:
-            n = _next_n()
-            archive = history / f"{n}_{_safe_slug(description)}.py"
-            suffix = 1
-            while archive.exists():
-                archive = history / f"{n}_{_safe_slug(description)}_{suffix}.py"
-                suffix += 1
-            archive.write_text(source)
+        reserved = False
+        try:
+            with lock:
+                n = _reserve_submission_slot()
+                reserved = True
+                archive = history / f"{n}_{_safe_slug(description)}.py"
+                suffix = 1
+                while archive.exists():
+                    archive = history / f"{n}_{_safe_slug(description)}_{suffix}.py"
+                    suffix += 1
+                archive.write_text(source)
+        except Exception:
+            if reserved:
+                with lock:
+                    _release_submission_slot()
+            raise
         archive_rel = str(archive.relative_to(root))
 
-        syntax = _check_syntax(source)
-        if syntax is not None:
+        row_recorded = False
+        try:
+            syntax = _check_syntax(source)
+            if syntax is not None:
+                row = {
+                    "n": n, "ts": time.time(),
+                    "score": None, "returncode": 1,
+                    "elapsed_s": 0.0, path_key: archive_rel,
+                    "description": description,
+                    "stdout_tail": "",
+                    "stderr_tail": f"INVALID: {syntax}\n",
+                }
+                _append_submission(row)
+                row_recorded = True
+                raise ExperimentCrashed(row)
+
+            stdout, stderr, rc, elapsed = _run_evaluator(
+                root, evaluator, archive_rel, budget_s,
+            )
             row = {
                 "n": n, "ts": time.time(),
-                "score": None, "returncode": 1,
-                "elapsed_s": 0.0, path_key: archive_rel,
+                "score": _parse_score(stdout), "returncode": rc,
+                "elapsed_s": elapsed, path_key: archive_rel,
                 "description": description,
-                "stdout_tail": "",
-                "stderr_tail": f"INVALID: {syntax}\n",
+                "stdout_tail": (stdout or "")[-2000:],
+                "stderr_tail": (stderr or "")[-1000:],
             }
-            _append(row)
-            raise ExperimentCrashed(row)
-
-        stdout, stderr, rc, elapsed = _run_evaluator(
-            root, evaluator, archive_rel, budget_s,
-        )
-        row = {
-            "n": n, "ts": time.time(),
-            "score": _parse_score(stdout), "returncode": rc,
-            "elapsed_s": elapsed, path_key: archive_rel,
-            "description": description,
-            "stdout_tail": (stdout or "")[-2000:],
-            "stderr_tail": (stderr or "")[-1000:],
-        }
-        _append(row)
-        if rc != 0:
-            raise ExperimentCrashed(row)
-        return row
+            _append_submission(row)
+            row_recorded = True
+            if rc != 0:
+                raise ExperimentCrashed(row)
+            return row
+        except Exception:
+            if not row_recorded:
+                with lock:
+                    _release_submission_slot()
+            raise
 
     @tool(
         f"Run the original baseline `{solution}` once and record it "
@@ -455,8 +532,23 @@ def make_run_experiment(
         rows = sorted(_read_ledger(), key=lambda r: r.get("ts", 0))
         return {r.get("description") or f"n_{r.get('n')}": r for r in rows}
 
+    @tool(
+        "Submission budget for this autoresearch run. `max_submissions` "
+        "and `remaining_submissions` count only run_experiment(...) trials, "
+        "not the idempotent baseline."
+    )
+    def submission_status() -> dict:
+        with lock:
+            return {
+                "max_submissions": max_submissions,
+                "submissions": _submission_count(),
+                "pending_submissions": pending_submissions,
+                "remaining_submissions": _remaining_submissions(),
+            }
+
     return [
         run_experiment, run_baseline, list_runs, get_run, latest_run, get_runs,
+        submission_status,
     ]
 
 
@@ -492,7 +584,9 @@ def main() -> None:
     p.add_argument("--lower-is-better", action="store_true")
     p.add_argument("--budget-s", type=int, default=600,
                    help="Default per-trial wall-clock cap.")
-    p.add_argument("--rounds", type=int, default=40,
+    p.add_argument("--max-submissions", type=int, default=None,
+                   help="Hard cap on run_experiment submissions; baseline excluded.")
+    p.add_argument("--max-iterations", type=int, default=40,
                    help="Engine max_iterations cap.")
     p.add_argument("--branches-per-turn", type=int, default=4,
                    help="How many children the parent should spawn at a time.")
@@ -505,6 +599,8 @@ def main() -> None:
     p.add_argument("--max-depth", type=int, default=1)
     p.add_argument("--no-ui", action="store_true")
     args = p.parse_args()
+    if args.max_submissions is not None and args.max_submissions < 0:
+        raise SystemExit("--max-submissions must be >= 0")
 
     target = args.target.resolve()
     missing = [n for n in (args.solution, args.evaluator, "program.md")
@@ -539,7 +635,7 @@ def main() -> None:
         *FILE_TOOLS,
         *make_run_experiment(
             workspace.root, args.solution, args.evaluator,
-            args.lower_is_better,
+            args.lower_is_better, args.max_submissions,
         ),
     ])
 
@@ -547,7 +643,7 @@ def main() -> None:
         llm_client=make_llm(args.model),
         runtime=runtime, workspace=workspace,
         config=RLMConfig(
-            max_iterations=args.rounds,
+            max_iterations=args.max_iterations,
             child_max_iterations=args.child_iterations,
             max_depth=args.max_depth,
             max_concurrency=args.max_concurrency,
@@ -559,7 +655,13 @@ def main() -> None:
     # recursive parent/child mechanics live in the system prompt.
     query = (
         f"Read `program.md`, run the baseline, then fan out "
-        f"{args.branches_per_turn} child trials with `rlm_delegate`. "
+        f"up to {args.branches_per_turn} child trials with `rlm_delegate`, "
+        f"but first call `submission_status()`; when `remaining_submissions` "
+        f"is not None, never spawn more children than that number. "
+        f"The hard submission cap "
+        f"is {args.max_submissions if args.max_submissions is not None else 'unlimited'} "
+        f"run_experiment calls, excluding the baseline. If no submissions "
+        f"remain, summarize the best ledger entry and call `done(...)`. "
         f"Each child is capped at {args.child_iterations} turns by "
         f"the engine. Per-trial budget is {args.budget_s}s; put "
         f"`budget_s={args.budget_s}` in each child query. If a "
@@ -573,9 +675,10 @@ def main() -> None:
     print(f"[autoresearch] target={target}", flush=True)
     print(f"[autoresearch] workspace={workspace.root}", flush=True)
     print(
-        f"[autoresearch] model={args.model}  rounds={args.rounds}  "
+        f"[autoresearch] model={args.model}  max_iterations={args.max_iterations}  "
         f"branches_per_turn={args.branches_per_turn}  "
-        f"child_iterations={args.child_iterations}  budget_s={args.budget_s}",
+        f"child_iterations={args.child_iterations}  budget_s={args.budget_s}  "
+        f"max_submissions={args.max_submissions}",
         flush=True,
     )
 

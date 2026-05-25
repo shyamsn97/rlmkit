@@ -36,7 +36,7 @@ class DelegatingLLM(LLMClient):
     ROOT = (
         "```repl\n"
         "h = rlm_delegate(name='child', query='do the thing', context='')\n"
-        "results = yield rlm_wait(h)\n"
+        "results = await rlm_wait(h)\n"
         "done('root:' + results[0])\n"
         "```"
     )

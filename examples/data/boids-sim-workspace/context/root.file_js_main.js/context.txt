@@ -1,9 +1,0 @@
-Create the main JS module at js/main.js which initializes the canvas, creates a Flock with many colorful fast boids, and animates them.
-
-Contract:
-- Path: js/main.js
-- Import Flock from './flock.js'
-- Import randomColor from './utils.js' if needed
-- Setup resize handling, requestAnimationFrame loop, and fast-moving colorful boids.
-- Export nothing; this is an entry module loaded by index.html.
-- Return only the path when done.

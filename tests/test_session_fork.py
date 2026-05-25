@@ -155,7 +155,7 @@ def test_context_variable_read_lines_and_grep(tmp_path: Path):
 
     assert context.info()["lines"] == 3
     assert context.read(0, 5) == "alpha"
-    assert context.lines(1, 2).strip() == "beta user 123"
+    assert context.lines(1, 2) == ["beta user 123"]
     assert context.line_count() == 3
     assert context.grep(r"user\s+456").strip() == "3:gamma user 456"
 

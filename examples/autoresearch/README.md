@@ -15,7 +15,7 @@ turn 0:
 turn 1+:
  → fresh = pick_slugs(get_runs())
  → handles = [rlm_delegate(name=slug, query=hyp, context=ctx) for slug, hyp, ctx in fresh]
- → results = (yield rlm_wait(*handles))   # children call run_experiment
+ → results = await rlm_wait(*handles)     # children call run_experiment
  → ...
  → done(<summary>)
 ```
@@ -29,6 +29,12 @@ history/<n>_<slug>.py` from the workspace root.
 `run_experiment`: it gets its own one-shot `run_baseline()` tool
 which evaluates the original `solution.py` once and records
 `description='baseline'`.
+
+Use `--max-submissions N` to put a hard cap on experiment submissions.
+The cap counts `run_experiment(...)` calls only, not the baseline. Agents
+can inspect `submission_status()` and `run_experiment(...)` raises
+`SubmissionError("too many submissions...")` without writing a new ledger row
+once the cap is exhausted.
 
 Archived candidates are the research record. Prompt children to include
 module, target-function, and helper docstrings that explain the strategy,
@@ -62,7 +68,7 @@ python examples/autoresearch/circle_packing/evaluate.py \
 
 python examples/autoresearch/autoresearch.py \
     --target examples/autoresearch/circle_packing \
-    --budget-s 120 --rounds 20 --model gpt-5-mini
+    --budget-s 120 --max-iterations 20 --max-submissions 64 --model gpt-5-mini
 ```
 
 Output goes to `runs/autoresearch/`:

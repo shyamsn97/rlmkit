@@ -78,7 +78,7 @@ def test_object_proxy_round_trips_file_context_methods(runtime, tmp_path: Path):
     assert out == "hello from container"
 
 
-def test_star_import_with_yield(runtime):
+def test_star_import_with_await(runtime):
     rt, _ = runtime
 
     def delegate(prompt: str) -> ChildHandle:
@@ -93,7 +93,7 @@ def test_star_import_with_yield(runtime):
     suspended, _, _ = rt.start_code(
         "from math import *\n"
         "h = delegate('q')\n"
-        "yield wait([h])\n"
+        "await wait([h])\n"
         "print(int(pi * 100))\n"
     )
     assert suspended is True
@@ -117,7 +117,7 @@ def test_proxied_writes_land_in_host_workspace(runtime):
 
 
 def test_end_to_end_delegate_wait():
-    """Spawn a fresh container; exercise execute, inject, and generator suspension."""
+    """Spawn a fresh container; exercise execute, inject, and await suspension."""
     rt = DockerRuntime(IMAGE, network="none")
     try:
         assert rt.execute("print('hi from container')") == "hi from container"
@@ -133,7 +133,7 @@ def test_end_to_end_delegate_wait():
 
         suspended, payload, _ = rt.start_code(
             "h = delegate('q1')\n"
-            "results = yield wait([h])\n"
+            "results = await wait([h])\n"
             "print('after:', results)\n"
         )
         assert suspended is True

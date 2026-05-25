@@ -52,5 +52,9 @@ class NodeScheduler:
         visit(graph.agent_id)
         return runnable
 
+    def runnable_descendants(self, graph: Graph) -> list[str]:
+        """Runnable agents below ``graph``; excludes ``graph`` itself."""
+        return [aid for aid in self.runnable_agents(graph) if aid != graph.agent_id]
+
 
 __all__ = ["NodeScheduler"]

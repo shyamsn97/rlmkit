@@ -1,8 +1,0 @@
-Create the main HTML file for a boids simulation.
-
-Contract:
-- Path: index.html
-- Include: link to styles.css, a <canvas id="stage"> sized to the window, and a module script loading js/main.js.
-- No inline scripts; use ES modules.
-- Return only the path when done.
-Create and write the file using write_file(path, content).

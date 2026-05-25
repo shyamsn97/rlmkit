@@ -54,15 +54,25 @@ def edit_file(path: str, *edits: tuple[str, str]) -> str:
     return f"Applied {count}/{len(edits)} edits to {path}"
 
 
+def _display_path(path: Path, *, absolute: bool) -> str:
+    if absolute:
+        return str(path)
+    try:
+        return str(path.relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(path)
+
+
 @tool(
-    "List files and directories, returning absolute paths usable by other "
-    "file tools. Pass returned paths directly to `read_file`, `grep`, etc."
+    "List files and directories, returning paths usable by other file tools. "
+    "For relative inputs, returns workspace-relative paths."
 )
 def ls(path: str = ".") -> list[str]:
+    absolute = Path(path).is_absolute()
     p = Path(path).resolve()
     if p.is_file():
-        return [str(p)]
-    return sorted(str(entry) for entry in p.iterdir())
+        return [_display_path(p, absolute=absolute)]
+    return sorted(_display_path(entry, absolute=absolute) for entry in p.iterdir())
 
 
 @tool("Read lines start:end (0-indexed, exclusive) from a file.")

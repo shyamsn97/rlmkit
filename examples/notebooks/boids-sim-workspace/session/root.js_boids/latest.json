@@ -1,8 +1,0 @@
-{
-  "agent_id": "root.js_boids",
-  "latest_node_id": "n_d72bea218504",
-  "seq": 4,
-  "type": "done_output",
-  "terminal": true,
-  "result": "js/boids.js"
-}

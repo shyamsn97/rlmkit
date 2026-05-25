@@ -1,8 +1,0 @@
-Create a JS module at js/boid.js exporting a Boid class implementing steering behaviors.
-
-Contract:
-- Path: js/boid.js
-- Import Vector from './utils.js'
-- Export class Boid with constructor(x,y), methods: edges(width,height), align(boids), cohesion(boids), separation(boids), flock(boids), update(), draw(ctx)
-- Use defensive defaults and avoid globals. Keep code clear and syntactically correct.
-- Return only the path when done.

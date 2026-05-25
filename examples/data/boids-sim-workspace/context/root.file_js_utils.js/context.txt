@@ -1,8 +1,0 @@
-Create a JS module at js/utils.js exporting a Vector helper class and a randomColor function.
-
-Contract:
-- Path: js/utils.js
-- Export: class Vector {constructor, add, sub, mult, div, mag, setMag, limit, normalize, heading, dist, copy, static random2D}
-- Export: function randomColor() -> returns an HSL string for bright colors.
-- Clean, ES6 module syntax. No side effects.
-- Return only the path when done.

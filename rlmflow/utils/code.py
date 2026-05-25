@@ -7,7 +7,7 @@ import re
 
 
 class OrphanedDelegatesError(RuntimeError):
-    """Raised when rlm_delegate() is called without a matching yield rlm_wait()."""
+    """Raised when rlm_delegate() is called without a matching await rlm_wait()."""
 
 
 _REPL_OPEN_RE = re.compile(r"```repl[ \t]*\n")
@@ -56,44 +56,96 @@ def replace_code_block(text: str, new_code: str) -> str:
     return text[: opening.start()] + f"```repl\n{new_code}\n```"
 
 
-def check_yield_errors(code: str) -> str | None:
-    """Return an error string if any ``rlm_wait()`` calls lack ``yield``, else None.
-
-    A ``rlm_wait(...)`` call is considered yielded if it appears anywhere inside
-    the expression tree of a ``Yield`` node. This permits idiomatic forms like::
-
-        results = yield rlm_wait(*handles) if handles else []
-        results = yield (rlm_wait(h1), rlm_wait(h2))
-
-    where the syntactic value of the ``Yield`` is an ``IfExp`` / ``Tuple`` /
-    parenthesized expression rather than a bare ``Call``.
-    """
+def check_wait_syntax(code: str) -> str | None:
+    """Return an error string for unsupported ``rlm_wait`` / ``await`` syntax."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return None
 
-    yielded: set[int] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Yield) and node.value is not None:
-            for sub in ast.walk(node.value):
-                if (
-                    isinstance(sub, ast.Call)
-                    and isinstance(sub.func, ast.Name)
-                    and sub.func.id == "rlm_wait"
-                ):
-                    yielded.add(id(sub))
+    checker = _WaitSyntaxChecker()
+    checker.visit(tree)
+    return "ERROR: " + "; ".join(checker.errors) if checker.errors else None
 
-    errors = []
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "rlm_wait"
-            and id(node) not in yielded
-        ):
-            errors.append(
-                f"Line {node.lineno}: `rlm_wait(...)` must be prefixed with `yield`"
-            )
 
-    return "ERROR: " + "; ".join(errors) if errors else None
+def _is_rlm_wait_call(node: ast.AST | None) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "rlm_wait"
+    )
+
+
+class _WaitSyntaxChecker(ast.NodeVisitor):
+    boundary = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    comprehension = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+    def __init__(self) -> None:
+        self.await_depth = 0
+        self.errors: list[str] = []
+
+    def _line(self, node: ast.AST) -> int | None:
+        return getattr(node, "lineno", None)
+
+    def _add(self, node: ast.AST, message: str) -> None:
+        line = self._line(node)
+        prefix = f"Line {line}: " if line is not None else ""
+        self.errors.append(prefix + message)
+
+    def visit_Await(self, node: ast.Await) -> None:  # noqa: N802
+        if not _is_rlm_wait_call(node.value):
+            self._add(node, "only `await rlm_wait(...)` is supported")
+        self.await_depth += 1
+        self.generic_visit(node)
+        self.await_depth -= 1
+
+    def visit_Yield(self, node: ast.Yield) -> None:  # noqa: N802
+        self._add(node, "use `await rlm_wait(...)`; top-level `yield` is not supported")
+
+    def visit_YieldFrom(self, node: ast.YieldFrom) -> None:  # noqa: N802
+        self._add(node, "top-level `yield from` is not supported")
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        if _is_rlm_wait_call(node) and self.await_depth == 0:
+            self._add(node, "`rlm_wait(...)` must be awaited: `await rlm_wait(...)`")
+        self.generic_visit(node)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:  # noqa: N802
+        self._check_comprehension(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:  # noqa: N802
+        self._check_comprehension(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:  # noqa: N802
+        self._check_comprehension(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:  # noqa: N802
+        self._check_comprehension(node)
+
+    def _check_comprehension(self, node: ast.AST) -> None:
+        for child in ast.walk(node):
+            if isinstance(child, ast.Await) or _is_rlm_wait_call(child):
+                self._add(
+                    node, "`await rlm_wait(...)` is not supported in comprehensions"
+                )
+                return
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self._check_nested(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        self._check_nested(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        self._check_nested(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        self._check_nested(node)
+
+    def _check_nested(self, node: ast.AST) -> None:
+        for child in ast.walk(node):
+            if isinstance(child, ast.Await) or _is_rlm_wait_call(child):
+                self._add(
+                    node, "`rlm_wait(...)` is only supported at action-block top level"
+                )
+                return

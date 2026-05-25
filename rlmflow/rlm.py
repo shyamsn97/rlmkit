@@ -9,7 +9,11 @@ Pure helpers live under :mod:`rlmflow.engine`:
 - :mod:`rlmflow.engine.actions` — :class:`Action` types and the pure
   projection ``Graph -> ActionPlan``.
 - :mod:`rlmflow.engine.replay` — cold-start replay-of-one for
-  rebuilding a suspended generator after a fork or process restart.
+  rebuilding a suspended coroutine after a fork or process restart.
+- :mod:`rlmflow.engine.scheduling` — implementation of the outer
+  ``step`` loop and async-child refill policy.
+- :mod:`rlmflow.engine.transitions` — implementation of action-to-state
+  transition handlers.
 - :mod:`rlmflow.engine.seq` — tiny pure helpers (sequence numbers,
   output truncation, the pool factory).
 - :mod:`rlmflow.engine.config` — :class:`RLMConfig` (pure data).
@@ -42,56 +46,43 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from rlmflow.engine.actions import Action, CallLLM, Exec, Resume, act
+from rlmflow.engine import scheduling, transitions
+from rlmflow.engine.actions import Action
 from rlmflow.engine.config import RLMConfig
-from rlmflow.engine.replay import can_resume, replay_to_yield, results_for_supervise
 from rlmflow.engine.scheduler import NodeScheduler
 from rlmflow.engine.seq import (
     ROOT_RUNTIME_ID,
     append_node,
-    budget_exceeded,
     create_pool,
     format_exec_output,
-    truncate_output,
     unique_child_id,
 )
+from rlmflow.engine.transcript import TranscriptRecorder
 from rlmflow.graph import (
     ChildHandle,
-    DoneOutput,
-    ErrorOutput,
     ExecAction,
-    ExecOutput,
     Graph,
-    LLMAction,
     LLMOutput,
     Node,
-    ResumeAction,
     RuntimeRef,
     SupervisingOutput,
     UserQuery,
-    is_code_observation,
     is_errored,
     is_exec_output,
     is_llm_output,
-    is_resumed,
     is_user_query,
 )
 from rlmflow.llm import LLMClient, LLMUsage
 from rlmflow.prompts.default import DEFAULT_BUILDER
 from rlmflow.prompts.messages import (
-    CONTINUE_ACTION,
     DEFAULT_QUERY,
     FINAL_ANSWER_ACTION,
-    FIRST_ACTION,
-    NO_CODE_BLOCK,
-    ORPHANED_DELEGATES,
-    RESUME_VERIFY_ACTION,
     STATUS_DEPTH_MID,
     STATUS_DEPTH_NEAR_MAX,
     STATUS_DEPTH_ROOT,
     TRUNCATION_SESSION_HINT,
     TRUNCATION_SUMMARY,
-    format_context_hint,
+    build_user_prompt,
 )
 from rlmflow.runtime import LocalRuntime, Runtime
 from rlmflow.tools.builtins import (
@@ -101,7 +92,7 @@ from rlmflow.tools.builtins import (
     make_llm_query_batched,
     make_wait,
 )
-from rlmflow.utils import OrphanedDelegatesError, check_yield_errors, find_code_blocks
+from rlmflow.utils import OrphanedDelegatesError, find_code_blocks
 from rlmflow.workspace import (
     Context,
     ContextVariable,
@@ -198,6 +189,7 @@ class RLMFlow(LLMClient):
         self.workspace = workspace
         self.session: Session = workspace.session if workspace else InMemorySession()
         self.context: Context = workspace.context if workspace else InMemoryContext()
+        self.transcript_recorder = TranscriptRecorder(self.session)
         self.config = config or RLMConfig()
         self.runtime_factory = runtime_factory
         self.prompt_builder = prompt_builder or DEFAULT_BUILDER
@@ -240,7 +232,8 @@ class RLMFlow(LLMClient):
         for key, value in (contexts or {}).items():
             self.context.write(key, value, agent_id=agent_id)
 
-        context_hint = self.build_context_hint(agent_id)
+        context_hint = self.context.list_contexts(agent_id=agent_id)
+        context_info = self._context_info(agent_id)
         root = Graph(
             agent_id=agent_id,
             branch_id=self.workspace.branch_id if self.workspace else "main",
@@ -260,7 +253,14 @@ class RLMFlow(LLMClient):
             self.session,
             root,
             UserQuery(
-                content=FIRST_ACTION.format(query=query, context_hint=context_hint)
+                content=build_user_prompt(
+                    query=query,
+                    iteration=0,
+                    depth=0,
+                    max_depth=self.config.max_depth,
+                    context_keys=context_hint,
+                    context_info=context_info,
+                )
             ),
         )
         return self.session.load_graph()
@@ -296,23 +296,16 @@ class RLMFlow(LLMClient):
 
         Returns a freshly-loaded :class:`Graph` snapshot.
         """
-        runnable = self.node_scheduler.runnable_agents(graph)
-        if not runnable:
-            return graph
-        plan = act(
-            graph,
-            config=self.config,
-            runnable=runnable,
-            terminate_requested=self.terminate_requested,
-        )
-        if not plan:
-            return graph
-        tasks = [
-            (aid, (lambda action=action: self.apply_one(action)))
-            for aid, action in plan.items()
-        ]
-        self.pool.execute(tasks)
-        return self.session.load_graph()
+        return scheduling.step(self, graph)
+
+    def _refill_async_children(
+        self,
+        _done_id: str,
+        _result: object,
+        active_ids: set[str],
+    ) -> list[tuple[str, Callable[[], None]]]:
+        """Return newly runnable async-child tasks after one task completes."""
+        return scheduling.refill_async_children(self, _done_id, _result, active_ids)
 
     def terminate(self, graph: Graph) -> Graph:
         """Mark every still-running agent for a final-answer turn.
@@ -336,29 +329,7 @@ class RLMFlow(LLMClient):
         :func:`rlmflow.engine.actions.act_one`; this method does no
         re-decisioning.
         """
-        graph = self.session.load_graph().agents[action.agent_id]
-
-        over = budget_exceeded(graph, self.config.max_budget)
-        if over is not None:
-            append_node(
-                self.session,
-                graph,
-                DoneOutput(result=f"[budget exceeded: {over} tokens]"),
-            )
-            return
-
-        cur = graph.current()
-        if isinstance(action, CallLLM):
-            self.step_llm(
-                graph,
-                cur,
-                force_final=action.force_final,
-                model=action.model,
-            )
-        elif isinstance(action, Exec):
-            self.step_exec(graph, cur)
-        elif isinstance(action, Resume):
-            self.step_after_supervising(graph, cur)
+        return transitions.apply_one(self, action)
 
     def step_llm(
         self,
@@ -380,17 +351,13 @@ class RLMFlow(LLMClient):
         The next :meth:`apply_one` round will see :class:`LLMOutput`
         as the current state and run :meth:`step_exec` against it.
         """
-        llm_model = model or graph.config.get("model", "default")
-        llm_action = LLMAction(
-            agent_id=graph.agent_id,
-            seq=last.seq + 1,
-            model=llm_model,
+        return transitions.step_llm(
+            self,
+            graph,
+            last,
+            force_final=force_final,
+            model=model,
         )
-        append_node(self.session, graph, llm_action)
-
-        llm_output, usage = self.reply_to(graph, llm_action, force_final=force_final)
-        self.record_usage(usage)
-        append_node(self.session, graph, llm_output)
 
     def step_exec(self, graph: Graph, llm_output: LLMOutput) -> None:
         """Exec half of one turn: write ``ExecAction → CodeObservation``.
@@ -401,28 +368,7 @@ class RLMFlow(LLMClient):
         :class:`ExecOutput` / :class:`SupervisingOutput` /
         :class:`ErrorOutput` / :class:`DoneOutput`).
         """
-        code = llm_output.code
-
-        exec_action = ExecAction(
-            agent_id=graph.agent_id,
-            seq=llm_output.seq + 1,
-            code=code,
-        )
-        exec_state = append_node(self.session, graph, exec_action)
-
-        if not code:
-            # LLM produced no parseable code block — surface a retry
-            # message; the next apply_one round routes back to step_llm.
-            append_node(
-                self.session,
-                graph,
-                ErrorOutput(content=NO_CODE_BLOCK, error="no_code_block"),
-            )
-            return
-
-        full = self.session.load_graph()
-        graph = full.agents[graph.agent_id]
-        self._run_exec(graph, exec_state, code)
+        return transitions.step_exec(self, graph, llm_output)
 
     def _run_exec(
         self,
@@ -430,83 +376,7 @@ class RLMFlow(LLMClient):
         exec_action: ExecAction,
         code: str,
     ) -> None:
-        err = check_yield_errors(code)
-        if err:
-            append_node(
-                self.session,
-                graph,
-                ErrorOutput(content=err, error="invalid_yield", output=""),
-            )
-            return
-
-        runtime = self.inject_env(graph, exec_action)
-        suspended, raw, errored = runtime.start_code(code)
-        raw = truncate_output(raw, self.config.max_output_length)
-        env = runtime.env
-        delegated = list(env.get("DELEGATED") or [])
-        done_result = env.get("DONE_RESULT")
-
-        if delegated and not suspended and done_result is None:
-            msg = ORPHANED_DELEGATES.format(names=", ".join(delegated))
-            base = raw if isinstance(raw, str) else ""
-            output = truncate_output(
-                runtime.execute(f"raise OrphanedDelegatesError({msg!r})"),
-                self.config.max_output_length,
-            )
-            content = (base + "\n\n" + output).strip()
-            append_node(
-                self.session,
-                graph,
-                ErrorOutput(
-                    content=self.format_exec_output(content),
-                    error="orphaned_delegates",
-                    output=content,
-                ),
-            )
-            return
-
-        if done_result is not None:
-            append_node(
-                self.session,
-                graph,
-                DoneOutput(result=done_result.strip()),
-            )
-            return
-
-        if suspended:
-            request, pre_output = raw
-            append_node(
-                self.session,
-                graph,
-                SupervisingOutput(
-                    output=pre_output,
-                    waiting_on=list(request.agent_ids),
-                ),
-            )
-            return
-
-        output = raw if isinstance(raw, str) else ""
-        if not output.strip():
-            output = "(no output)"
-        if errored:
-            append_node(
-                self.session,
-                graph,
-                ErrorOutput(
-                    content=self.format_exec_output(output),
-                    error="exec_exception",
-                    output=output,
-                ),
-            )
-            return
-        append_node(
-            self.session,
-            graph,
-            ExecOutput(
-                output=output,
-                content=self.format_exec_output(output),
-            ),
-        )
+        return transitions.run_exec(self, graph, exec_action, code)
 
     def step_after_supervising(
         self,
@@ -517,94 +387,11 @@ class RLMFlow(LLMClient):
 
         Drives the supervising agent forward after its waited-on
         children have settled. On a cold start (process restart or
-        fork), the live generator is gone — we replay the action code
-        with ``rlm_delegate`` in replay mode so the generator pauses at
-        the same yield before the regular resume path takes over.
+        fork), the live coroutine is gone — we replay the action code
+        with ``rlm_delegate`` in replay mode so it pauses at the same
+        await before the regular resume path takes over.
         """
-        if not can_resume(graph, last):
-            # Children still need to advance. The scheduler picks them
-            # up on the next outer step; nothing for this agent to do
-            # now.
-            return
-
-        results = results_for_supervise(graph, last)
-
-        resume_action = ResumeAction(
-            agent_id=graph.agent_id,
-            seq=last.seq + 1,
-            resumed_from=list(last.waiting_on),
-        )
-        resume_state = append_node(self.session, graph, resume_action)
-
-        runtime = self.inject_env(graph, resume_state)
-        if not runtime.suspended:
-            # The live generator is gone — process restart, fork, or
-            # any other cold start. Re-execute the action code with
-            # rlm_delegate in replay mode so the generator is paused at the
-            # same yield we recorded, then drop into the regular resume
-            # path.
-            replay_to_yield(graph, last, runtime)
-
-        suspended, raw, errored = runtime.resume_code(results)
-        raw = truncate_output(raw, self.config.max_output_length)
-        env = runtime.env
-        done_result = env.get("DONE_RESULT")
-
-        if suspended:
-            request, output = raw
-        else:
-            output = raw if isinstance(raw, str) else ""
-        if not output.strip():
-            output = "(no output)"
-
-        graph = self.session.load_graph().agents[graph.agent_id]
-        resumed_from = list(last.waiting_on)
-
-        if done_result is not None:
-            append_node(
-                self.session,
-                graph,
-                DoneOutput(
-                    result=done_result.strip(),
-                    output=output,
-                    resumed_from=resumed_from,
-                ),
-            )
-            return
-
-        if suspended:
-            append_node(
-                self.session,
-                graph,
-                SupervisingOutput(
-                    output=output,
-                    waiting_on=list(request.agent_ids),
-                    resumed_from=resumed_from,
-                ),
-            )
-            return
-
-        if errored:
-            append_node(
-                self.session,
-                graph,
-                ErrorOutput(
-                    content=self.format_exec_output(output),
-                    error="exec_exception",
-                    output=output,
-                    resumed_from=resumed_from,
-                ),
-            )
-            return
-        append_node(
-            self.session,
-            graph,
-            ExecOutput(
-                output=output,
-                content=self.format_exec_output(output),
-                resumed_from=resumed_from,
-            ),
-        )
+        return transitions.step_after_supervising(self, graph, last)
 
     # ── LLM half-step ────────────────────────────────────────────────
 
@@ -633,7 +420,7 @@ class RLMFlow(LLMClient):
         raw, usage = self.call_llm(messages, client=client)
         elapsed_s = round(time.time() - t0, 3)
         code = self.extract_code(raw)
-        self._record_transcript(
+        self.transcript_recorder.record_turn(
             graph=graph,
             last=last,
             messages=messages,
@@ -732,65 +519,6 @@ class RLMFlow(LLMClient):
             return None
         return blocks[0] if self.config.single_block else "\n\n".join(blocks)
 
-    def _record_transcript(
-        self,
-        *,
-        graph: Graph,
-        last: Node,
-        messages: list[dict[str, str]],
-        client: LLMClient,
-        force_final: bool,
-        raw: str,
-        usage: LLMUsage,
-        elapsed_s: float,
-    ) -> None:
-        """Update this agent's ``transcript.json`` with the new turn.
-
-        The transcript is a *single* document per agent that grows
-        turn-by-turn — ``messages`` is the flat conversation as the
-        LLM saw it across every turn so far, ``metadata`` is the
-        parallel per-message list. Each call here appends only the
-        *new* messages (any user nudges since the last call, plus the
-        assistant reply just produced) — never the full prefix again.
-
-        Transcript-write failures are swallowed: persistence should
-        never break a run.
-        """
-        session = self.session
-        if session is None or not hasattr(session, "write_transcript"):
-            return
-        try:
-            prior = session.read_transcript(graph.agent_id) or {}
-        except Exception:  # pragma: no cover
-            prior = {}
-        prior_messages: list[dict[str, str]] = list(prior.get("messages") or [])
-        prior_metadata: list[dict] = list(prior.get("metadata") or [])
-
-        new_inputs = messages[len(prior_messages) :]
-        appended_msgs = list(new_inputs) + [{"role": "assistant", "content": raw}]
-        appended_meta: list[dict] = [{} for _ in new_inputs]
-        appended_meta.append(
-            {
-                "ts": time.time(),
-                "model": getattr(client, "model", None),
-                "force_final": force_final,
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "elapsed_s": elapsed_s,
-                "after_node_id": last.id,
-                "after_seq": last.seq,
-            }
-        )
-        transcript = {
-            "agent_id": graph.agent_id,
-            "messages": prior_messages + appended_msgs,
-            "metadata": prior_metadata + appended_meta,
-        }
-        try:
-            session.write_transcript(graph.agent_id, transcript)
-        except Exception:  # pragma: no cover
-            pass
-
     # ── messages / system prompt ─────────────────────────────────────
 
     def build_messages(
@@ -807,7 +535,8 @@ class RLMFlow(LLMClient):
         )
         system = {"role": "system", "content": system_content}
 
-        context_hint = self.build_context_hint(graph.agent_id)
+        context_keys = self.context.list_contexts(agent_id=graph.agent_id)
+        max_depth = (graph.config or {}).get("max_depth", self.config.max_depth)
 
         msgs: list[dict[str, str]] = []
         for state in graph.states:
@@ -841,37 +570,36 @@ class RLMFlow(LLMClient):
         # transition writes the paired ``LLMAction`` *before* calling
         # ``build_messages``, so the action for the in-progress turn is
         # already in ``graph.states`` here. ``LLMOutput``s only exist
-        # for *completed* prior turns, which is what "should we nudge
-        # with CONTINUE_ACTION?" actually wants to know.
-        has_prior_turn = any(is_llm_output(s) for s in graph.states)
-        last_code_observation = next(
-            (s for s in reversed(graph.states) if is_code_observation(s)), None
-        )
+        # for *completed* prior turns, which is what should gate the
+        # continuation nudge.
+        prior_turns = sum(1 for s in graph.states if is_llm_output(s))
+        has_prior_turn = prior_turns > 0
+        nudge: str | None = None
         if force_final:
-            msgs.append({"role": "user", "content": FINAL_ANSWER_ACTION})
-        elif (
-            has_prior_turn
-            and last_code_observation
-            and is_resumed(last_code_observation)
-        ):
-            child_ids = ", ".join(last_code_observation.resumed_from)
-            msgs.append(
-                {
-                    "role": "user",
-                    "content": RESUME_VERIFY_ACTION.format(
-                        child_ids=child_ids, context_hint=context_hint
-                    ),
-                }
-            )
+            nudge = FINAL_ANSWER_ACTION
         elif has_prior_turn:
-            msgs.append(
-                {
-                    "role": "user",
-                    "content": CONTINUE_ACTION.format(
-                        query=graph.query, context_hint=context_hint
-                    ),
-                }
+            nudge = build_user_prompt(
+                query=graph.query,
+                iteration=prior_turns,
+                depth=graph.depth,
+                max_depth=max_depth,
+                context_keys=context_keys,
             )
+
+        if nudge is not None:
+            # Merge the continue-turn / final-answer nudge into the last
+            # message if it's already user-role — otherwise providers
+            # like Anthropic reject (or silently merge) consecutive
+            # `{role: "user"}` blocks. Fall back to appending a new
+            # message only if the trailing message is assistant-role,
+            # which shouldn't happen in practice but keeps us safe.
+            if msgs and msgs[-1]["role"] == "user":
+                msgs[-1] = {
+                    "role": "user",
+                    "content": msgs[-1]["content"] + "\n\n" + nudge,
+                }
+            else:
+                msgs.append({"role": "user", "content": nudge})
         return [system] + msgs
 
     def build_system_prompt(self, graph: Graph) -> str:
@@ -882,20 +610,6 @@ class RLMFlow(LLMClient):
             tools=self.build_tools_section(),
             status=self.build_status_section(graph),
         )
-
-    def build_context_hint(self, agent_id: str) -> str:
-        """Render a compact first-turn context metadata hint, if useful."""
-
-        try:
-            info = self.context.info("context", agent_id=agent_id)
-        except KeyError:
-            info = None
-        keys = self.context.list_contexts(agent_id=agent_id)
-        has_primary_context = bool(info and info.get("chars", 0) > 0)
-        has_extra_contexts = any(key != "context" for key in keys)
-        if not has_primary_context and not has_extra_contexts:
-            return ""
-        return format_context_hint(info, context_keys=keys)
 
     def build_system_prompt_for(
         self,
@@ -1102,7 +816,8 @@ class RLMFlow(LLMClient):
             ),
             "model": model,
         }
-        context_hint = self.build_context_hint(child_aid)
+        context_keys = self.context.list_contexts(agent_id=child_aid)
+        context_info = self._context_info(child_aid)
         child_graph = Graph(
             agent_id=child_aid,
             branch_id=parent.branch_id,
@@ -1126,7 +841,14 @@ class RLMFlow(LLMClient):
             self.session,
             child_graph,
             UserQuery(
-                content=FIRST_ACTION.format(query=query, context_hint=context_hint)
+                content=build_user_prompt(
+                    query=query,
+                    iteration=0,
+                    depth=parent.depth + 1,
+                    max_depth=cfg.get("max_depth", self.config.max_depth),
+                    context_keys=context_keys,
+                    context_info=context_info,
+                )
             ),
         )
         return ChildHandle(child_aid)
@@ -1137,6 +859,17 @@ class RLMFlow(LLMClient):
         """Cache the most recent ``LLMUsage``. Override for metrics."""
         self.last_usage = usage
 
+    def _context_info(self, agent_id: str) -> dict[str, Any] | None:
+        """Best-effort size/shape signal for the agent's primary ``CONTEXT``.
+
+        Returns ``None`` when the agent has no `context` blob written —
+        avoids lying about a 0-char chunk for the on-disk haystack case.
+        """
+        try:
+            return self.context.info("context", agent_id=agent_id)
+        except KeyError:
+            return None
+
     def node_config(self) -> dict[str, Any]:
         """The default config dict written onto every fresh :class:`Graph`."""
         return {
@@ -1146,6 +879,7 @@ class RLMFlow(LLMClient):
             "max_output_length": self.config.max_output_length,
             "max_messages": self.config.max_messages,
             "child_max_iterations": self.config.child_max_iterations,
+            "async_children": self.config.async_children,
             "single_block": self.config.single_block,
             "max_budget": self.config.max_budget,
         }

@@ -1,6 +1,6 @@
 from rlmflow.utils.code import (
     OrphanedDelegatesError,
-    check_yield_errors,
+    check_wait_syntax,
     find_code_blocks,
     replace_code_block,
 )
@@ -16,7 +16,7 @@ from rlmflow.utils.viewer import (
 
 __all__ = [
     "OrphanedDelegatesError",
-    "check_yield_errors",
+    "check_wait_syntax",
     "find_code_blocks",
     "open_viewer",
     "render_html",

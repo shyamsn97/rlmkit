@@ -1,8 +1,0 @@
-Create a JS module at js/flock.js exporting a Flock manager.
-
-Contract:
-- Path: js/flock.js
-- Import Boid from './boid.js'
-- Export class Flock with constructor(width,height), methods: populate(n), updateAll(ctx), resize(width,height), getCount()
-- Manage an array of Boid instances and forward update/draw.
-- Return only the path when done.

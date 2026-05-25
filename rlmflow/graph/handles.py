@@ -26,13 +26,17 @@ class ChildHandle:
 
 
 class WaitRequest:
-    """Yielded by ``rlm_wait()`` to request suspension until children finish."""
+    """Awaited by ``rlm_wait()`` to request suspension until children finish."""
 
     def __init__(self, agent_ids: list[str]) -> None:
         self.agent_ids = agent_ids
 
     def __repr__(self) -> str:
         return f"WaitRequest({self.agent_ids!r})"
+
+    def __await__(self):
+        results = yield self
+        return results
 
     def to_dict(self) -> dict:
         return {"wait_request": self.agent_ids}

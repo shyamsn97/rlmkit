@@ -49,7 +49,7 @@ export OPENAI_API_KEY=...
 python examples/autoresearch/autoresearch.py \
     --target examples/autoresearch/circle_packing \
     --budget-s 120 \
-    --rounds 20
+    --max-iterations 20
 ```
 
 No API costs (pure-CPU numpy). The agent edits a copy of

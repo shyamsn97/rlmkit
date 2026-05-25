@@ -240,49 +240,44 @@ observation just like `step_exec`.
 
 ---
 
-## The REPL `yield` protocol
+## The REPL `await` protocol
 
-The engine **only** intercepts top-level `yield rlm_wait(*handles)`
-values. Every other `yield` — including nested generators, generator
-expressions, helpers consumed inside the block — is plain Python.
+The engine **only** intercepts top-level `await rlm_wait(*handles)`
+values. Top-level `yield` is not part of the action language.
 
 ### The protocol
 
-Each REPL block is wrapped in a synthetic generator function
-`__rlm_gen__` so the engine can drive it via `send()`. The engine
-sends values into the generator and decides what to do with each
-yielded value:
+Each REPL block with top-level await is compiled with Python's
+top-level-await flag so the engine can drive the resulting coroutine via
+`send()`. The engine sends values into the coroutine and decides what to
+do with each awaited value:
 
-| What's yielded                          | Engine reaction                                    |
+| What's awaited                          | Engine reaction                                    |
 |-----------------------------------------|----------------------------------------------------|
-| `rlm_wait(handle, …)` → `WaitRequest`       | **Suspend** the agent until those children settle. |
-| Anything else (any value, or bare yield)| **Pump through.** Send `None` back, keep advancing.|
+| `rlm_wait(handle, …)` -> `WaitRequest`  | **Suspend** the agent until those children settle. |
+| Anything else                           | Error; only `await rlm_wait(...)` is supported.    |
 | `StopIteration`                         | Block done; return captured stdout.                |
 
 The `WaitRequest` returned by `rlm_wait(...)` carries the child agent IDs
 the engine needs to schedule on. Without it the engine has no
-suspension target — so any other yielded value is treated like a
-normal Python generator yield: discard the value, resume immediately.
+suspension target.
 
 ### What "top level" means
 
-A yield is top-level iff the `yield` keyword sits at the indentation
-of the REPL block itself — *not* nested inside a `def` /
-`async def` / `lambda` / class body / generator expression. The
-implementation walks the AST and stops descending at every nested
-function boundary.
+An await is top-level iff the `await` keyword sits in the REPL block
+itself — *not* nested inside a `def` / `async def` / `lambda` / class
+body / comprehension. The implementation walks the AST and stops
+descending at nested boundaries.
 
 ```python
-# ── TOP-LEVEL yields ────────────────────────────────────────────────
-# These count. The REPL wraps the block in a generator function.
-yield 1                              # bare value yield
-yield                                # bare yield
-x = yield 5                          # yield as expression
-for i in range(3):
-    yield i                          # for-loop is at module level
+# ── TOP-LEVEL awaits ────────────────────────────────────────────────
+# These count. The REPL compiles with top-level await.
+result = await rlm_wait(h)
+for h in handles:
+    result, = await rlm_wait(h)
 
 # ── NOT top level ───────────────────────────────────────────────────
-# These don't count. Plain Python; the REPL doesn't wrap.
+# These don't count for engine suspension.
 def squares(n):
     for i in range(n):
         yield i * i                  # belongs to `squares`
@@ -307,10 +302,6 @@ class Counter:
 # Helpers, genexps, comprehensions — all plain Python.
 print(sum(x * x for x in range(100)))
 
-# Top-level non-Wait yields — pumped through, discarded.
-yield 42
-yield "hello"
-print("still running")     # this prints
 ```
 
 ✅ **Suspension:**
@@ -318,7 +309,7 @@ print("still running")     # this prints
 ```python
 h1 = rlm_delegate(name="worker", query="...", context="")
 h2 = rlm_delegate(name="worker", query="...", context="")
-results = yield rlm_wait(h1, h2)   # suspends, resumes with results
+results = await rlm_wait(h1, h2)   # suspends, resumes with results
 ```
 
 `results` is a list of strings (the children's `done(...)` payloads).
@@ -326,13 +317,11 @@ results = yield rlm_wait(h1, h2)   # suspends, resumes with results
 ❌ **Doesn't do what you want:**
 
 ```python
-yield rlm_delegate(name="worker", query="...", context="")   # yields a ChildHandle, not a Wait
-yield handle                      # same problem.
+rlm_wait(handle)                   # missing await
+await some_other_coroutine()       # only rlm_wait is supported
 ```
 
-These don't crash — they're treated as plain non-Wait yields and
-silently pumped through — but you also won't get a result back.
-**Use `yield rlm_wait(handle)`.**
+These are errors. **Use `await rlm_wait(handle)`.**
 
 ### Why this design
 
@@ -729,9 +718,11 @@ workspace/
   (`query`, `system_prompt`, `config`, `runtime`, etc.) to
   `agent.json`. Called on agent creation only.
 - `session.write_transcript(agent_id, transcript)` — update the agent's
-  flat LLM chat history. Called from `RLMFlow._record_transcript()`
-  inside `reply_to()`. **Append-only**: each call adds just the new
-  messages since the last call, never rewrites the prefix.
+  flat LLM chat history. Called from `RLMFlow.transcript_recorder.record_turn()`
+  (a `TranscriptRecorder` living in `rlmflow/engine/transcript.py`)
+  inside `reply_to()`, and from `record_terminal()` when an agent
+  finishes via `done(...)`. **Append-only**: each call adds just the
+  new messages since the last call, never rewrites the prefix.
 - `session.load_graph()` — rehydrate the persisted state as the same
   `Graph` shape the engine emits. `flows_to` edges are derived from
   state order; `spawns` edges come straight from `graph.json`.
@@ -768,8 +759,8 @@ filesystem tools. Sample, slice, or pass the full payload explicitly:
 
 ```python
 CONTEXT.info()                  # {"chars": int, "lines": int}
-sample  = CONTEXT.read(0, 2000) # char slice
-window  = CONTEXT.lines(0, 50)  # line slice
+sample  = CONTEXT.read(0, 2000) # char slice as str
+window  = CONTEXT.lines(0, 50)  # line slice as list[str]
 hits    = CONTEXT.grep(r"TODO") # lineno:line rows
 full    = CONTEXT.read()        # full payload
 ```

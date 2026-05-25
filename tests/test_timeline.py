@@ -31,7 +31,7 @@ class _OneChild(LLMClient):
     ROOT = (
         "```repl\n"
         "h = rlm_delegate(name='child', query='do thing', context='')\n"
-        "results = yield rlm_wait(h)\n"
+        "results = await rlm_wait(h)\n"
         "done('root:' + results[0])\n"
         "```"
     )
@@ -58,7 +58,7 @@ class _ParallelChildren(LLMClient):
         "ha = rlm_delegate(name='a', query='task a', context='')\n"
         "hb = rlm_delegate(name='b', query='task b', context='')\n"
         "hc = rlm_delegate(name='c', query='task c', context='')\n"
-        "results = yield rlm_wait(ha, hb, hc)\n"
+        "results = await rlm_wait(ha, hb, hc)\n"
         "done(' '.join(results))\n"
         "```"
     )
@@ -73,7 +73,7 @@ class _ParallelChildren(LLMClient):
             (
                 m.get("content") or ""
                 for m in messages
-                if (m.get("content") or "").startswith("Query: ")
+                if "original query:" in (m.get("content") or "")
             ),
             "",
         )

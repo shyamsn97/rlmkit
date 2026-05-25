@@ -127,7 +127,7 @@ def _render_viz(
 
     element_mult = args.element_mult
     if element_mult is None:
-        element_mult = 2.0 if fmt == "html" else 3.0
+        element_mult = 1.0
 
     if fmt == "html":
         if not args.out:

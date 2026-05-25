@@ -1,8 +1,0 @@
-{
-  "agent_id": "root.file:index.html",
-  "latest_node_id": "n_e57037030d73",
-  "seq": 4,
-  "type": "done_output",
-  "terminal": true,
-  "result": "index.html"
-}
