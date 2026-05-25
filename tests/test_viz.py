@@ -190,6 +190,32 @@ def test_plot_moderate_runs_keep_all_agent_labels():
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
+def test_plot_repeated_fanouts_do_not_reuse_node_positions():
+    fig = _build_graph_figure(_multi_batch_fanout_graph(child_chain_len=5))
+    node_trace = next(trace for trace in fig.data if getattr(trace, "customdata", None))
+    positions = [
+        (round(float(x), 6), round(float(y), 6))
+        for x, y in zip(node_trace.x, node_trace.y)
+    ]
+
+    assert len(positions) == len(set(positions))
+
+
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
+def test_plot_repeated_fanouts_keep_same_row_columns_apart():
+    fig = _build_graph_figure(_multi_batch_fanout_graph(child_chain_len=5))
+    node_trace = next(trace for trace in fig.data if getattr(trace, "customdata", None))
+    rows: dict[float, list[float]] = {}
+    for x, y in zip(node_trace.x, node_trace.y):
+        rows.setdefault(round(float(y), 6), []).append(float(x))
+
+    for xs in rows.values():
+        xs.sort()
+        for left, right in zip(xs, xs[1:]):
+            assert right - left >= 0.7
+
+
+@pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
 def test_plot_dense_runs_cap_scaled_marker_and_label_size():
     fig = _multi_batch_fanout_graph(batch_size=45).plot(
         marker_mult=10.0,

@@ -77,6 +77,7 @@ _DENSE_MIN_MARKER_SIZE = 12
 _DENSE_MAX_MARKER_SIZE = 18
 _DENSE_MAX_MARKER_LINE_WIDTH = 1.2
 _DENSE_MAX_AGENT_LABEL_SIZE = 8
+_MIN_COLUMN_GAP = 0.75
 
 
 def is_bookkeeping(state: Node, successor: Node | None) -> bool:
@@ -584,11 +585,19 @@ def _build_graph_figure(
             right_spawns = spawns[half:]
             span = right - left
             unit = span / max(n_spawn + 1, 2)
+            # Repeated fanouts from the same parent spine can otherwise reuse
+            # the same horizontal slots while earlier child chains are still
+            # descending, causing exact node-on-node collisions. A small
+            # depth-based phase keeps later batches visually distinct without
+            # expanding the graph's vertical range.
+            fanout_phase = 0.0
+            if depth > 2:
+                fanout_phase = ((by_id[eid].seq % 5) + 1) * unit * 0.13
             for i, cid in enumerate(reversed(left_spawns)):
-                cx = center_x - unit * (i + 1)
+                cx = center_x - unit * (i + 1) + fanout_phase
                 place(cid, cx - unit / 2, cx + unit / 2, depth + 1, seen)
             for i, cid in enumerate(right_spawns):
-                cx = center_x + unit * (i + 1)
+                cx = center_x + unit * (i + 1) + fanout_phase
                 place(cid, cx - unit / 2, cx + unit / 2, depth + 1, seen)
             # Keep the parent trajectory's future layout budget intact. A
             # recursive run may fan out repeatedly from the same parent; if the
@@ -616,6 +625,43 @@ def _build_graph_figure(
         if eid not in pos:
             cursor_left += 1.0
             pos[eid] = (cursor_left, 0.0)
+
+    def shift_agent_subtree(agent_id: str, dx: float) -> None:
+        """Shift an agent column and any descendant columns together."""
+
+        prefix = f"{agent_id}."
+        for nid, node in by_id.items():
+            if nid not in pos:
+                continue
+            if node.agent_id != agent_id and not node.agent_id.startswith(prefix):
+                continue
+            x, y = pos[nid]
+            pos[nid] = (x + dx, y)
+
+    # Repeated parent fanouts can put a later child column nearly on top of an
+    # earlier still-descending child column. Preserve the tree layout, but run a
+    # small same-row spacing pass so same-level markers do not visually collide.
+    for _ in range(6):
+        moved = False
+        rows: dict[float, list[str]] = {}
+        for nid, (_x, y) in pos.items():
+            rows.setdefault(round(y, 6), []).append(nid)
+        for row_ids in rows.values():
+            row_ids.sort(key=lambda nid: pos[nid][0])
+            for left_id, right_id in zip(row_ids, row_ids[1:]):
+                left_x = pos[left_id][0]
+                right_x = pos[right_id][0]
+                gap = right_x - left_x
+                if gap >= _MIN_COLUMN_GAP:
+                    continue
+                left_agent = by_id[left_id].agent_id
+                right_agent = by_id[right_id].agent_id
+                if left_agent == right_agent:
+                    continue
+                shift_agent_subtree(right_agent, _MIN_COLUMN_GAP - gap)
+                moved = True
+        if not moved:
+            break
 
     chain_edge_x: list[float | None] = []
     chain_edge_y: list[float | None] = []
