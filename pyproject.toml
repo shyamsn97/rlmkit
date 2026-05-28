@@ -53,7 +53,7 @@ all = [
     "plotly>=5.0",
     "kaleido>=0.2.1",
 ]
-dev = ["pytest>=7.0", "pytest-cov>=5.0", "ruff>=0.4"]
+dev = ["pytest>=7.0", "pytest-cov>=5.0", "pytest-timeout>=2.0", "ruff>=0.4"]
 
 [project.urls]
 Homepage = "https://github.com/shyamsn97/rlmflow"
@@ -68,12 +68,12 @@ packages = ["rlmflow"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers --timeout=30 -m 'not slow'"
+addopts = "-q --strict-markers"
+# ``pytest-timeout`` is listed in the ``dev`` optional dependencies. If a test
+# ever hangs (REPL stdio deadlock, runaway proxy loop), this caps the damage
+# instead of the whole CI job stalling for hours.
 timeout = 30
 timeout_method = "thread"
-markers = [
-    "slow: end-to-end tests that shell out to real subprocesses (10s+ each). Run with `pytest -m slow`.",
-]
 
 [tool.coverage.run]
 source = ["rlmflow"]
