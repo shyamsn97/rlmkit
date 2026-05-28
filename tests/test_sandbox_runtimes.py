@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
 import queue
+import re
 import subprocess
 import sys
+import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from rlmflow.graph import ChildHandle, ExecAction, Graph, WaitRequest
 from rlmflow.llm import LLMClient
@@ -16,7 +22,161 @@ from rlmflow.utils import OrphanedDelegatesError
 from rlmflow.workspace import ContextVariable, SessionVariable, Workspace
 
 
+import contextlib
+import io
+import shlex as _shlex
+
+
+# --- in-process REPL watcher for fake sandbox tests --------------------------
+#
+# The real ``RemoteFileRuntime._ensure_started`` shells out to a long-running
+# ``tail -n +1 -f <in.jsonl> | python -u -c '<REPL entrypoint>'`` pipeline.
+# In a real provider this is fine — the sandbox boots once and stays warm —
+# but the fake-sandbox tests pay ~1.5–2s of Python cold start plus
+# ``rlmflow`` import cost on every test (function-scoped runtime).
+#
+# Instead, when the fake sees the REPL-launch shell command, it spins up the
+# same ``rlmflow.runtime.repl.REPL`` object in a daemon thread that watches
+# the input file. Each test still gets its own fresh REPL instance (state
+# isolation), but we skip subprocess startup entirely.
+_REPL_DETECT = "from rlmflow.runtime.repl import main"
+_REMOTE_DIR_RE = re.compile(r"mkdir -p (/[^\s]*rlmflow-[a-f0-9]+)\s+(\S+)")
+_KILL_PID_RE = re.compile(r"kill \$\(cat ([^)]+)/pid\)")
+
+_inproc_sessions: dict[str, "_InProcessReplSession"] = {}
+
+
+class _InProcessReplSession:
+    """Hold a ``rlmflow.runtime.repl.REPL`` instance and process queued input
+    synchronously when ``process_pending()`` is called.
+
+    Synchronous (no background thread) so the fake's stdout-redirecting
+    ``python -c`` fast-path can't race with the REPL's stdout capture.
+    """
+
+    def __init__(self, remote_dir: str, workdir: str | None = None) -> None:
+        from rlmflow.runtime.repl import REPL
+
+        self.remote_dir = Path(remote_dir)
+        self.workdir = Path(workdir) if workdir else None
+        self.input_path = self.remote_dir / "in.jsonl"
+        self.output_path = self.remote_dir / "out.jsonl"
+        self.stderr_path = self.remote_dir / "stderr.log"
+        self.remote_dir.mkdir(parents=True, exist_ok=True)
+        if self.workdir is not None:
+            self.workdir.mkdir(parents=True, exist_ok=True)
+        for p in (self.input_path, self.output_path, self.stderr_path):
+            p.write_text("")
+        (self.remote_dir / "pid").write_text("0")
+        self.repl = REPL()
+        self.offset = 0
+
+    def process_pending(self) -> None:
+        if not self.input_path.exists():
+            return
+        text = self.input_path.read_text()
+        import os
+
+        prev_cwd = os.getcwd() if self.workdir is not None else None
+        try:
+            if self.workdir is not None:
+                os.chdir(self.workdir)
+            while True:
+                nl = text.find("\n", self.offset)
+                if nl < 0:
+                    return
+                line = text[self.offset : nl]
+                self.offset = nl + 1
+                try:
+                    msg = json.loads(line)
+                    resp = self.repl.handle(msg)
+                except Exception as exc:  # noqa: BLE001 — mirror REPL error semantics
+                    resp = {"error": f"{type(exc).__name__}: {exc}"}
+                with self.output_path.open("a") as f:
+                    f.write(json.dumps(resp) + "\n")
+        finally:
+            if prev_cwd is not None:
+                os.chdir(prev_cwd)
+
+
+def _drain_all_sessions() -> None:
+    for session in _inproc_sessions.values():
+        session.process_pending()
+
+
+def _maybe_handle_repl_lifecycle(command: str) -> tuple[int, str, str] | None:
+    """Intercept REPL launch and kill shell commands; return ``(0, '', '')``
+    after wiring up an in-process REPL session, or ``None`` if unrelated."""
+
+    if _REPL_DETECT in command:
+        m = _REMOTE_DIR_RE.search(command)
+        if m is None:
+            return None
+        remote_dir = m.group(1)
+        remote_workdir = m.group(2)
+        if remote_dir not in _inproc_sessions:
+            _inproc_sessions[remote_dir] = _InProcessReplSession(
+                remote_dir, workdir=remote_workdir
+            )
+        return 0, "", ""
+    m = _KILL_PID_RE.search(command)
+    if m is not None:
+        _inproc_sessions.pop(m.group(1), None)
+        return 0, "", ""
+    return None
+
+
+def _maybe_eval_python_dash_c(command: str) -> tuple[int, str, str] | None:
+    """If ``command`` is a ``python -c '<script>'`` invocation, run it in-process.
+
+    The remote runtime's REPL transport sends every send/recv as
+    ``python -c "<small inline script>"`` (see ``RemoteFileRuntime.send/recv``).
+    Forking a real Python for each of those costs ~300-500ms on macOS, which
+    inflates these fake-backed tests by 10x+ without testing anything different
+    than running them in-process.
+
+    Returns ``(returncode, stdout, stderr)`` if we handled the command, else
+    ``None`` so the caller falls back to ``subprocess.run``.
+    """
+
+    try:
+        parts = _shlex.split(command)
+    except ValueError:
+        return None
+    if len(parts) < 3 or parts[0] not in ("python", "python3"):
+        return None
+    if "-c" not in parts:
+        return None
+    c_idx = parts.index("-c")
+    if c_idx + 1 >= len(parts):
+        return None
+    script = parts[c_idx + 1]
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        try:
+            exec(compile(script, "<fake-sandbox>", "exec"), {"__name__": "__main__"})
+        except SystemExit as exc:
+            code = int(exc.code) if isinstance(exc.code, int) else 0 if exc.code is None else 1
+            if exc.code and not isinstance(exc.code, int):
+                stderr.write(str(exc.code))
+            return code, stdout.getvalue(), stderr.getvalue()
+        except BaseException as exc:  # noqa: BLE001 — mirror subprocess semantics
+            import traceback
+
+            traceback.print_exc(file=stderr)
+            del exc
+            return 1, stdout.getvalue(), stderr.getvalue()
+    return 0, stdout.getvalue(), stderr.getvalue()
+
+
 def _run_local(command: str, *, timeout: float | None = None):
+    repl_lifecycle = _maybe_handle_repl_lifecycle(command)
+    if repl_lifecycle is not None:
+        return repl_lifecycle
+    fast = _maybe_eval_python_dash_c(command)
+    if fast is not None:
+        _drain_all_sessions()
+        return fast
     proc = subprocess.run(
         command,
         shell=True,

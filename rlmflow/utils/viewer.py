@@ -28,10 +28,10 @@ from rlmflow.graph import (
 from rlmflow.utils.export import _kind as _display_kind  # re-use one mapping
 from rlmflow.workspace import BaseWorkspace, Workspace
 
-try:  # pragma: no cover - optional dep
-    import gradio  # noqa: F401  (re-exported for type-hint resolution)
-except ImportError:  # pragma: no cover - optional dep
-    gradio = None  # type: ignore[assignment]
+# ``gradio`` is intentionally NOT imported at module load. It's a heavy
+# dependency (~3s import on CPython) that's only needed by ``open_viewer``,
+# and pulling it into every ``import rlmflow`` made each spawned REPL
+# subprocess pay that cost. The viewer entrypoint imports it lazily.
 
 
 # An ActionNode is "bookkeeping" when its successor in the same

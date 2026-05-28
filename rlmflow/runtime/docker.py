@@ -3,8 +3,7 @@
 Each :class:`DockerRuntime` instance spawns one ``docker run -i --rm ...``
 subprocess; the container must have ``rlmflow`` installed so it can run
 ``python -m rlmflow.runtime.repl``.  All REPL I/O happens over stdin/stdout
-of the container, so this is just :class:`SubprocessRuntime` with an
-ergonomic argv builder on top.
+of the container.
 
 Example::
 
@@ -37,15 +36,20 @@ If you need to run the server under a different interpreter or path, set
 
 from __future__ import annotations
 
+import json
+import subprocess as sp
 from pathlib import Path
 
-from rlmflow.runtime.runtime import workspace_path
-from rlmflow.runtime.subprocess import SubprocessRuntime
+from rlmflow.runtime.runtime import Runtime, workspace_path
 from rlmflow.workspace import BaseWorkspace
 
 
-class DockerRuntime(SubprocessRuntime):
+class DockerRuntime(Runtime):
     """Run the REPL server inside an isolated Docker container.
+
+    Talks to a long-running ``docker run -i --rm <image> python -m
+    rlmflow.runtime.repl`` subprocess over its stdin/stdout pipes using
+    the JSON-line protocol from :mod:`rlmflow.runtime.repl`.
 
     Parameters
     ----------
@@ -97,6 +101,7 @@ class DockerRuntime(SubprocessRuntime):
         docker_bin: str = "docker",
         entrypoint_argv: list[str] | None = None,
     ) -> None:
+        super().__init__(workspace=workspace)
         runtime_workspace = workspace_path(workspace)
         is_workspace = isinstance(workspace, BaseWorkspace)
         if mounts is None and is_workspace:
@@ -117,13 +122,95 @@ class DockerRuntime(SubprocessRuntime):
             docker_bin=docker_bin,
             entrypoint_argv=entrypoint_argv,
         )
-        super().__init__(build_argv(image, **self.options), workspace=workspace)
+        # Remember the caller-supplied workspace form so ``clone()`` can replay
+        # it. The base ``Runtime`` always wraps non-``BaseWorkspace`` inputs
+        # into a ``Workspace`` object, which would otherwise cause clones to
+        # re-trigger the auto-mount / auto-workdir branches above and diverge
+        # from the original argv.
+        self._workspace_arg = workspace
+        self.argv = build_argv(image, **self.options)
+        self.proc: sp.Popen | None = None
+
+    # ── REPL stdio transport ───────────────────────────────────────────
+
+    def send(self, msg: dict) -> None:
+        if self.proc is None:
+            self.proc = sp.Popen(
+                self.argv,
+                stdin=sp.PIPE,
+                stdout=sp.PIPE,
+                stderr=sp.PIPE,
+                cwd=self.workspace,
+                bufsize=0,
+            )
+        assert self.proc.stdin is not None
+        self.proc.stdin.write((json.dumps(msg) + "\n").encode())
+        self.proc.stdin.flush()
+
+    def recv(self) -> dict:
+        assert self.proc is not None and self.proc.stdout is not None
+        line = self.proc.stdout.readline()
+        if not line:
+            err = b""
+            if self.proc.stderr is not None:
+                try:
+                    err = self.proc.stderr.read() or b""
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"REPL subprocess {self.argv!r} exited unexpectedly. "
+                f"stderr: {err.decode(errors='replace')}"
+            )
+        return json.loads(line)
+
+    def close(self) -> None:
+        """Tear down the container subprocess and release its pipe FDs.
+
+        Closes ``stdin`` first — the ``serve()`` loop in ``rlmflow.runtime.repl``
+        reads until EOF, so that's enough for a graceful shutdown in the
+        common case (the REPL exits, the container's ``--rm`` flag wipes
+        it). We only escalate to ``terminate()``/``kill()`` if the child
+        is still alive after a short wait, then close the remaining
+        pipes and reap the process so its FDs aren't left behind for
+        the GC to clean up at some unspecified later time.
+        """
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+
+        try:
+            if proc.stdin is not None and not proc.stdin.closed:
+                proc.stdin.close()
+        except Exception:
+            pass
+
+        try:
+            proc.wait(timeout=2)
+        except sp.TimeoutExpired:
+            for action in (proc.terminate, proc.kill):
+                try:
+                    action()
+                    proc.wait(timeout=2)
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                if stream is not None and not stream.closed:
+                    stream.close()
+            except Exception:
+                pass
 
     def clone(
         self, workspace: BaseWorkspace | str | Path | None = None
     ) -> DockerRuntime:
         new = self.__class__(
-            self.image, workspace=workspace or self.workspace_obj, **self.options
+            self.image,
+            workspace=workspace if workspace is not None else self._workspace_arg,
+            **self.options,
         )
         for name, td in self.tools.items():
             if td.core:

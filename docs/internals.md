@@ -41,8 +41,8 @@ User-facing topic guides ([control](control.md), [observability](observability.m
 - **`Graph`** is the immutable data model. Every `start`/`step` returns
   a fresh snapshot reloaded from the session.
 - **`Runtime`** runs the REPL. Send/receive a small JSON protocol;
-  shipped variants are `LocalRuntime`, `SubprocessRuntime`,
-  `DockerRuntime`, `ModalRuntime`.
+  shipped variants are `LocalRuntime`, `DockerRuntime`, and the
+  sandbox runtimes (`ModalRuntime`, `E2BRuntime`, `DaytonaRuntime`).
 
 The principle: **if something needs engine state to do its job, it's
 a method on `RLMFlow`. If it's a pure function of its arguments, it's

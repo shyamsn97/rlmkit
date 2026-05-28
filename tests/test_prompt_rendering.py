@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from rlmflow.prompts.builder import PromptBuilder
 from rlmflow.prompts.default import DEFAULT_BUILDER
-from rlmflow.prompts.messages import build_user_prompt
 
 
 def test_default_builder_has_expected_section_shape():

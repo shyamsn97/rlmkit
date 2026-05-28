@@ -69,16 +69,16 @@ class _ParallelChildren(LLMClient):
 
     def chat(self, messages, *args, **kwargs):
         self.last_usage = LLMUsage(input_tokens=1, output_tokens=1)
-        text = next(
+        first_user = next(
             (
                 m.get("content") or ""
                 for m in messages
-                if "original query:" in (m.get("content") or "")
+                if m.get("role") == "user"
             ),
             "",
         )
         for tag in ("task a", "task b", "task c"):
-            if tag in text:
+            if tag in first_user:
                 self.turns[tag] = self.turns.get(tag, 0) + 1
                 if self.turns[tag] == 1:
                     return self.CHILD_PRINT

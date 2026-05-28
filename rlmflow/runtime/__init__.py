@@ -11,7 +11,6 @@ _EXPORTS = {
     "ModalRuntime": "rlmflow.runtime.sandbox.modal",
     "RemoteFileRuntime": "rlmflow.runtime.sandbox.remote",
     "Runtime": "rlmflow.runtime.runtime",
-    "SubprocessRuntime": "rlmflow.runtime.subprocess",
     "ToolDef": "rlmflow.runtime.runtime",
 }
 
@@ -23,7 +22,6 @@ __all__ = [
     "ModalRuntime",
     "RemoteFileRuntime",
     "Runtime",
-    "SubprocessRuntime",
     "ToolDef",
 ]
 

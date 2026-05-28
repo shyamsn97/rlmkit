@@ -38,8 +38,10 @@ class E2BRuntime(RemoteFileRuntime):
         self.template = template
         self.timeout = timeout
         self.envs = envs
-        self.setup_commands = list(
-            setup_commands or ["python -m pip install -q rlmflow"]
+        self.setup_commands = (
+            list(setup_commands)
+            if setup_commands is not None
+            else ["python -m pip install -q rlmflow"]
         )
         self.sandbox_kwargs = dict(sandbox_kwargs or {})
         self.sandbox = None

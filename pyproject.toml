@@ -68,7 +68,12 @@ packages = ["rlmflow"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers --timeout=30 -m 'not slow'"
+timeout = 30
+timeout_method = "thread"
+markers = [
+    "slow: end-to-end tests that shell out to real subprocesses (10s+ each). Run with `pytest -m slow`.",
+]
 
 [tool.coverage.run]
 source = ["rlmflow"]

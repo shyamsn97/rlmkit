@@ -354,6 +354,15 @@ class REPL:
             for method in msg["methods"]:
                 setattr(obj, method, self.make_proxy(f"{name}.{method}"))
             self.namespace[name] = obj
+        elif cmd == "reset":
+            # Wipe all agent-visible state so the host can reuse this REPL
+            # process across independent tasks/tests without paying another
+            # interpreter cold start. ``__builtins__`` is preserved.
+            self.namespace = {"__builtins__": __builtins__}
+            self.coro = None
+            self.buf = None
+            self.errored = False
+            self._src_counter = 0
         else:
             return {"error": f"unknown command: {cmd}"}
         return {"ok": True}

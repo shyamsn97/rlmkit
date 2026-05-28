@@ -101,8 +101,8 @@ class Runtime(ABC):
     — the proxy loop, code execution, delegation, tool registration,
     cloning — is handled by this base class.
 
-    See :class:`SubprocessRuntime` for the canonical remote example and
-    :class:`LocalRuntime` for the in-process one.
+    See :class:`DockerRuntime` for the canonical out-of-process example
+    and :class:`LocalRuntime` for the in-process one.
     """
 
     def __init__(self, workspace: BaseWorkspace | str | Path = ".") -> None:
@@ -355,6 +355,21 @@ class Runtime(ABC):
             return self.clone(workspace=new_workspace)
 
         return self.clone(workspace=self.workspace_obj.fork(new_workspace))
+
+    def reset(self) -> None:
+        """Wipe REPL namespace + host-side tool/proxy registries.
+
+        Lets a long-lived runtime (test fixture, pooled worker) be
+        re-used across independent tasks without paying another
+        interpreter cold start. The REPL process itself is preserved —
+        only the agent-visible state is cleared.
+        """
+        self.call({"cmd": "reset"})
+        self.tools.clear()
+        self._installed_tools.clear()
+        self.proxied.clear()
+        self.env.clear()
+        self.suspended = False
 
     def close(self) -> None:
         """Release any external resources held by this runtime.

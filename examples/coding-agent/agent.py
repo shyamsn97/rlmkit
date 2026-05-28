@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from rlmflow.llm import AnthropicClient, OpenAIClient
 from rlmflow.rlm import RLMConfig, RLMFlow

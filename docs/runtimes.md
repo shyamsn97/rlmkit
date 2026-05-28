@@ -29,25 +29,14 @@ Responses: `output`, `suspended`, `proxy`, `value`, `error`.
 | Runtime | What it does |
 |---|---|
 | `LocalRuntime` | In-process. `send`/`recv` dispatch straight to an in-process `REPL`. |
-| `SubprocessRuntime(argv)` | Spawn any `argv` that runs `python -m rlmflow.runtime.repl` and talk to it over stdio. |
-| `DockerRuntime(image, ...)` | `SubprocessRuntime` with an ergonomic `docker run` argv builder. |
+| `DockerRuntime(image, ...)` | Run `python -m rlmflow.runtime.repl` inside a fresh `docker run -i --rm` container; talk to it over stdio. |
 | `sandbox.ModalRuntime` | Run the REPL inside a Modal container. |
 | `sandbox.E2BRuntime` | Run the REPL inside an E2B Sandbox. |
 | `sandbox.DaytonaRuntime` | Run the REPL inside a Daytona Sandbox. |
 
-## Subprocess examples
-
-```python
-SubprocessRuntime(["python", "-m", "rlmflow.runtime.repl"])
-
-SubprocessRuntime(["docker", "exec", "-i", "ctr",
-                   "python", "-m", "rlmflow.runtime.repl"])
-
-SubprocessRuntime(["ssh", "box", "python", "-m", "rlmflow.runtime.repl"])
-
-SubprocessRuntime(["kubectl", "exec", "-i", "pod", "--",
-                   "python", "-m", "rlmflow.runtime.repl"])
-```
+Need a non-Docker stdio transport (`ssh`, `kubectl exec`, a pre-existing
+container)? Subclass `Runtime` and provide `send`/`recv` over your own
+pipes — `DockerRuntime` is the reference implementation.
 
 ## Docker
 

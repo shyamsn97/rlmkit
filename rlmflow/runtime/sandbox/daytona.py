@@ -37,8 +37,10 @@ class DaytonaRuntime(RemoteFileRuntime):
         self.create_params = create_params
         self.create_timeout = create_timeout
         self.env = env
-        self.setup_commands = list(
-            setup_commands or ["python -m pip install -q rlmflow"]
+        self.setup_commands = (
+            list(setup_commands)
+            if setup_commands is not None
+            else ["python -m pip install -q rlmflow"]
         )
         self.daytona = daytona
         self.sandbox = None
