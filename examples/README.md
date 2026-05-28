@@ -46,6 +46,21 @@ rlmflow render path/to/workspace -f html -o viewer.html
 
 The workspace is the saved run.
 
+## Modal, E2B, and Daytona
+
+Remote sandbox examples live under [`examples/sandbox/`](sandbox/). They
+start a small chat agent, so set `OPENAI_API_KEY` plus the provider's
+sandbox credentials. Omit `--message` for an interactive loop:
+
+```bash
+python examples/sandbox/modal_agent.py --message "What Python version is in the sandbox?"
+python examples/sandbox/e2b_agent.py --message "What Python version is in the sandbox?"
+python examples/sandbox/daytona_agent.py --message "What Python version is in the sandbox?"
+```
+
+Install the matching extra first: `rlmflow[modal]`, `rlmflow[e2b]`,
+`rlmflow[daytona]`, or `rlmflow[sandbox]` for all three.
+
 For fully locked-down runs, `DockerRuntime` takes the usual Docker knobs
 directly when built by hand:
 

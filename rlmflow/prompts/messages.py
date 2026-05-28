@@ -59,16 +59,26 @@ def build_context_metadata(
     return "\n\n".join(lines)
 
 
-CONTINUE_ACTION = "Continue. Your next action:"
+CONTINUE_ACTION = "Continue your next action:"
 
-FIRST_TURN_DECOMPOSITION_NUDGE = (
-    "If the task decomposes into independent units, your first action should "
-    "usually spawn the child batch with `rlm_delegate(...)` or issue a "
-    "`llm_query_batched(...)` fanout rather than solving every unit yourself. "
-    "When using `rlm_delegate`, put the shared requirements/data in "
-    "`context=...` so the child can inspect them through `CONTEXT.read()`; "
-    'avoid `context=""` for nontrivial delegated work.'
-)
+FIRST_TURN_INSPECTION_NUDGE = """\
+Your first REPL block should usually inspect the environment/task `CONTEXT` and/or `SESSION` variables, then stop so you can use that output in the next turn.
+```
+"""
+
+FIRST_TURN_DECOMPOSITION_NUDGE = """\
+After the initial inspection output, if the task decomposes into independent
+units, spawn the child batch with `rlm_delegate(...)` or issue a
+`llm_query_batched(...)` fanout rather than solving every unit yourself.
+
+For multi-file or multi-component browser/app tasks, this usually means delegate
+one child per file/component, wait for the batch with `await rlm_wait(*handles)`,
+then integrate, write files, and verify in the parent.
+
+When using `rlm_delegate`, put the task requirements/data in `context=...` so the
+child can inspect them through `CONTEXT.read()`. This could mean shared
+contracts, file specs, task-specific info for a particular child, etc.
+"""
 
 
 def build_user_prompt(
@@ -93,6 +103,7 @@ def build_user_prompt(
         if metadata:
             parts.append(metadata)
         parts.append(body)
+        parts.append(FIRST_TURN_INSPECTION_NUDGE)
         parts.append(FIRST_TURN_DECOMPOSITION_NUDGE)
         prompt = "\n\n".join(parts)
     else:

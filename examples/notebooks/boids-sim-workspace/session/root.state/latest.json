@@ -1,8 +1,0 @@
-{
-  "agent_id": "root.state",
-  "latest_node_id": "n_e8901bd201d6",
-  "seq": 8,
-  "type": "done_output",
-  "terminal": true,
-  "result": "PATH: scripts/state.js\n(function (global) {\n  // Single global namespace\n  var App = (global.BoidsApp = global.BoidsApp || {});\n\n  // Simulation parameters\n  App.params = {\n    numBoids: 320,        // 250-400\n    maxSpeed: 3.2,        // 2-4 px/frame\n    maxForce: 0.06,       // 0.03-0.08\n    perception: 50,       // 35-60\n    separationDist: 18    // 12-24\n  };\n\n  // Global state\n  App.state = {\n    boids: [],\n    canvas: null,\n    ctx: null,\n    dpr: 1,\n    width: 0,\n    height: 0,\n    lastTime: 0\n  };\n\n  // Utilities\n  function rand(min, max) {\n    return Math.random() * (max - min) + min;\n  }\n\n  function clamp(v, min, max) {\n    return v < min ? min : (v > max ? max : v);\n  }\n\n  function limitMag(vx, vy, max) {\n    var mag = Math.hypot(vx, vy);\n    if (mag > max && mag > 0) {\n      var s = max / mag;\n      return [vx * s, vy * s];\n    }\n    return [vx, vy];\n  }\n\n  App.util = {\n    rand: rand,\n    clamp: clamp,\n    limitMag: limitMag\n  };\n})(window);"
-}

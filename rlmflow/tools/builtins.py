@@ -90,6 +90,31 @@ def make_llm_query_batched(query_batch: Callable[..., list[str]]):
     return llm_query_batched
 
 
+@tool(
+    "Run multiple independent one-shot LLM prompts concurrently. "
+    "Returns strings in the same order as the prompts."
+)
+def llm_query_batched(
+    prompts: list[str],
+    *,
+    model: str = "gpt-4o-mini",
+) -> list[str]:
+    """Sandbox-local default for remote runtimes.
+
+    The host engine may still register a closure-backed version for local runs.
+    Remote runtimes import this function directly so calls happen in the sandbox.
+    """
+
+    if isinstance(prompts, str) or not isinstance(prompts, list):
+        raise TypeError("llm_query_batched() requires a list[str] of prompts")
+    if not prompts:
+        return []
+    from rlmflow.llm import OpenAIClient
+
+    client = OpenAIClient(model=model)
+    return [client.chat([{"role": "user", "content": prompt}]) for prompt in prompts]
+
+
 @tool("Show current public REPL variable names and their type names.")
 def SHOW_VARS() -> dict[str, str]:
     """Installed specially by Runtime so it can inspect the live REPL namespace."""
@@ -161,6 +186,7 @@ def make_delegate(
 __all__ = [
     "DoneSignal",
     "SHOW_VARS",
+    "llm_query_batched",
     "make_delegate",
     "make_done",
     "make_llm_query_batched",

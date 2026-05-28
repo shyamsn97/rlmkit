@@ -38,10 +38,10 @@ If you need to run the server under a different interpreter or path, set
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from rlmflow.runtime.runtime import workspace_path
 from rlmflow.runtime.subprocess import SubprocessRuntime
+from rlmflow.workspace import BaseWorkspace
 
 
 class DockerRuntime(SubprocessRuntime):
@@ -85,7 +85,7 @@ class DockerRuntime(SubprocessRuntime):
         self,
         image: str,
         *,
-        workspace: str | Path | Any = ".",
+        workspace: BaseWorkspace | str | Path = ".",
         mounts: dict[str, str] | None = None,
         env: dict[str, str] | None = None,
         network: str | None = None,
@@ -98,9 +98,7 @@ class DockerRuntime(SubprocessRuntime):
         entrypoint_argv: list[str] | None = None,
     ) -> None:
         runtime_workspace = workspace_path(workspace)
-        is_workspace = not isinstance(workspace, str | Path) and hasattr(
-            workspace, "root"
-        )
+        is_workspace = isinstance(workspace, BaseWorkspace)
         if mounts is None and is_workspace:
             mounts = {str(runtime_workspace): "/workspace"}
         if workdir is None and is_workspace:
@@ -119,15 +117,20 @@ class DockerRuntime(SubprocessRuntime):
             docker_bin=docker_bin,
             entrypoint_argv=entrypoint_argv,
         )
-        super().__init__(build_argv(image, **self.options), workspace=runtime_workspace)
+        super().__init__(build_argv(image, **self.options), workspace=workspace)
 
-    def clone(self, workspace: str | Path | None = None) -> DockerRuntime:
+    def clone(
+        self, workspace: BaseWorkspace | str | Path | None = None
+    ) -> DockerRuntime:
         new = self.__class__(
-            self.image, workspace=workspace or self.workspace, **self.options
+            self.image, workspace=workspace or self.workspace_obj, **self.options
         )
         for name, td in self.tools.items():
+            if td.core:
+                continue
             new.tools[name] = td
-            new.inject(name, td.fn)
+            if td.fn is not None:
+                new.inject(name, td.fn)
         return new
 
 

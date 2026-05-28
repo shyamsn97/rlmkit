@@ -11,6 +11,8 @@ isolated runtime:
 
 - `DockerRuntime` — a fresh container per session.
 - `ModalRuntime` — a remote Modal container.
+- `E2BRuntime` — a remote E2B sandbox.
+- `DaytonaRuntime` — a remote Daytona sandbox.
 - Custom `Runtime` — SSH, `kubectl exec`, Firecracker, gVisor, anything.
 
 ## Docker isolation knobs

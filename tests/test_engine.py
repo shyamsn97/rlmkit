@@ -17,6 +17,7 @@ Covers:
 
 from __future__ import annotations
 
+from rlmflow.engine import scheduling
 from rlmflow import (
     Graph,
     LLMClient,
@@ -111,6 +112,174 @@ def test_step_drives_one_shot_to_result():
     assert is_done(graph.current())
     assert graph.result() == "ok"
     assert _types(graph) == ["user_query", "llm_action", "llm_output", "exec_action", "done_output"]
+
+
+def test_runtime_exception_after_exec_action_records_error():
+    class _FailingRuntime(LocalRuntime):
+        def start_code(self, code: str):
+            del code
+            raise RuntimeError("transport lost")
+
+    agent = RLMFlow(
+        _StaticLLM("```repl\nprint('hello')\n```"),
+        runtime=_FailingRuntime(),
+        config=RLMConfig(max_iterations=3),
+    )
+    graph = agent.start("run")
+    graph = agent.step(graph)
+    graph = agent.step(graph)
+
+    assert is_errored(graph.current())
+    assert graph.current().error == "runtime_exception"
+    assert "transport lost" in graph.current().output
+    assert _types(graph) == [
+        "user_query",
+        "llm_action",
+        "llm_output",
+        "exec_action",
+        "error_output",
+    ]
+
+
+def test_remote_like_runtime_syncs_artifacts_before_exec_observation(tmp_path):
+    workspace = Workspace.create(tmp_path / "ws")
+
+    class _SyncRecordingRuntime(LocalRuntime):
+        def __init__(self) -> None:
+            super().__init__(workspace=workspace)
+            self.sync_points: list[str] = []
+            self.stale_count = 0
+
+        def after_execution_transition(self, runtimes=()) -> None:
+            self.sync_points.append(workspace.session.load_graph().current().type)
+            output = workspace.root / "output"
+            output.mkdir(exist_ok=True)
+            (output / "during-exec.txt").write_text("synced")
+            for runtime in runtimes:
+                runtime.on_workspace_changed()
+
+        def on_workspace_changed(self) -> None:
+            self.stale_count += 1
+
+    runtime = _SyncRecordingRuntime()
+    agent = RLMFlow(
+        _StaticLLM("```repl\nprint('ran')\n```"),
+        runtime=runtime,
+        config=RLMConfig(max_iterations=3),
+    )
+
+    graph = agent.start("run")
+    graph = agent.step(graph)
+    graph = agent.step(graph)
+
+    assert graph.current().type == "exec_output"
+    assert "exec_action" in runtime.sync_points
+    assert (workspace.root / "output" / "during-exec.txt").read_text() == "synced"
+    assert runtime.stale_count >= 1
+
+
+def test_remote_like_runtime_cross_notifies_siblings_under_async_children():
+    """With ``async_children=True`` and one runtime per agent, every
+    completed exec/resume on one runtime must fire ``on_workspace_changed``
+    on *every* sibling runtime (and never on itself).
+    """
+
+    instances: list["_RemoteLike"] = []
+
+    class _RemoteLike(LocalRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.label = f"r{len(instances)}"
+            self.transition_count = 0
+            self.notified_by: list[str] = []
+            instances.append(self)
+
+        def after_execution_transition(self, runtimes=()) -> None:
+            self.transition_count += 1
+            seen: set[int] = set()
+            for runtime in runtimes:
+                if runtime is self:
+                    continue
+                if id(runtime) in seen:
+                    continue
+                seen.add(id(runtime))
+                runtime.on_workspace_changed(_from=self.label)
+
+        def on_workspace_changed(self, _from: str = "?") -> None:
+            self.notified_by.append(_from)
+
+    class _ParallelLLM(LLMClient):
+        def chat(self, messages, *args, **kwargs):
+            text = "\n".join(m["content"] for m in messages).lower()
+            if "child-a" in text:
+                return '```repl\ndone("A")\n```'
+            if "child-b" in text:
+                return '```repl\ndone("B")\n```'
+            return (
+                "```repl\n"
+                'ha = rlm_delegate(name="a", query="child-a", context="")\n'
+                'hb = rlm_delegate(name="b", query="child-b", context="")\n'
+                "results = await rlm_wait(ha, hb)\n"
+                'done("p:" + "+".join(results))\n'
+                "```"
+            )
+
+    agent = RLMFlow(
+        _ParallelLLM(),
+        runtime=_RemoteLike(),
+        runtime_factory=_RemoteLike,
+        config=RLMConfig(
+            async_children=True,
+            max_depth=1,
+            max_iterations=5,
+            max_concurrency=2,
+        ),
+    )
+    g = _run(agent, agent.start("parent"))
+
+    assert g.result() == "p:A+B"
+    assert len(instances) == 3
+    parent_rt = instances[0]
+    child_rts = instances[1:]
+
+    assert all(rt.transition_count >= 1 for rt in child_rts)
+    parent_label = parent_rt.label
+    for rt in child_rts:
+        assert parent_label in rt.notified_by, (
+            f"{rt.label} was not notified by parent: {rt.notified_by}"
+        )
+        sibling_labels = {sib.label for sib in child_rts if sib is not rt}
+        assert sibling_labels & set(rt.notified_by), (
+            f"{rt.label} was not notified by any sibling: {rt.notified_by}"
+        )
+        assert rt.label not in rt.notified_by, (
+            f"{rt.label} notified itself: {rt.notified_by}"
+        )
+
+    assert {c.label for c in child_rts} <= set(parent_rt.notified_by)
+    assert parent_rt.label not in parent_rt.notified_by
+
+
+def test_async_refill_does_not_own_runtime_sync():
+    class _Session:
+        def load_graph(self):
+            return Graph(agent_id="root")
+
+    class _Engine:
+        config = RLMConfig(async_children=True)
+        terminate_requested = set()
+        session = _Session()
+
+    engine = _Engine()
+
+    tasks = scheduling.refill_async_children(
+        engine,
+        "root.child",
+        None,
+        active_ids=set(),
+    )
+
+    assert tasks == []
 
 
 def test_run_returns_result_string():
@@ -292,6 +461,48 @@ def test_tight_pattern_records_resume_before_result():
     sup = next(s for s in g.states if is_supervising(s))
     assert set(sup.waiting_on) == {"root.child"}
     assert g.result() == "p:c"
+
+
+def test_remote_like_runtime_syncs_artifacts_before_resume_observation(tmp_path):
+    workspace = Workspace.create(tmp_path / "ws")
+
+    class _SyncRecordingRuntime(LocalRuntime):
+        def __init__(self) -> None:
+            super().__init__(workspace=workspace)
+            self.sync_points: list[str] = []
+            self.stale_count = 0
+
+        def after_execution_transition(self, runtimes=()) -> None:
+            self.sync_points.append(workspace.session.load_graph()["root"].current().type)
+            output = workspace.root / "output"
+            output.mkdir(exist_ok=True)
+            (output / f"sync-{len(self.sync_points)}.txt").write_text(
+                self.sync_points[-1]
+            )
+            for runtime in runtimes:
+                runtime.on_workspace_changed()
+
+        def on_workspace_changed(self) -> None:
+            self.stale_count += 1
+
+    root_runtime = _SyncRecordingRuntime()
+    agent = RLMFlow(
+        _TightChildLLM(),
+        runtime=root_runtime,
+        runtime_factory=lambda: LocalRuntime(workspace=workspace),
+        config=RLMConfig(max_depth=1, max_iterations=5),
+    )
+
+    graph = _run(agent, agent.start("parent"))
+
+    assert graph.finished
+    assert "exec_action" in root_runtime.sync_points
+    assert "resume_action" in root_runtime.sync_points
+    assert any(
+        path.read_text() == "resume_action"
+        for path in (workspace.root / "output").glob("sync-*.txt")
+    )
+    assert root_runtime.stale_count >= 2
 
 
 def test_async_children_drains_waiting_subtree_and_resumes_parent_same_step():
@@ -1049,7 +1260,7 @@ def test_spawn_child_is_overridable():
     class _Scripted(LLMClient):
         def chat(self, messages, *args, **kwargs):
             prompt = messages[-1]["content"].lower()
-            if prompt.startswith("query: child task"):
+            if "child task" in prompt:
                 return '```repl\ndone("c")\n```'
             return (
                 "```repl\n"
@@ -1143,11 +1354,11 @@ def test_model_routing_is_stored_on_child_agent_meta():
     class _Scripted(LLMClient):
         def chat(self, messages, *args, **kwargs):
             prompt = messages[-1]["content"].lower()
-            if prompt.startswith("query: child"):
+            if "child-task" in prompt:
                 return '```repl\ndone("c")\n```'
             return (
                 "```repl\n"
-                'h = rlm_delegate(name="c", query="child", context="", model="fast")\n'
+                'h = rlm_delegate(name="c", query="child-task", context="", model="fast")\n'
                 "r = await rlm_wait(h)\n"
                 'done(r[0])\n'
                 "```"

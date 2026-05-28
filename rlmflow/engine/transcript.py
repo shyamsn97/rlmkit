@@ -5,7 +5,7 @@ for each agent, growing turn-by-turn as the run progresses.
 
 Kept out of :mod:`rlmflow.rlm` so the engine itself stays focused on
 the state machine. The recorder is a thin wrapper over the active
-:class:`~rlmflow.workspace.session.Session`: it reads the prior
+:class:`~rlmflow.workspace.Session`: it reads the prior
 document, diffs against the new turn's input messages, and appends
 only the delta.
 

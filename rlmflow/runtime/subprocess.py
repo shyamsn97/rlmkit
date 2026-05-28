@@ -25,15 +25,17 @@ from __future__ import annotations
 import json
 import subprocess as sp
 from pathlib import Path
-from typing import Any
 
 from rlmflow.runtime.runtime import Runtime
+from rlmflow.workspace import BaseWorkspace
 
 
 class SubprocessRuntime(Runtime):
     """Run the REPL server as a subprocess and talk to it over stdio."""
 
-    def __init__(self, argv: list[str], *, workspace: str | Path | Any = ".") -> None:
+    def __init__(
+        self, argv: list[str], *, workspace: BaseWorkspace | str | Path = "."
+    ) -> None:
         super().__init__(workspace=workspace)
         self.argv = list(argv)
         self.proc: sp.Popen | None = None
@@ -109,12 +111,14 @@ class SubprocessRuntime(Runtime):
             except Exception:
                 pass
 
-    def clone(self, workspace: str | Path | None = None) -> SubprocessRuntime:
+    def clone(
+        self, workspace: BaseWorkspace | str | Path | None = None
+    ) -> SubprocessRuntime:
         new = self.__class__(self.argv, workspace=workspace or self.workspace)
         for name, td in self.tools.items():
+            if td.core:
+                continue
             new.tools[name] = td
-            if name == "SHOW_VARS":
-                new.inject_show_vars()
-            else:
+            if td.fn is not None:
                 new.inject(name, td.fn)
         return new

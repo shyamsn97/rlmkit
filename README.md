@@ -5,16 +5,21 @@
   <a href="https://github.com/shyamsn97/rlmflow/pkgs/container/rlmflow"><img src="https://img.shields.io/badge/ghcr.io-rlmflow-2496ED?logo=docker&logoColor=white" alt="Docker" /></a>
 </p>
 
-A Python library for createing interactible, steppable graph [Recursive Language Models](https://arxiv.org/abs/2512.24601).
+A Python library for building controllable, forkable [Recursive Language Models](https://arxiv.org/abs/2512.24601).
 
-Recursive Language Models are powerful systems -- capable of handling long-context tasks by spawning sub-agents with their own fresh context windows. However. RLMs get messy fast: parents spawn children, children spawn more children, which also can run for multiple steps, etc.
+As LLMs get better at coding, strict agent harnesses become less important.
+RLMs let the model decide how to view and manipulate context, when to
+delegate pieces of it to sub-agents, and how to combine the results,
+all through the same clean coding interface.
 
-**rlmflow** turns the run into an explicit graph. Every query, action,
-observation, child call, wait, resume, and result is a typed, immutable
-state you can step, inspect, fork, and replay. Each `start` / `step`
-returns a fresh `Graph` snapshot — a recursive structure where every
-`graph[id]` (node *or* agent id) returns a `Graph` rooted at that
-vertex.
+**rlmflow** turns that recursive run into a live execution graph. Every
+query, action, observation, child call, wait, resume, and result is a
+typed state you can inspect, step, fork, replay, resume, and branch into
+new workspaces. It is for people building long-context agents, recursive
+coding agents, and research loops where the execution trace needs to be
+as controllable as the final answer is useful. Each `start` / `step`
+returns a fresh `Graph` snapshot: a recursive structure where every
+`graph[id]` (node *or* agent id) returns a `Graph` rooted at that vertex.
 
 <p align="center">
   <img src="docs/rlm_animation.gif" alt="rlmflow animation" />
@@ -104,6 +109,7 @@ pip install rlmflow               # core
 pip install rlmflow[openai]       # + OpenAI client
 pip install rlmflow[anthropic]    # + Anthropic client
 pip install rlmflow[dspy]         # + DSPy adapter
+pip install rlmflow[sandbox]      # + Modal, E2B, and Daytona runtimes
 pip install rlmflow[viewer]       # + Gradio viewer (plotly)
 pip install rlmflow[image]        # + static image / GIF export (kaleido)
 pip install rlmflow[all]          # all of the above
@@ -575,6 +581,7 @@ All examples share flags like `--no-viz`, `--docker-image rlmflow:local`,
 | [`showcase.py`](examples/showcase.py) | `Graph` snapshots, workspace persistence, session reads, time travel, gym-style stepping. |
 | [`drop_in_llm.py`](examples/drop_in_llm.py) | `RLMFlow` as an `LLMClient`. Nested agents. |
 | [`dspy_drop_in.py`](examples/dspy_drop_in.py) | Use an `RLMFlow` agent as the LM behind a DSPy program. |
+| [`sandbox/`](examples/sandbox/) | Chat agents whose Python code runs inside Modal, E2B, and Daytona sandboxes. |
 | [`coding-agent/agent.py`](examples/coding-agent/agent.py) | Interactive coding agent that writes and edits files. |
 | [`needle_haystack.py`](examples/needle_haystack.py) | Needle-in-a-haystack over a massive in-memory `CONTEXT`, using parallel child chunks. |
 | [`needle_haystack_filesystem.py`](examples/needle_haystack_filesystem.py) | Needle-in-a-haystack across many files with custom tools and `runtime_factory`. |

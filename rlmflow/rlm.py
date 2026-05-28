@@ -134,7 +134,7 @@ class RLMFlow(LLMClient):
     Holds the prompt builder, runtime sessions, pool, and persistence
     handles. The execution graph itself lives in the session — every
     step reloads it through
-    :meth:`~rlmflow.workspace.session.Session.load_graph`.
+    :meth:`~rlmflow.workspace.Session.load_graph`.
 
     Every method below is an extension seam. Subclass and override
     what you want; the default implementations call ``super()`` paths
@@ -700,7 +700,6 @@ class RLMFlow(LLMClient):
                 self.runtime_factory() if self.runtime_factory else self.runtime.clone()
             )
             self.runtime_sessions[session_id] = runtime
-            self.register_tools(runtime)
         return runtime
 
     def create_runtime_session(
@@ -733,6 +732,14 @@ class RLMFlow(LLMClient):
         }
         runtime.env.clear()
         runtime.env.update({**facts, "DONE_RESULT": None, "DELEGATED": []})
+        preserve_suspension = runtime.suspended
+        if preserve_suspension:
+            runtime.prepare_for_resume()
+            for name, value in facts.items():
+                runtime.inject(name, value)
+            return runtime
+
+        runtime.prepare_for_execution()
 
         repl_vars = {
             **facts,
@@ -761,7 +768,6 @@ class RLMFlow(LLMClient):
         (so ``DONE_RESULT`` / ``DELEGATED`` round-trip cleanly).
         """
         runtime = runtime or self.runtime
-        runtime.inject("OrphanedDelegatesError", OrphanedDelegatesError)
         runtime.register_tool(SHOW_VARS, core=True)
         runtime.register_tool(make_done(runtime.env), core=True)
         runtime.register_tool(make_wait(), core=True)
