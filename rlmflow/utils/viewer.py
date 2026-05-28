@@ -26,7 +26,7 @@ from rlmflow.graph import (
     is_user_query,
 )
 from rlmflow.utils.export import _kind as _display_kind  # re-use one mapping
-from rlmflow.workspace import Workspace
+from rlmflow.workspace import BaseWorkspace, Workspace
 
 try:  # pragma: no cover - optional dep
     import gradio  # noqa: F401  (re-exported for type-hint resolution)
@@ -93,7 +93,7 @@ def is_bookkeeping(state: Node, successor: Node | None) -> bool:
     return successor.type in paired
 
 
-ViewSource: TypeAlias = Workspace | str | Path | Graph | Iterable[Graph]
+ViewSource: TypeAlias = BaseWorkspace | str | Path | Graph | Iterable[Graph]
 
 
 def _looks_like_graph_dump(data: Any) -> bool:
@@ -183,7 +183,7 @@ def resolve_graphs(source: ViewSource) -> list[Graph]:
     ``source`` can be a workspace, workspace path, standalone graph, graph list,
     or standalone graph JSON path.
     """
-    if isinstance(source, Workspace):
+    if isinstance(source, BaseWorkspace):
         return source.load_steps()
     if isinstance(source, Graph):
         return [source]
@@ -211,7 +211,7 @@ def agent_transcript(source: ViewSource, *, include_system: bool = True) -> str:
     Pulls the system prompt + original query off the :class:`Graph`,
     then walks the per-agent state log in order. Used by both the public
     API (``graph[aid].transcript()``) and
-    :class:`~rlmflow.workspace.session.SessionVariable`.
+    :class:`~rlmflow.workspace.SessionVariable`.
     """
     graph = _resolve_latest_graph(source)
     parts: list[str] = []

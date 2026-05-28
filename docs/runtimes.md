@@ -31,7 +31,9 @@ Responses: `output`, `suspended`, `proxy`, `value`, `error`.
 | `LocalRuntime` | In-process. `send`/`recv` dispatch straight to an in-process `REPL`. |
 | `SubprocessRuntime(argv)` | Spawn any `argv` that runs `python -m rlmflow.runtime.repl` and talk to it over stdio. |
 | `DockerRuntime(image, ...)` | `SubprocessRuntime` with an ergonomic `docker run` argv builder. |
-| `ModalRuntime` | Run the REPL inside a Modal container. |
+| `sandbox.ModalRuntime` | Run the REPL inside a Modal container. |
+| `sandbox.E2BRuntime` | Run the REPL inside an E2B Sandbox. |
+| `sandbox.DaytonaRuntime` | Run the REPL inside a Daytona Sandbox. |
 
 ## Subprocess examples
 
@@ -67,6 +69,35 @@ rt = DockerRuntime(
 )
 agent = RLMFlow(llm_client=llm, runtime=rt, runtime_factory=rt.clone)
 ```
+
+## Remote sandboxes
+
+Install provider extras as needed:
+
+```bash
+pip install rlmflow[modal]
+pip install rlmflow[e2b]
+pip install rlmflow[daytona]
+pip install rlmflow[sandbox]   # all three
+```
+
+Each provider runtime lives under `rlmflow.runtime.sandbox` and keeps the
+same base `Runtime` protocol. Modal, E2B, and Daytona use
+`RemoteFileRuntime`, a public base class that keeps one remote REPL process
+alive and exchanges JSON messages through remote files. That keeps REPL
+variables and suspended `await rlm_wait(...)` state across turns even when
+the provider exposes command execution as one-shot calls.
+
+```python
+from rlmflow import RLMFlow
+from rlmflow.runtime.sandbox.e2b import E2BRuntime
+
+rt = E2BRuntime(workspace=workspace)
+agent = RLMFlow(llm_client=llm, runtime=rt, runtime_factory=rt.clone)
+```
+
+See [`examples/sandbox/`](../examples/sandbox/) for real-agent examples
+on Modal, E2B, and Daytona.
 
 ## Writing your own
 

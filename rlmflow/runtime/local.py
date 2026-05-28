@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from rlmflow.runtime.repl import REPL
 from rlmflow.runtime.runtime import DEFAULT_MODULES, Runtime
+from rlmflow.workspace import BaseWorkspace
 
 
 class LocalRuntime(Runtime):
@@ -22,7 +22,7 @@ class LocalRuntime(Runtime):
     against the caller's CWD.
     """
 
-    def __init__(self, workspace: str | Path | Any = ".") -> None:
+    def __init__(self, workspace: BaseWorkspace | str | Path = ".") -> None:
         super().__init__(workspace=workspace)
         self.repl = REPL()
         for mod in DEFAULT_MODULES:
@@ -38,13 +38,13 @@ class LocalRuntime(Runtime):
         with self._in_workspace():
             return self.repl.handle(msg)
 
-    def inject(self, name: str, value: Any) -> None:
+    def inject(self, name: str, value: object) -> None:
         # In-process: bind directly, skip the proxy protocol entirely.
         self.repl.namespace[name] = value
 
     def inject_show_vars(self) -> None:
         self.repl.namespace["SHOW_VARS"] = self.repl._show_vars
 
-    def read(self, name: str) -> Any:
+    def read(self, name: str) -> object:
         # In-process: dict lookup, skip the JSON round-trip.
         return self.repl.namespace.get(name)

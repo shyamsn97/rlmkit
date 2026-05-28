@@ -123,8 +123,22 @@ def run_exec(
         )
         return
 
-    runtime = engine.inject_env(graph, exec_action)
-    suspended, raw, errored = runtime.start_code(code)
+    try:
+        runtime = engine.inject_env(graph, exec_action)
+        suspended, raw, errored = runtime.start_code(code)
+        runtime.after_execution_transition(engine.runtime_sessions.values())
+    except Exception as exc:
+        output = f"{type(exc).__name__}: {exc}"
+        append_node(
+            engine.session,
+            graph,
+            ErrorOutput(
+                content=engine.format_exec_output(output),
+                error="runtime_exception",
+                output=output,
+            ),
+        )
+        return
     raw = truncate_output(raw, engine.config.max_output_length)
     env = runtime.env
     delegated = list(env.get("DELEGATED") or [])
@@ -220,11 +234,26 @@ def step_after_supervising(
     )
     resume_state = append_node(engine.session, graph, resume_action)
 
-    runtime = engine.inject_env(graph, resume_state)
-    if not runtime.suspended:
-        replay_to_suspension(graph, last, runtime)
+    try:
+        runtime = engine.inject_env(graph, resume_state)
+        if not runtime.suspended:
+            replay_to_suspension(graph, last, runtime)
 
-    suspended, raw, errored = runtime.resume_code(results)
+        suspended, raw, errored = runtime.resume_code(results)
+        runtime.after_execution_transition(engine.runtime_sessions.values())
+    except Exception as exc:
+        output = f"{type(exc).__name__}: {exc}"
+        append_node(
+            engine.session,
+            graph,
+            ErrorOutput(
+                content=engine.format_exec_output(output),
+                error="runtime_exception",
+                output=output,
+                resumed_from=list(last.waiting_on),
+            ),
+        )
+        return
     raw = truncate_output(raw, engine.config.max_output_length)
     env = runtime.env
     done_result = env.get("DONE_RESULT")

@@ -4,9 +4,9 @@ A guide for choosing between rlmflow and other agent frameworks.
 
 ## The one-line pitch
 
-rlmflow is a Python library for building **Recursive Language Models as inspectable execution graphs**.
+rlmflow is a Python library for building **Recursive Language Models as controllable execution graphs**.
 
-It gives an LLM a REPL and recursive delegation tools, then persists every query, action, observation, child call, wait, resume, and result as typed nodes you can step, visualize, fork, and replay.
+It gives an LLM a REPL and recursive delegation tools, then persists every query, action, observation, child call, wait, resume, and result as typed nodes you can inspect, step, visualize, fork, replay, resume, and branch into new workspaces.
 
 ## Decision matrix
 

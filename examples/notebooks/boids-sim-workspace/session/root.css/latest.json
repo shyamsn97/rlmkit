@@ -1,8 +1,0 @@
-{
-  "agent_id": "root.css",
-  "latest_node_id": "n_b42f43b354ab",
-  "seq": 16,
-  "type": "done_output",
-  "terminal": true,
-  "result": "PATH: style.css\n/* Fill the viewport, remove margins/scrollbars, center the canvas, dark background */\n* { box-sizing: border-box; }\n\nhtml, body {\n  width: 100%;\n  height: 100%;\n  margin: 0;\n  padding: 0;\n  overflow: hidden;\n  background: #0b0f14; /* dark background */\n}\n\nbody {\n  display: flex;\n  align-items: center;\n  justify-content: center;\n}\n\ncanvas, #boids {\n  display: block;\n  width: 100vw;\n  height: 100vh;\n}"
-}

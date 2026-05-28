@@ -81,22 +81,51 @@ Inspect `CONTEXT` enough before answering. For large `CONTEXT`, chunk it, query 
 """
 
 FORMAT_TEXT = """
-Execute Python in fenced `repl` blocks:
+Execute Python in fenced `repl` blocks. Use one block per turn; for multi-step
+work, inspect first, read the output, then run a later block that acts on it:
 
 ```repl
+info = CONTEXT.info()
+print(info)
+print(CONTEXT.read(0, min(2000, info["chars"])))
+```
+
+Then, in the next turn:
+
+```repl
+# Use the inspection output above to choose chunk sizes / fanout.
 chunk = CONTEXT.read(0, 10000)
 [answer] = llm_query_batched([f"What is the magic number in this chunk?\\n{chunk}"])
-print(answer)
+done(answer)
 ```
 """
 
 EXAMPLES_TEXT = """
+**Example 0 — first-turn inspection, then act in the next block.**
+
+```repl
+info = CONTEXT.info()
+print(info)
+print(CONTEXT.read(0, min(2000, info["chars"])))
+```
+
+Next turn, after reading that output:
+
+```repl
+# The inspection showed the context is small enough to process directly.
+text = CONTEXT.read(0, None)
+[answer] = llm_query_batched([f"Answer the user using this context:\n{text}"])
+done(answer)
+```
+
 **Example 1 — batched chunks at scale.** Chunk first, query chunks in parallel, then aggregate:
 
 ```repl
 query = "How many jobs did the author of The Great Gatsby have?"
+# Use the previous inspection output to choose fanout; here the context was large.
 docs = CONTEXT.read(0, None).split("\\n\\n")
-chunk_size = max(1, len(docs) // 10)
+target_chunks = 10
+chunk_size = max(1, len(docs) // target_chunks)
 chunks = ["\\n\\n".join(docs[i:i+chunk_size]) for i in range(0, len(docs), chunk_size)]
 prompts = [
     f"Try to answer: {query}\\nHere are the documents:\\n{chunk}\\nOnly answer if confident."
@@ -128,8 +157,10 @@ done(r)
 **Example 3 — pass data slices in `context=`.** Put chunk data in child `CONTEXT`, not `query`:
 
 ```repl
+# Use the previous inspection output to pick batch_size.
+batch_size = 500
 lines = CONTEXT.lines(0, CONTEXT.line_count())
-batches = ["\\n".join(lines[i:i+500]) for i in range(0, len(lines), 500)]
+batches = ["\\n".join(lines[i:i+batch_size]) for i in range(0, len(lines), batch_size)]
 handles = [
     rlm_delegate(
         name=f"chunk-{i}",

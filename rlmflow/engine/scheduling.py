@@ -41,7 +41,7 @@ def step(engine, graph: Graph) -> Graph:
 
 def refill_async_children(
     engine,
-    _done_id: str,
+    done_id: str,
     _result: object,
     active_ids: set[str],
 ) -> list[tuple[str, Callable[[], None]]]:
