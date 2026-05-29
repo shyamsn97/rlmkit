@@ -1,4 +1,4 @@
-"""Engine-bound built-in tools: ``done``, ``rlm_wait``, ``rlm_delegate``.
+"""Engine-bound built-in tools and delegation launchers.
 
 Each tool is a Python closure created per-runtime and bound to a specific
 ``runtime.env`` dict (and, for ``rlm_delegate``, a ``spawn_child`` callable
@@ -8,8 +8,7 @@ straight into the REPL namespace; remote runtimes expose proxy stubs that
 round-trip back to the host closure.
 
 The ``env`` dict captured here is the same object the engine reads back
-via ``runtime.env`` after each execution to discover ``DONE_RESULT`` and
-``DELEGATED`` agent ids.
+via ``runtime.env`` after each execution to discover ``DONE_RESULT``.
 """
 
 from __future__ import annotations
@@ -21,8 +20,13 @@ from rlmflow.graph import ChildHandle, WaitRequest
 from rlmflow.tools import tool
 
 
-class DoneSignal(Exception):
-    """Internal control-flow signal raised by ``done()`` to stop execution."""
+class DoneSignal(BaseException):
+    """Internal control-flow signal raised by ``done()`` to stop execution.
+
+    This intentionally inherits from ``BaseException`` so agent code with a
+    broad ``except Exception`` repair block cannot accidentally swallow a
+    successful ``done(...)`` call and keep executing.
+    """
 
 
 def make_done(env: dict[str, Any]):
@@ -59,60 +63,6 @@ def make_wait():
         return WaitRequest(agent_ids=[h.agent_id for h in handles])
 
     return rlm_wait
-
-
-def make_llm_query_batched(query_batch: Callable[..., list[str]]):
-    """Closure that runs multiple one-shot LLM prompts without child agents."""
-
-    @tool(
-        "Run multiple independent one-shot LLM prompts concurrently. "
-        "Returns strings in the same order as the prompts."
-    )
-    def llm_query_batched(
-        prompts: list[str],
-        *,
-        model: str = "default",
-    ) -> list[str]:
-        if isinstance(prompts, str) or not isinstance(prompts, list):
-            raise TypeError("llm_query_batched() requires a list[str] of prompts")
-        bad = [
-            (i, type(prompt).__name__)
-            for i, prompt in enumerate(prompts)
-            if not isinstance(prompt, str)
-        ]
-        if bad:
-            details = "; ".join(f"prompts[{i}] is {typ}" for i, typ in bad)
-            raise TypeError(f"llm_query_batched() requires list[str]. {details}")
-        if not prompts:
-            return []
-        return query_batch(prompts, model=model)
-
-    return llm_query_batched
-
-
-@tool(
-    "Run multiple independent one-shot LLM prompts concurrently. "
-    "Returns strings in the same order as the prompts."
-)
-def llm_query_batched(
-    prompts: list[str],
-    *,
-    model: str = "gpt-4o-mini",
-) -> list[str]:
-    """Sandbox-local default for remote runtimes.
-
-    The host engine may still register a closure-backed version for local runs.
-    Remote runtimes import this function directly so calls happen in the sandbox.
-    """
-
-    if isinstance(prompts, str) or not isinstance(prompts, list):
-        raise TypeError("llm_query_batched() requires a list[str] of prompts")
-    if not prompts:
-        return []
-    from rlmflow.llm import OpenAIClient
-
-    client = OpenAIClient(model=model)
-    return [client.chat([{"role": "user", "content": prompt}]) for prompt in prompts]
 
 
 @tool("Show current public REPL variable names and their type names.")
@@ -162,11 +112,9 @@ def make_delegate(
                     f"[replay error: no expected child for rlm_delegate({name!r}). "
                     "Recorded trajectory diverges from the action code.]"
                 )
-            child_aid = replay_queue.pop(0)
-            env.setdefault("DELEGATED", []).append(child_aid)
-            return ChildHandle(child_aid)
+            return ChildHandle(replay_queue.pop(0))
         context_text = "\n".join(context) if isinstance(context, list) else context
-        handle = spawn_child(
+        return spawn_child(
             env["AGENT_ID"],
             env["PARENT_NODE_ID"],
             name,
@@ -175,20 +123,86 @@ def make_delegate(
             max_iterations=max_iterations,
             model=model,
         )
-        if isinstance(handle, str):
-            return handle
-        env.setdefault("DELEGATED", []).append(handle.agent_id)
-        return handle
 
     return rlm_delegate
+
+
+def make_launch_subagent(
+    rlm_delegate: Callable[..., object], rlm_wait: Callable[..., Any]
+):
+    """Build the public single-child launcher from bound primitives."""
+
+    @tool("Launch one sub-agent and wait for its finish message. Must be awaited.")
+    async def launch_subagent(
+        query,
+        num_steps=None,
+        context="",
+        *,
+        name="subagent",
+        model="default",
+    ):
+        _handle = rlm_delegate(
+            name=name,
+            query=query,
+            context=context,
+            max_iterations=num_steps,
+            model=model,
+        )
+        if isinstance(_handle, str):
+            return _handle
+        _results = await rlm_wait(_handle)
+        return _results[0]
+
+    return launch_subagent
+
+
+def make_launch_subagents(
+    rlm_delegate: Callable[..., object],
+    rlm_wait: Callable[..., Any],
+):
+    """Build the public multi-child launcher from bound primitives."""
+
+    @tool("Launch many sub-agents in parallel and wait for all. Must be awaited.")
+    async def launch_subagents(specs, *, context=""):
+        """Launch many sub-agents in parallel and wait for all. Must be awaited.
+
+        ``specs`` is a list of dicts (or bare query strings); each dict may set
+        ``query`` (required), ``num_steps``, ``context``, ``name``, ``model``.
+        Returns finish messages in the same order as ``specs``.
+        """
+        _results = [None] * len(specs)
+        _handles = []
+        _positions = []
+        for _i, _spec in enumerate(specs):
+            if isinstance(_spec, str):
+                _spec = {"query": _spec}
+            _handle = rlm_delegate(
+                name=_spec.get("name", "subagent"),
+                query=_spec["query"],
+                context=_spec.get("context", context),
+                max_iterations=_spec.get("num_steps"),
+                model=_spec.get("model", "default"),
+            )
+            if isinstance(_handle, str):
+                _results[_i] = _handle
+            else:
+                _handles.append(_handle)
+                _positions.append(_i)
+        if _handles:
+            _waited = await rlm_wait(*_handles)
+            for _pos, _result in zip(_positions, _waited):
+                _results[_pos] = _result
+        return _results
+
+    return launch_subagents
 
 
 __all__ = [
     "DoneSignal",
     "SHOW_VARS",
-    "llm_query_batched",
     "make_delegate",
     "make_done",
-    "make_llm_query_batched",
+    "make_launch_subagent",
+    "make_launch_subagents",
     "make_wait",
 ]

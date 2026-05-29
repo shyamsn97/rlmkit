@@ -34,7 +34,7 @@ def build_graph() -> Graph:
         agent_id="root",
         seq=1,
         reply="I'll delegate the file write.",
-        code='rlm_delegate(name="hello", query="write hello.py", context="")',
+        code='await launch_subagent("write hello.py", name="hello")',
         iteration=2,
         input_tokens=120,
         output_tokens=30,

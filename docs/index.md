@@ -13,8 +13,10 @@ Pick the doc that matches what you're trying to do.
 ## Use rlmflow
 
 - [Control](control.md) — step loop, workspace resume, rewind,
-  forks, `CONTEXT.read()` / slices, `rlm_delegate(*, name, query, context)`,
-  inline-first strategy, custom tools.
+  forks, `CONTEXT.read()` / slices, delegation via
+  `launch_subagent` / `launch_subagents`, inline-first strategy, custom tools.
+- [Node injection](injections.md) — append typed controller events to a
+  running graph, then commit them through `agent.step(graph)`.
 - [Observability](observability.md) — querying the `Graph`,
   workspace layout, export helpers, live tree, gantt, topology
   exports, Gradio viewer, CLI.

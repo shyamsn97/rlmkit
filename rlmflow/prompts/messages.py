@@ -68,16 +68,16 @@ Your first REPL block should usually inspect the environment/task `CONTEXT` and/
 
 FIRST_TURN_DECOMPOSITION_NUDGE = """\
 After the initial inspection output, if the task decomposes into independent
-units, spawn the child batch with `rlm_delegate(...)` or issue a
+units, fan them out with `await launch_subagents([...])` or issue a
 `llm_query_batched(...)` fanout rather than solving every unit yourself.
 
-For multi-file or multi-component browser/app tasks, this usually means delegate
-one child per file/component, wait for the batch with `await rlm_wait(*handles)`,
-then integrate, write files, and verify in the parent.
+For multi-file or multi-component browser/app tasks, this usually means one
+sub-agent per file/component via `await launch_subagents([...])`, then integrate,
+write files, and verify in the parent.
 
-When using `rlm_delegate`, put the task requirements/data in `context=...` so the
-child can inspect them through `CONTEXT.read()`. This could mean shared
-contracts, file specs, task-specific info for a particular child, etc.
+Put each sub-agent's requirements/data in its `context=...` so the child can
+inspect them through `CONTEXT.read()`. This could mean shared contracts, file
+specs, task-specific info for a particular child, etc.
 """
 
 
@@ -127,8 +127,6 @@ Based on the work above, provide the final answer now. The block must call done(
 NO_CODE_BLOCK = f"ERROR: Your previous reply did not contain a ```repl``` code block. {REPL_BLOCK_RULE} Try again."
 
 EXECUTION_OUTPUT = "REPL output for previous block:\n{output}"
-
-ORPHANED_DELEGATES = "You delegated [{names}] but never called `await rlm_wait(...)`. You must use `await rlm_wait(*handles)` to collect results."
 
 STATUS_DEPTH_ROOT = " You have the full recursion budget available."
 STATUS_DEPTH_MID = " Some recursion budget remains available."

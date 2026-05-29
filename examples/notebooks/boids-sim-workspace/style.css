@@ -1,0 +1,21 @@
+/* Full-viewport canvas on a dark background; no scrollbars */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #0b0f14; /* dark background */
+  overflow: hidden;     /* prevent scrollbars */
+}
+
+#boids {
+  display: block;
+  width: 100vw;
+  height: 100vh;        /* fill the viewport */
+}

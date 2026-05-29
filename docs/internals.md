@@ -91,7 +91,7 @@ types under four base classes:
 | `llm_output`         | `LLMOutput`         | `ObservationNode`       | reply, extracted REPL code, token deltas           |
 | `exec_action`        | `ExecAction`        | `ActionNode`            | "ran fresh code"                                   |
 | `exec_output`        | `ExecOutput`        | `CodeObservation` (obs) | runtime stdout                                     |
-| `supervising_output` | `SupervisingOutput` | `CodeObservation` (obs) | code suspended at `await rlm_wait`; `waiting_on` lists pending children |
+| `supervising_output` | `SupervisingOutput` | `CodeObservation` (obs) | code suspended at an awaited launcher; `waiting_on` lists pending children |
 | `error_output`       | `ErrorOutput`       | `CodeObservation` (obs) | failure                                            |
 | `done_output`        | `DoneOutput`        | `CodeObservation` (obs) | terminal answer from `done(...)`                   |
 | `resume_action`      | `ResumeAction`      | `ActionNode`            | "supervisor resumed paused code"                   |
@@ -227,9 +227,9 @@ def step_exec(self, graph, llm_output):
 ```
 
 `_run_exec` is the long branch that calls into the runtime, handles
-`done(...)`, `rlm_delegate(...)` + `await rlm_wait(...)`, orphaned delegates,
-and exceptions. It produces exactly one of `ExecOutput`,
-`SupervisingOutput`, `ErrorOutput`, or `DoneOutput`.
+`done(...)`, delegation (`await launch_subagent(...)` /
+`await launch_subagents(...)`), and exceptions. It produces exactly one of
+`ExecOutput`, `SupervisingOutput`, `ErrorOutput`, or `DoneOutput`.
 
 #### `step_after_supervising` — resume half
 
@@ -242,8 +242,18 @@ observation just like `step_exec`.
 
 ## The REPL `await` protocol
 
-The engine **only** intercepts top-level `await rlm_wait(*handles)`
-values.
+Agents delegate through two launchers — `await launch_subagent(...)` and
+`await launch_subagents([...])`. These are plain `async def`s installed in the
+REPL namespace; each spawns its children via the internal `rlm_delegate(...)`
+primitive and then performs a single `await rlm_wait(*handles)`. So while
+agents only ever write the launchers, the value the engine actually suspends on
+is still the `WaitRequest` produced by that internal `rlm_wait` — which
+propagates up through the launcher's `await` chain to the top-level driver. The
+rest of this section describes that suspension point; `rlm_delegate` /
+`rlm_wait` are internal plumbing, not part of the agent-facing surface.
+
+The engine **only** intercepts top-level `await` values that resolve to a
+`WaitRequest`.
 
 ### The protocol
 
@@ -254,11 +264,11 @@ do with each awaited value:
 
 | What's awaited                          | Engine reaction                                    |
 |-----------------------------------------|----------------------------------------------------|
-| `rlm_wait(handle, …)` -> `WaitRequest`  | **Suspend** the agent until those children settle. |
-| Anything else                           | Error; only `await rlm_wait(...)` is supported.    |
+| launcher -> `WaitRequest`               | **Suspend** the agent until those children settle. |
+| Anything else                           | Error; only the launchers may be awaited.          |
 | `StopIteration`                         | Block done; return captured stdout.                |
 
-The `WaitRequest` returned by `rlm_wait(...)` carries the child agent IDs
+The `WaitRequest` the launchers ultimately yield carries the child agent IDs
 the engine needs to schedule on. Without it the engine has no
 suspension target.
 
@@ -272,15 +282,15 @@ descending at nested boundaries.
 ```python
 # ── TOP-LEVEL awaits ────────────────────────────────────────────────
 # These count. The REPL compiles with top-level await.
-result = await rlm_wait(h)
-for h in handles:
-    result = await rlm_wait(h)
+result = await launch_subagent("scan the file")
+for spec in specs:
+    result = await launch_subagent(spec)
 
 # ── NOT top level ───────────────────────────────────────────────────
 # An `await` nested inside a function / comprehension scope doesn't make
 # the block a coroutine the engine can drive — it belongs to that scope.
 async def helper():
-    return await rlm_wait(h)         # belongs to `helper`, not the block
+    return await launch_subagent("...")   # belongs to `helper`, not the block
 # (the block would have to `await helper()` at top level to suspend)
 
 # Ordinary generators / comprehensions are plain Python — no await:
@@ -303,9 +313,10 @@ print(sum(x * x for x in range(100)))
 ✅ **Suspension:**
 
 ```python
-h1 = rlm_delegate(name="worker", query="...", context="")
-h2 = rlm_delegate(name="worker", query="...", context="")
-results = await rlm_wait(h1, h2)   # suspends, resumes with results
+results = await launch_subagents([
+    {"name": "worker", "query": "..."},
+    {"name": "worker", "query": "..."},
+])   # suspends, resumes with results
 ```
 
 `results` is a list of strings (the children's `done(...)` payloads).
@@ -313,11 +324,11 @@ results = await rlm_wait(h1, h2)   # suspends, resumes with results
 ❌ **Doesn't do what you want:**
 
 ```python
-rlm_wait(handle)                   # missing await
-await some_other_coroutine()       # only rlm_wait is supported
+launch_subagents(specs)            # missing await
+await some_other_coroutine()       # only the launchers may be awaited
 ```
 
-These are errors. **Use `await rlm_wait(handle)`.**
+These are errors. **Use `await launch_subagents([...])`.**
 
 ### Why this design
 
@@ -347,12 +358,12 @@ suspension surfaces whatever `rlm_wait(...)` awaited:
 request = coro.send(prev_value)        # advance to the next await
 if isinstance(request, WaitRequest):
     suspend(request.agent_ids)         # the thing we know how to do
-# else: TypeError — only `await rlm_wait(...)` is supported
+# else: TypeError — only a launcher's WaitRequest can suspend
 ```
 
-`await rlm_wait(...)` evaluates to a `WaitRequest`, which is the only
-value the engine knows how to suspend on. Awaiting anything else is an
-error. When the coroutine raises `StopIteration`, the block is done and
+A launcher's internal `await rlm_wait(...)` evaluates to a `WaitRequest`, which
+is the only value the engine knows how to suspend on. Awaiting anything else is
+an error. When the coroutine raises `StopIteration`, the block is done and
 the engine records the captured stdout.
 
 ### Net effect on the graph
@@ -360,11 +371,11 @@ the engine records the captured stdout.
 | Block did this                          | `<observation>` is                          | Graph effect                                                                                  |
 |-----------------------------------------|---------------------------------------------|-----------------------------------------------------------------------------------------------|
 | Ran to completion (no await)            | `ExecOutput` (stdout)                       | Single `ExecAction → ExecOutput` pair.                                                        |
-| Top-level `await rlm_wait(h1, h2)`      | `SupervisingOutput(waiting_on=[h1, h2])`    | Agent suspends. Children run. When they finish, a `ResumeAction` resumes.                     |
+| Top-level `await launch_subagents([...])` | `SupervisingOutput(waiting_on=[...])`     | Agent suspends. Children run. When they finish, a `ResumeAction` resumes.                     |
 | `done(...)` called (any path)           | `DoneOutput`                                | Agent terminates.                                                                             |
 | Exception                               | `ErrorOutput`                               | Surfaces in the next user message as a retry observation.                                     |
 
-**Rule:** only `await rlm_wait(...)` introduces a `SupervisingOutput`
+**Rule:** only an awaited launcher introduces a `SupervisingOutput`
 and the eventual `ResumeAction`. A block with no top-level await is a
 single `ExecAction → ExecOutput`.
 
@@ -383,7 +394,7 @@ single `ExecAction → ExecOutput`.
 
 ## Resume semantics
 
-`await rlm_wait(...)` is a Python coroutine suspension point. It is
+An awaited launcher is a Python coroutine suspension point. It is
 **not** a request to copy child outputs into the next LLM prompt.
 
 ### The data path
@@ -391,14 +402,17 @@ single `ExecAction → ExecOutput`.
 For code like:
 
 ```python
-handles = [rlm_delegate(name="a", query=q_a, context=c_a), rlm_delegate(name="b", query=q_b, context=c_b)]
-results = await rlm_wait(*handles)
+results = await launch_subagents([
+    {"name": "a", "query": q_a, "context": c_a},
+    {"name": "b", "query": q_b, "context": c_b},
+])
 print(len(results))
 ```
 
-the flow is:
+the flow is (the launcher spawns each child via the internal `rlm_delegate` and
+suspends on a single `await rlm_wait(*handles)`):
 
-1. The parent REPL runs until `await rlm_wait(*handles)`.
+1. The parent REPL runs until the launcher's `await rlm_wait(*handles)`.
 2. The coroutine suspends. The assignment to `results` has **not**
    happened yet.
 3. The graph records a `SupervisingOutput(waiting_on=[a, b])`.
@@ -450,21 +464,19 @@ The LLM emits one REPL block:
 
 ```python
 contract = "Return JSON with claims, evidence, sources, contradictions."
-jobs = [
-    ("identity",     "Identify the listed security.",      contract),
-    ("valuation",    "Find price, market cap, multiples.", contract),
-    ("fundamentals", "Research growth, revenue, margins.", contract),
-    ("analyst",      "Collect analyst targets.",           contract),
-]
-handles = [rlm_delegate(name=name, query=q, context=c, model="fast") for name, q, c in jobs]
-results = await rlm_wait(*handles)
+results = await launch_subagents([
+    {"name": "identity",     "query": "Identify the listed security.",      "context": contract, "model": "fast"},
+    {"name": "valuation",    "query": "Find price, market cap, multiples.", "context": contract, "model": "fast"},
+    {"name": "fundamentals", "query": "Research growth, revenue, margins.", "context": contract, "model": "fast"},
+    {"name": "analyst",      "query": "Collect analyst targets.",           "context": contract, "model": "fast"},
+])
 print(f"got {len(results)} child results")
 ```
 
-Runtime execution:
+Runtime execution (the launcher expands to `rlm_delegate` + `await rlm_wait`):
 
-1. `rlm_delegate(...)` creates four child agents.
-2. `await rlm_wait(*handles)` suspends the root coroutine.
+1. The launcher's `rlm_delegate(...)` calls create four child agents.
+2. Its single `await rlm_wait(*handles)` suspends the root coroutine.
 3. The graph records `SupervisingOutput(waiting_on=[...4 ids...])`.
 
 ```
@@ -483,8 +495,8 @@ root.analyst       [0] UserQuery
 ```
 
 Data location: child outputs do not exist yet. Root REPL is suspended
-at `await rlm_wait(*handles)`. `handles` exists in the root REPL.
-`results` does not.
+inside the launcher at `await rlm_wait(*handles)`. `results` does not exist
+yet in the top-level namespace.
 
 #### Step 2 — children run
 
@@ -515,10 +527,10 @@ child_results = [
 ```
 
 …and calls `runtime.resume_code(graph, child_results)`. The suspended
-line:
+launcher line:
 
 ```python
-results = await rlm_wait(*handles)
+results = await launch_subagents([...])
 ```
 
 continues as if it were `results = child_results`. The same REPL
@@ -588,15 +600,16 @@ root.{identity,valuation,fundamentals,analyst}
 
 ### Multi-wait in one block
 
-A block can await twice:
+A block can await twice — each `await launch_subagent(...)` is its own
+suspension point (this is the sequential pattern):
 
 ```python
-h1 = rlm_delegate(name="a", query=..., context=...);  r1 = await rlm_wait(h1)
-h2 = rlm_delegate(name="b", query=..., context=...);  r2 = await rlm_wait(h2)
+r1 = await launch_subagent("...", name="a")
+r2 = await launch_subagent("...", name="b")
 done(combine(r1, r2))
 ```
 
-Each wait/resume pair gets its own `(SupervisingOutput, ResumeAction)`
+Each launcher's wait/resume gets its own `(SupervisingOutput, ResumeAction)`
 in the parent's trajectory. The REPL is the same coroutine both
 times — variables persist.
 
@@ -604,8 +617,8 @@ times — variables persist.
 
 ```python
 # Block 1
-h = rlm_delegate(name="a", query=..., context=...)
-await rlm_wait(h)            # block ends right after the await
+results = await launch_subagents([{"name": "a", "query": "..."}])
+# block ends right after the awaited launcher
 
 # Block 2
 done("p:" + results[0])
@@ -615,7 +628,7 @@ Same agent, two LLM turns. The first block's `LLMOutput` →
 `ExecAction` → `SupervisingOutput`. After the child settles, the
 resume produces an `ExecOutput`; then the agent runs another LLM
 turn and the second block's code runs in a *fresh* REPL submission
-(but the runtime keeps the same namespace — `rlm_delegate`,
+(but the runtime keeps the same namespace — the launchers,
 `results`, and any prior assignment are in scope).
 
 ---
@@ -745,8 +758,9 @@ hits    = CONTEXT.grep(r"TODO") # lineno:line rows
 full    = CONTEXT.read()        # full payload
 ```
 
-`rlm_delegate(*, name, query, context)` writes the child's context payload
-under `context/<child_id>/context.txt` before the child's first
+The launchers forward their `context=` argument to the internal
+`rlm_delegate(*, name, query, context)`, which writes the child's context
+payload under `context/<child_id>/context.txt` before the child's first
 `UserQuery` is appended.
 
 ---
@@ -778,7 +792,10 @@ Three methods own the lifecycle:
 
 `register_tools(runtime)` binds the core `done` / `rlm_wait` /
 `rlm_delegate` closures to `runtime.env`. The `rlm_delegate` closure
-captures `self.spawn_child` so it can call back into engine state.
+captures `self.spawn_child` so it can call back into engine state. The
+agent-facing `launch_subagent` / `launch_subagents` are registered as real core
+tools and compose over those closures at call time, so they work identically on
+local and remote runtimes.
 
 See [`runtimes.md`](runtimes.md) for the `Runtime` protocol and
 shipped variants.
@@ -885,15 +902,6 @@ agent = RLMFlow(..., pool=lambda tasks: my_async_scheduler(tasks))
 ## Action edge cases
 
 A few edge cases that crop up in real runs:
-
-### Orphaned delegates
-
-If a block calls `rlm_delegate(...)` but never `await rlm_wait(...)`'s on the
-handle, the engine surfaces an `ErrorOutput(error="orphaned_delegates")`
-and re-raises the corresponding exception inside the REPL on the next
-turn so the LLM sees the failure inline. Children that were already
-spawned stay in the graph (their work isn't discarded) but the parent
-has to call `rlm_wait(...)` to consume their results.
 
 ### No code block
 

@@ -15,7 +15,6 @@ from rlmflow.rlm import RLMConfig, RLMFlow
 from rlmflow.runtime.sandbox.remote import RemoteFileRuntime
 from rlmflow.tools import FILE_TOOLS
 from rlmflow.tools.builtins import SHOW_VARS
-from rlmflow.utils import OrphanedDelegatesError
 from rlmflow.workspace import ContextVariable, SessionVariable, Workspace
 
 
@@ -468,6 +467,125 @@ def test_e2b_runtime_keeps_control_tools_as_proxies(monkeypatch, tmp_path):
         runtime.close()
 
 
+def _launcher_repl():
+    """A fresh REPL (the same class the sandbox runs) with stub
+    launchers plus ``rlm_delegate`` / ``rlm_wait`` bound by name.
+
+    Remotely the primitives are stdio proxies; here they are plain closures.
+    Either way the registered launchers resolve them from the executing REPL
+    frame at call time, which is the sandbox-side guarantee.
+    """
+    from rlmflow.runtime.repl import REPL
+    from rlmflow.tools.builtins import make_delegate, make_wait
+
+    env = {"AGENT_ID": "root", "PARENT_NODE_ID": "n0"}
+
+    def spawn_child(parent_agent_id, parent_node_id, name, query, context, **kwargs):
+        return ChildHandle(f"root.{name}")
+
+    repl = REPL()
+    repl.namespace["rlm_delegate"] = make_delegate(spawn_child, env)
+    repl.namespace["rlm_wait"] = make_wait()
+    repl.handle({"cmd": "inject_launcher", "name": "launch_subagent"})
+    repl.handle({"cmd": "inject_launcher", "name": "launch_subagents"})
+    return repl
+
+
+def test_repl_launch_subagents_suspends_and_resumes():
+    """`await launch_subagents([...])` spawns
+    each child via ``rlm_delegate``, suspends on one ``WaitRequest`` with every
+    id, and on resume returns the children's answers in order."""
+
+    repl = _launcher_repl()
+    suspended, payload = repl.start(
+        'results = await launch_subagents('
+        '[{"name": "a", "query": "x"}, {"name": "b", "query": "y"}])'
+    )
+    assert suspended is True
+    request, _ = payload
+    assert request.agent_ids == ["root.a", "root.b"]
+
+    suspended_again, _ = repl.resume(["A", "B"])
+    assert suspended_again is False
+    assert repl.namespace["results"] == ["A", "B"]
+
+
+def test_repl_launch_subagent_single_suspends_and_unwraps_result():
+    """`await launch_subagent(...)` suspends on a single-child ``WaitRequest``
+    and returns the child's answer string (not a one-element list)."""
+
+    repl = _launcher_repl()
+    suspended, payload = repl.start(
+        'answer = await launch_subagent("solve it", name="solver")'
+    )
+    assert suspended is True
+    request, _ = payload
+    assert request.agent_ids == ["root.solver"]
+
+    suspended_again, _ = repl.resume(["the answer"])
+    assert suspended_again is False
+    assert repl.namespace["answer"] == "the answer"
+
+
+def test_internal_delegation_primitives_are_hidden_from_public_tools(tmp_path):
+    from rlmflow.runtime.local import LocalRuntime
+
+    runtime = LocalRuntime(workspace=tmp_path / "workspace")
+    RLMFlow(_NoopLLM(), runtime=runtime, config=RLMConfig(max_depth=1))
+
+    visible = {td.name for td in runtime.get_tool_defs()}
+    assert "launch_subagent" in visible
+    assert "launch_subagents" in visible
+    assert "rlm_delegate" not in visible
+    assert "rlm_wait" not in visible
+
+    internal = {td.name for td in runtime.get_tool_defs(include_hidden=True)}
+    assert {"rlm_delegate", "rlm_wait"} <= internal
+
+    show_vars = runtime.repl._show_vars()
+    assert "launch_subagent" in show_vars
+    assert "launch_subagents" in show_vars
+    assert "rlm_delegate" not in show_vars
+    assert "rlm_wait" not in show_vars
+
+
+def test_host_proxied_tool_can_call_visible_tool_via_context(tmp_path):
+    from rlmflow.tools import get_repl_tools, tool
+    from rlmflow.runtime.sandbox.remote import RemoteFileRuntime
+
+    class InMemoryRemote(RemoteFileRuntime):
+        def __init__(self):
+            super().__init__(workspace=tmp_path / "host", remote_workdir="/workspace")
+            self.sent: list[dict] = []
+
+        def send(self, msg: dict) -> None:
+            self.sent.append(msg)
+
+        def recv(self) -> dict:
+            raise AssertionError("recv should not be called")
+
+        def exec(self, command: str, *, timeout: float | None = None) -> str:
+            del command, timeout
+            return ""
+
+    @tool("Echo text.")
+    def echo(text: str) -> str:
+        return f"echo:{text}"
+
+    @tool("Call another tool.")
+    def call_echo(text: str) -> str:
+        return get_repl_tools()["echo"](text)
+
+    runtime = InMemoryRemote()
+    runtime.register_tool(echo)
+    runtime.register_tool(call_echo)
+    runtime.proxied["call_echo"] = call_echo
+
+    runtime.handle_proxy_call({"proxy": "call_echo", "args": ["hi"]})
+
+    assert runtime.sent == [{"value": "echo:hi"}]
+
+
 def test_remote_runtime_short_circuits_proxied_wait_and_consumes_ack(tmp_path):
     from rlmflow.runtime.sandbox.remote import RemoteFileRuntime
 
@@ -515,7 +633,11 @@ def test_remote_runtime_short_circuits_proxied_wait_and_consumes_ack(tmp_path):
 
     suspended, payload, errored = runtime.resume_code(["child result"])
 
-    assert runtime.sent[-1] == {"cmd": "resume", "value": ["child result"]}
+    assert runtime.sent[-1] == {
+        "cmd": "resume",
+        "value": ["child result"],
+        "tool_context": {"visible": [], "hidden": []},
+    }
     assert (suspended, payload, errored) == (False, "resumed", False)
     assert not runtime._pending_wait_ack
 
@@ -618,10 +740,9 @@ def test_inject_env_preserves_suspended_remote_repl(tmp_path):
     }
 
 
-def test_e2b_runtime_imports_llm_query_batched_remotely(monkeypatch, tmp_path):
+def test_e2b_runtime_proxies_llm_query_batched_to_engine(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=_FakeE2BSandboxFactory))
     from rlmflow.runtime.sandbox.e2b import E2BRuntime
-    from rlmflow.tools.builtins import make_llm_query_batched
 
     runtime = E2BRuntime(
         workspace=tmp_path / "host",
@@ -629,26 +750,9 @@ def test_e2b_runtime_imports_llm_query_batched_remotely(monkeypatch, tmp_path):
         setup_commands=[],
     )
     try:
-        runtime.register_tool(make_llm_query_batched(lambda prompts, **_: prompts), core=True)
-        assert "llm_query_batched" not in runtime.proxied
+        RLMFlow(_NoopLLM(), runtime=runtime, config=RLMConfig(max_depth=1))
         assert runtime.execute("print(callable(llm_query_batched))") == "True"
-    finally:
-        runtime.close()
-
-
-def test_e2b_runtime_imports_exception_remotely(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=_FakeE2BSandboxFactory))
-    from rlmflow.runtime.sandbox.e2b import E2BRuntime
-
-    runtime = E2BRuntime(
-        workspace=tmp_path / "host",
-        remote_workdir=str(tmp_path / "remote"),
-        setup_commands=[],
-    )
-    try:
-        runtime.inject("OrphanedDelegatesError", OrphanedDelegatesError)
-        assert "OrphanedDelegatesError" not in runtime.proxied
-        assert runtime.execute("print(OrphanedDelegatesError.__name__)") == "OrphanedDelegatesError"
+        assert "llm_query_batched" in runtime.proxied
     finally:
         runtime.close()
 

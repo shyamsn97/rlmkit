@@ -177,7 +177,7 @@ def test_unsupported_await_errors():
     suspended, out = r.start(code)
     assert suspended is False
     assert r.errored is True
-    assert "only `await rlm_wait(...)` is supported" in out
+    assert "only `await launch_subagent(...)`" in out
 
 
 def test_system_exit_in_block_is_captured_not_propagated():

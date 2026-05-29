@@ -7,15 +7,16 @@ passes the new source to `run_experiment(source)`, and decides
 what to try next. A separate `evaluate.py` — which the agent does
 not see — imports that function and prints `score: <float>`. To
 run trials in parallel, the agent uses RLMFlow's normal
-`rlm_delegate` / `rlm_wait`.
+`launch_subagents`.
 
 ```
 turn 0:
  → run_baseline()                         # one-shot, idempotent
 turn 1+:
  → fresh = pick_slugs(get_runs())
- → handles = [rlm_delegate(name=slug, query=hyp, context=ctx) for slug, hyp, ctx in fresh]
- → results = await rlm_wait(*handles)     # children call run_experiment
+ → results = await launch_subagents([     # children call run_experiment
+ →     {"name": slug, "query": hyp, "context": ctx} for slug, hyp, ctx in fresh
+ → ])
  → ...
  → done(<summary>)
 ```
@@ -94,7 +95,7 @@ A target is a directory containing exactly three files:
   scope so the driver can preflight-check candidate sources for
   the right function name and signature.
 - `program.md` — the agent's brief (task description + how to use
-  `run_experiment` / `run_baseline` / `rlm_delegate`). Include a short
+  `run_experiment` / `run_baseline` / `launch_subagents`). Include a short
   docstring rubric for candidate sources: module docstring for the
   strategy, target-function docstring for the algorithm and invariants,
   helper docstrings for inputs/outputs/units, and comments for magic

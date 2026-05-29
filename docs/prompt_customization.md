@@ -2,7 +2,8 @@
 
 `RLMFlow` builds a system prompt from named sections. Most customization should
 derive from the default builder instead of replacing the whole prompt, because
-the default sections carry the REPL protocol, `rlm_delegate` / `rlm_wait` rules,
+the default sections carry the REPL protocol, the
+`launch_subagent` / `launch_subagents` delegation rules,
 `CONTEXT`, `SESSION`, and the worked examples that keep recursive execution
 well-formed.
 
@@ -40,8 +41,8 @@ The default builder has seven sections, in order:
 
 | Section | Purpose |
 | --- | --- |
-| `role` | Opening contract + REPL namespace (`CONTEXT`, `llm_query_batched`, `rlm_delegate`, `rlm_wait`, `SESSION`, `SHOW_VARS`, `print`, `done`). |
-| `strategy` | When to use `llm_query_batched` vs `rlm_delegate`, "break down problems", REPL-for-computation with an inline physics example, truncation + long-context guidance. |
+| `role` | Opening contract + REPL namespace (`CONTEXT`, `llm_query_batched`, `launch_subagent`, `launch_subagents`, `SESSION`, `SHOW_VARS`, `print`, `done`). |
+| `strategy` | When to use `llm_query_batched` vs `launch_subagent` / `launch_subagents`, "break down problems", REPL-for-computation with an inline physics example, truncation + long-context guidance. |
 | `format` | REPL block fence rules + tiny inline demo. |
 | `examples` | Five worked recipes (chunked scan, batched chunks, branch on delegate, program-style fanout, parallel fanout). |
 | `final` | `done(...)` contract, `SHOW_VARS` reminder, closing exhortation. |
@@ -174,9 +175,9 @@ You are a Python REPL agent.
 )
 ```
 
-This is the most fragile option. If the prompt omits `rlm_delegate`,
-`rlm_wait`, `CONTEXT`, `SESSION`, or the `done(...)` rule, the model will
-not reliably use those features.
+This is the most fragile option. If the prompt omits `launch_subagent`,
+`launch_subagents`, `CONTEXT`, `SESSION`, or the `done(...)` rule, the model
+will not reliably use those features.
 
 ## Dynamic Prompts
 
@@ -227,24 +228,23 @@ class MyFlow(RLMFlow):
 
 ## Child-Specific Prompts
 
-The easiest way to steer a child is the query you pass to `rlm_delegate(...)`.
-Use the global prompt for stable behavior and use child queries for local
-contracts.
+The easiest way to steer a child is the query you pass to `launch_subagent` /
+`launch_subagents`. Use the global prompt for stable behavior and use child
+queries for local contracts.
 
 ```python
-handles = [
-    rlm_delegate(
-        name="api",
-        query="Implement src/api.py. Return ONLY JSON {\"files\": [str], \"checks\": [str]}.",
-        context=api_spec,
-    ),
-    rlm_delegate(
-        name="tests",
-        query="Implement tests for src/api.py. Return ONLY JSON {\"files\": [str], \"checks\": [str]}.",
-        context=test_spec,
-    ),
-]
-results = await rlm_wait(*handles)
+results = await launch_subagents([
+    {
+        "name": "api",
+        "query": "Implement src/api.py. Return ONLY JSON {\"files\": [str], \"checks\": [str]}.",
+        "context": api_spec,
+    },
+    {
+        "name": "tests",
+        "query": "Implement tests for src/api.py. Return ONLY JSON {\"files\": [str], \"checks\": [str]}.",
+        "context": test_spec,
+    },
+])
 ```
 
 If every child of a flow needs a different system prompt, use a subclass and

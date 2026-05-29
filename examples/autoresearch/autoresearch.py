@@ -42,10 +42,10 @@ You are running recursive autoresearch.
 
 **Parent agent:** your query points at `program.md`. Read it, run
 `run_baseline()` once, inspect `get_runs()`, choose idea-named
-slugs, then spawn one child per hypothesis with
-`rlm_delegate(name=slug, query=query, context=context)`. The parent does not write or run
-candidate code directly. End the block exactly at
-`results = await rlm_wait(*handles)`. On the resumed turn, inspect the
+slugs, then launch one child per hypothesis in parallel with
+`await launch_subagents([{"name": slug, "query": query, "context": context}, ...])`.
+The parent does not write or run candidate code directly. End the block exactly
+at that `await launch_subagents([...])` call. On the resumed turn, inspect the
 ledger, then either spawn another small batch of children with fresh
 slugs or `done(...)`. Child agents have a small turn cap set by the
 engine; do not try to simulate your own budget system.
@@ -65,6 +65,13 @@ crashes together with timeouts. Only timeouts stop immediately.
 Syntax errors, wrong shapes, missing imports, invalid geometry, and
 exceptions in `solve()` should be fixed and rerun as `<slug>_fix1`,
 then `_fix2`, then `_fix3`.
+
+Retries must be thinking turns, not blind loops. Children should make
+one `run_experiment(...)` attempt per REPL block. If it crashes, print
+the exact `stderr_tail` and stop the block without `done(...)`; on the
+next turn, patch the source at the failing line/name and submit one
+`_fixN`. Do not write a Python `for fix_idx in range(...)` loop or a
+generic heuristic patcher that can resubmit unchanged source.
 
 ```repl
 program = read_file("program.md")
@@ -106,15 +113,18 @@ If it returns a numeric score, done.
 If it times out, do not retry that slow idea; report timeout and done.
 If it crashes quickly, inspect e.row or latest_run(), patch that exact
 error, and retry as slug + "_fix1", then "_fix2", then "_fix3".
+Do not run all fixes in one Python loop. After a crash, print the exact
+stderr_tail and stop the block so the next turn can patch the failing
+line/name. Each `_fixN` must visibly change the exact failed code before
+calling run_experiment again.
 Do not stop after a quick crash until you have either produced a score
 or exhausted the three targeted fixes.'''
 
-handles = [
-    rlm_delegate(name=slug, query=child_query(slug, hyp), context=context)
+results = await launch_subagents([
+    {"name": slug, "query": child_query(slug, hyp), "context": context}
     for slug, hyp in ideas
     if slug not in prior
-]
-results = await rlm_wait(*handles)
+])
 ```
 
 ```repl
@@ -207,7 +217,9 @@ chronological. If `returncode == -1` or `stderr_tail` says timed out,
 do NOT retry the same slow idea. If a run returns a numeric score,
 even a terrible one, it is complete: `done(...)` and let the parent
 decide. Only retry quick crashes, and each `_fixN` must address the
-specific `stderr_tail`; no generic compatibility fixes.
+specific `stderr_tail`; no generic compatibility fixes. Never perform
+all `_fixN` attempts inside one Python loop; a quick crash should be
+printed, then repaired in the next LLM turn.
 """
 
 
@@ -590,7 +602,7 @@ def main() -> None:
                    help="Engine max_iterations cap.")
     p.add_argument("--branches-per-turn", type=int, default=4,
                    help="How many children the parent should spawn at a time.")
-    p.add_argument("--child-iterations", type=int, default=4,
+    p.add_argument("--child-iterations", type=int, default=6,
                    help="Max turns per child agent. Keeps slow/broken trial "
                         "agents from retrying forever.")
     p.add_argument("--model", default="gpt-5")
@@ -655,13 +667,28 @@ def main() -> None:
     # recursive parent/child mechanics live in the system prompt.
     query = (
         f"Read `program.md`, run the baseline, then fan out "
-        f"up to {args.branches_per_turn} child trials with `rlm_delegate`, "
+        f"up to {args.branches_per_turn} child trials with `launch_subagents`, "
         f"but first call `submission_status()`; when `remaining_submissions` "
         f"is not None, never spawn more children than that number. "
         f"The hard submission cap "
         f"is {args.max_submissions if args.max_submissions is not None else 'unlimited'} "
-        f"run_experiment calls, excluding the baseline. If no submissions "
-        f"remain, summarize the best ledger entry and call `done(...)`. "
+        f"run_experiment calls, excluding the baseline. "
+        f"Run MULTIPLE ROUNDS: after each batch resumes, re-read the ledger "
+        f"and `submission_status()` and launch another batch while "
+        f"`remaining_submissions > 0`. Keep exploration DIVERSE — each round "
+        f"should mix refinements of the top 2-3 DISTINCT performers with "
+        f"several brand-new, qualitatively different families (different "
+        f"optimizer/seeding/geometry). Hard limit: at most ~2 variants of "
+        f"any single idea family per round; never fill a batch with a dozen "
+        f"micro-tweaks of the same idea. Give every child a UNIQUE slug not "
+        f"already in `get_runs()` (e.g. `<best>_tighten`, or a `_r2`/`_r3` "
+        f"round suffix). If the best plateaus while budget remains, switch "
+        f"to an untried family rather than tweaking the winner again. Do "
+        f"NOT call `done(...)` while submissions remain just because your "
+        f"first idea list is used up — invent new slugs. Only summarize the "
+        f"best ledger entry and call `done(...)` when no submissions remain, "
+        f"or after a round yields no improvement and several families have "
+        f"been tried. "
         f"Each child is capped at {args.child_iterations} turns by "
         f"the engine. Per-trial budget is {args.budget_s}s; put "
         f"`budget_s={args.budget_s}` in each child query. If a "
@@ -669,7 +696,10 @@ def main() -> None:
         f"crash, explicitly tell the child to inspect e.row or "
         f"`latest_run()` and retry targeted fixes as `_fix1`, "
         f"`_fix2`, then `_fix3`. Never tell a child not to retry "
-        f"non-timeout crashes."
+        f"non-timeout crashes. Do not let children run all fixes in "
+        f"one Python loop; after each quick crash they should print "
+        f"the exact stderr_tail, stop that block, and patch the "
+        f"failing line/name on the next turn before one `_fixN` run."
     )
 
     print(f"[autoresearch] target={target}", flush=True)

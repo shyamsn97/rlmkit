@@ -15,7 +15,6 @@ from __future__ import annotations
 from typing import Any
 
 from rlmflow.utils.code import (
-    OrphanedDelegatesError,
     check_wait_syntax,
     find_code_blocks,
     replace_code_block,
@@ -32,7 +31,6 @@ _LAZY_VIEWER = {
 }
 
 __all__ = [
-    "OrphanedDelegatesError",
     "check_wait_syntax",
     "find_code_blocks",
     "open_viewer",

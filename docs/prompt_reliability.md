@@ -72,7 +72,7 @@ explicit copy/transform work.
 ```
 
 ```text
-After `yield rlm_wait(...)`, verify child-owned outputs from disk. Missing or
+After `await launch_subagents([...])`, verify child-owned outputs from disk. Missing or
 broken outputs should trigger a targeted child repair, not parent takeover of
 the whole task.
 ```
@@ -86,7 +86,7 @@ system prompt included:
 
 ```text
 For multi-file/component work with depth available, the first REPL block should
-create a contract, delegate owned pieces, and end at `yield rlm_wait(...)`; do
+create a contract, delegate owned pieces, and end at `await launch_subagents([...])`; do
 not write all artifact files inline.
 ```
 
@@ -164,9 +164,10 @@ Shared interface:
 - js/main.js imports createState() and starts the runtime.
 - Each child writes only its assigned path and verifies with read_file().
 '''
-handles = [rlm_delegate(name=name, query=f"Write only {path}: {task}", context=contract)
-           for name, path, task in files]
-results = yield rlm_wait(*handles)
+results = await launch_subagents([
+    {"name": name, "query": f"Write only {path}: {task}", "context": contract}
+    for name, path, task in files
+])
 ```
 
 This probably belongs in the coding example docs/notebook rather than the base
@@ -223,19 +224,20 @@ Shared interface:
 - js/main.js imports createState().
 - Each child writes only its assigned path and verifies with read_file().
 '''
-handles = [rlm_delegate(name=name, query=f"Write only {path}: {task}", context=contract)
-           for name, path, task in files]
-results = yield rlm_wait(*handles)
+results = await launch_subagents([
+    {"name": name, "query": f"Write only {path}: {task}", "context": contract}
+    for name, path, task in files
+])
 ```
 
-### Option C: Add A `delegate_files(...)` Helper
+### Option C: Add A `build_file_specs(...)` Helper
 
-Instead of asking the model to hand-roll delegation boilerplate, give it a small
-helper in the coding example:
+Instead of asking the model to hand-roll the spec list, give it a small
+helper in the coding example that returns `launch_subagents` specs:
 
 ```python
-handles = delegate_files(files, contract)
-results = yield rlm_wait(*handles)
+specs = build_file_specs(files, contract)   # returns a list of launch_subagents specs
+results = await launch_subagents(specs)
 ```
 
 This reduces the friction of delegation. The model often avoids delegation
@@ -262,7 +264,7 @@ Prefer prompt and example changes:
    message.
 2. Make the coding example's delegation pattern concrete, not `part_a.txt`.
 3. Keep the coding prompt short, but make the first-turn shape explicit:
-   contract, delegate, `yield rlm_wait(...)`, then verify on resume.
+   contract, delegate, `await launch_subagents([...])`, then verify on resume.
 4. Consider a small `delegate_files(...)` helper so delegation is easier than
    writing every file body inline.
 
@@ -313,11 +315,10 @@ Shared contract:
 - Each child writes exactly its assigned path, reads it back, and returns JSON.
 '''
 
-handles = [
-    rlm_delegate(name=name, query=f"Write only {path}: {task}.", context=contract)
+results = await launch_subagents([
+    {"name": name, "query": f"Write only {path}: {task}.", "context": contract}
     for name, path, task in files
-]
-results = yield rlm_wait(*handles)
+])
 ```
 
 Then the resumed block should verify exact paths with `read_file(path)`.
@@ -342,15 +343,14 @@ for path in expected:
         missing.append(path)
 
 if missing:
-    handles = [
-        rlm_delegate(
-            name=path_to_child[path],
-            query=f"Repair only {path}. It is missing or empty. Write it, read it back, then return JSON.",
-            context=contract,
-        )
+    results = await launch_subagents([
+        {
+            "name": path_to_child[path],
+            "query": f"Repair only {path}. It is missing or empty. Write it, read it back, then return JSON.",
+            "context": contract,
+        }
         for path in missing
-    ]
-    results = yield rlm_wait(*handles)
+    ])
 ```
 
 Only call `done(...)` after the expected contract passes, or when reporting a true unrecoverable blocker.
@@ -372,7 +372,7 @@ Add only a few lines. The best next prompt change is not another long rubric; it
 
 ### Add To The Base Prompt
 
-Add this under `yield rlm_wait(*handles)`:
+Add this under the launcher wait:
 
 ```text
 - After a wait, inspect child results and verify expected outputs directly.
@@ -398,7 +398,7 @@ Replace the softer delegation bullets with this exact wording:
   interfaces, and acceptance checks before writing.
 - **Delegate separable work.** For multi-file/component work with depth
   available, the first REPL block should create a contract, delegate owned
-  pieces, and end at `yield rlm_wait(...)`; do not write all artifact files
+  pieces, and end at `await launch_subagents([...])`; do not write all artifact files
   inline.
 - **Pass contracts, not bodies.** Give children paths, interfaces,
   constraints, and checks; avoid full file bodies unless copying or
@@ -421,7 +421,7 @@ Keep the base prompt short:
   only report a blocker when no useful repair step remains.
 ```
 
-Under `rlm_wait(...)`:
+After the launcher wait:
 
 ```text
 - After a wait, inspect child results and verify expected outputs directly.
@@ -442,7 +442,7 @@ The coding prompt should be more directive than the base prompt:
 ```text
 - Plan the contract: owners, shared interfaces, and checks.
 - For multi-file/component work, first create a contract, delegate owned
-  pieces, and end at `yield rlm_wait(...)`.
+  pieces, and end at `await launch_subagents([...])`.
 - Pass contracts to children, not full file bodies.
 - Verify the artifact from disk, including shared interfaces and behavior.
 - Repair only the responsible child/path before final `done()`.

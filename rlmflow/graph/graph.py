@@ -22,6 +22,7 @@ the recursive structure on demand.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -179,6 +180,36 @@ class Graph:
         """List form of :meth:`walk` (self + all descendants)."""
         return list(self.walk())
 
+    def leaves(self) -> list[Graph]:
+        """Agents with no child agents."""
+        return [g for g in self.walk() if not g.children]
+
+    def unfinished_agents(self) -> list[Graph]:
+        """Agents whose current state is not terminal."""
+        return [g for g in self.walk() if not g.finished]
+
+    def finished_agents(self) -> list[Graph]:
+        """Agents whose current state is terminal."""
+        return [g for g in self.walk() if g.finished]
+
+    def children_of(self, agent_id: str) -> list[Graph]:
+        """Direct children of ``agent_id``."""
+        return list(self[agent_id].children.values())
+
+    def descendants_of(self, agent_id: str) -> list[Graph]:
+        """All descendants of ``agent_id``, excluding that agent."""
+        root = self[agent_id]
+        return [g for g in root.walk() if g.agent_id != root.agent_id]
+
+    def where(self, predicate: Callable[[Graph], bool]) -> list[Graph]:
+        """Agents for which ``predicate(agent)`` is true."""
+        return [g for g in self.walk() if predicate(g)]
+
+    def match(self, pattern: str | re.Pattern[str]) -> list[Graph]:
+        """Agents whose id matches ``pattern``."""
+        compiled = re.compile(pattern) if isinstance(pattern, str) else pattern
+        return [g for g in self.walk() if compiled.search(g.agent_id)]
+
     # ── flat views over the subtree (back-compat) ────────────────────
 
     @property
@@ -309,6 +340,70 @@ class Graph:
         from copy import deepcopy
 
         return deepcopy(self) if deep else replace(self)
+
+    def inject(
+        self,
+        *,
+        target: str | re.Pattern[str] | Callable[[Graph], Iterable[str | Graph]],
+        node: Node,
+        mode: str = "append",
+        reason: str | None = None,
+    ) -> Graph:
+        """Return a new graph with ``node`` injected at ``target``.
+
+        ``target`` may be an exact agent id, a regex/pattern over agent ids,
+        or a callable returning agent ids / subgraphs. Only append mode is
+        supported for now.
+        """
+        if mode != "append":
+            raise NotImplementedError(
+                "Graph.inject currently supports append mode only"
+            )
+        out = self.copy(deep=True)
+        targets = out._resolve_injection_targets(target)
+        if not targets:
+            raise KeyError(f"no injection targets matched {target!r}")
+        for sub in targets:
+            fixed = _node_for_injection(sub, node, reason=reason)
+            cur = sub.current()
+            if cur is not None and cur.terminal:
+                raise ValueError(f"cannot inject into finished agent {sub.agent_id!r}")
+            if cur is not None and _is_action_like(cur) and _is_action_like(fixed):
+                raise ValueError(
+                    f"cannot queue multiple pending actions for {sub.agent_id!r}"
+                )
+            sub.states.append(fixed)
+        return out
+
+    def inject_output(
+        self,
+        *,
+        target: str | re.Pattern[str] | Callable[[Graph], Iterable[str | Graph]],
+        output: str,
+        content: str | None = None,
+        reason: str | None = None,
+    ) -> Graph:
+        from rlmflow.graph.node import ExecOutput
+
+        return self.inject(
+            target=target,
+            node=ExecOutput(output=output, content=content or output),
+            reason=reason,
+        )
+
+    def _resolve_injection_targets(
+        self, target: str | re.Pattern[str] | Callable[[Graph], Iterable[str | Graph]]
+    ) -> list[Graph]:
+        if callable(target):
+            raw = list(target(self))
+            out: list[Graph] = []
+            for item in raw:
+                out.append(item if isinstance(item, Graph) else self[item])
+            return out
+        if isinstance(target, str) and target in self.agents:
+            return [self[target]]
+        compiled = re.compile(target) if isinstance(target, str) else target
+        return [g for g in self.walk() if compiled.search(g.agent_id)]
 
     # ── rendering ────────────────────────────────────────────────────
 
@@ -457,6 +552,27 @@ def _path_prefixes(start: str, full: str) -> Iterator[str]:
     for piece in rest:
         cur = f"{cur}.{piece}"
         yield cur
+
+
+def _is_action_like(node: Node) -> bool:
+    from rlmflow.graph.node import ActionNode
+
+    return isinstance(node, ActionNode)
+
+
+def _node_for_injection(sub: Graph, node: Node, *, reason: str | None = None) -> Node:
+    fields = node.model_dump(
+        exclude={"id", "agent_id", "seq", "injected", "injected_reason"},
+        mode="python",
+    )
+    next_seq = (sub.states[-1].seq + 1) if sub.states else 0
+    return node.__class__(
+        agent_id=sub.agent_id,
+        seq=next_seq,
+        injected=True,
+        injected_reason=reason,
+        **fields,
+    )
 
 
 # ── flat views over the subtree ──────────────────────────────────────

@@ -102,7 +102,7 @@ def test_wait_check_accepts_conditional():
 
 def test_wait_check_rejects_yield():
     err = check_wait_syntax("x = yield rlm_wait(h)")
-    assert err is not None and "use `await rlm_wait(...)`" in err
+    assert err is not None and "top-level `yield` is not supported" in err
     print("  yield rejected: OK")
 
 

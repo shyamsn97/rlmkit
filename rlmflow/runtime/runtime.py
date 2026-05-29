@@ -23,6 +23,7 @@ from rlmflow.runtime.repl import deserialize, serialize
 from rlmflow.tools import get_tool_metadata
 from rlmflow.tools import tool as tool_decorator
 from rlmflow.tools.builtins import DoneSignal
+from rlmflow.tools.context import ToolContext, reset_tool_context, set_tool_context
 from rlmflow.workspace import BaseWorkspace, Workspace
 
 # Process-global lock guarding ``os.chdir`` in :meth:`Runtime._in_workspace`.
@@ -49,6 +50,8 @@ DEFAULT_MODULES: list[str] = [
     "functools",
 ]
 
+_LAUNCHER_TOOLS = {"launch_subagent", "launch_subagents"}
+
 
 @dataclass
 class ToolDef:
@@ -57,6 +60,7 @@ class ToolDef:
     description: str
     fn: Callable[..., object] | None = None
     core: bool = False
+    hidden: bool = False
 
     @classmethod
     def from_fn(
@@ -65,6 +69,7 @@ class ToolDef:
         description: str | None = None,
         *,
         core: bool = False,
+        hidden: bool = False,
     ) -> ToolDef:
         """Build a ``ToolDef`` from a function, preferring ``@tool`` metadata."""
         meta = get_tool_metadata(fn)
@@ -83,6 +88,7 @@ class ToolDef:
             description=description,
             fn=fn,
             core=core,
+            hidden=hidden,
         )
 
 
@@ -161,6 +167,7 @@ class Runtime(ABC):
         fn = self.proxied[resp["proxy"]]
         args = [deserialize(a) for a in resp.get("args", [])]
         kwargs = {k: deserialize(v) for k, v in resp.get("kwargs", {}).items()}
+        token = set_tool_context(self._tool_context())
         try:
             with self._in_workspace():
                 result = fn(*args, **kwargs)
@@ -170,6 +177,8 @@ class Runtime(ABC):
         except Exception as exc:
             self.send({"error": f"{type(exc).__name__}: {exc}"})
             return None
+        finally:
+            reset_tool_context(token)
 
         self.send({"value": serialize(result)})
         return result
@@ -194,7 +203,9 @@ class Runtime(ABC):
     def execute(self, code: str) -> str:
         """Run ``code`` and return captured stdout."""
         self.prepare_for_execution()
-        return self.call({"cmd": "run", "code": code}).get("output", "")
+        return self.call(
+            {"cmd": "run", "code": code, "tool_context": self._tool_context_names()}
+        ).get("output", "")
 
     def start_code(self, code: str) -> tuple[bool, object, bool]:
         """Run code that may await ``rlm_wait``.
@@ -207,7 +218,9 @@ class Runtime(ABC):
         """
         self.prepare_for_execution()
         suspended, payload, errored = parse_response(
-            self.call({"cmd": "run", "code": code})
+            self.call(
+                {"cmd": "run", "code": code, "tool_context": self._tool_context_names()}
+            )
         )
         self.suspended = suspended
         return suspended, payload, errored
@@ -216,7 +229,13 @@ class Runtime(ABC):
         """Resume a suspended block. Same return shape as :meth:`start_code`."""
         self.prepare_for_execution()
         suspended, payload, errored = parse_response(
-            self.call({"cmd": "resume", "value": send_value})
+            self.call(
+                {
+                    "cmd": "resume",
+                    "value": send_value,
+                    "tool_context": self._tool_context_names(),
+                }
+            )
         )
         self.suspended = suspended
         return suspended, payload, errored
@@ -295,6 +314,11 @@ class Runtime(ABC):
         self.proxied[name] = fn
         self.call({"cmd": "inject_proxy", "name": name})
 
+    def inject_launcher(self, name: str) -> None:
+        """Bind a public launcher from already-installed delegate/wait primitives."""
+
+        self.call({"cmd": "inject_launcher", "name": name})
+
     def inject_object_proxy(self, name: str, value: object) -> None:
         """Expose public host object methods through a remote proxy object."""
 
@@ -323,6 +347,30 @@ class Runtime(ABC):
         """Install the REPL-local SHOW_VARS builtin."""
 
         self.call({"cmd": "inject_show_vars"})
+
+    def _tool_context(self) -> ToolContext:
+        visible: dict[str, Callable] = {}
+        hidden: dict[str, Callable] = {}
+        for name, td in self.tools.items():
+            if td.fn is None:
+                continue
+            if td.hidden:
+                hidden[name] = td.fn
+            else:
+                visible[name] = td.fn
+        return ToolContext(tools=visible, hidden_tools=hidden)
+
+    def _tool_context_names(self) -> dict[str, list[str]]:
+        visible = []
+        hidden = []
+        for name, td in self.tools.items():
+            if td.fn is None:
+                continue
+            if td.hidden:
+                hidden.append(name)
+            else:
+                visible.append(name)
+        return {"visible": visible, "hidden": hidden}
 
     def clone(self, workspace: BaseWorkspace | str | Path | None = None) -> Runtime:
         """Fresh runtime with the same tool registrations.
@@ -404,9 +452,10 @@ class Runtime(ABC):
         description: str | None = None,
         *,
         core: bool = False,
+        hidden: bool = False,
     ) -> None:
         """Register a function as a tool — injects it and makes it discoverable."""
-        td = ToolDef.from_fn(fn, description, core=core)
+        td = ToolDef.from_fn(fn, description, core=core, hidden=hidden)
         self.tools[td.name] = td
         self._install_tool(td)
 
@@ -421,6 +470,10 @@ class Runtime(ABC):
             return
         if td.name == "SHOW_VARS":
             self.inject_show_vars()
+            self._installed_tools.add(td.name)
+            return
+        if td.name in _LAUNCHER_TOOLS:
+            self.inject_launcher(td.name)
             self._installed_tools.add(td.name)
             return
         if td.fn is None:
@@ -449,8 +502,11 @@ class Runtime(ABC):
 
         return decorator
 
-    def get_tool_defs(self) -> list[ToolDef]:
-        return list(self.tools.values())
+    def get_tool_defs(self, *, include_hidden: bool = False) -> list[ToolDef]:
+        tools = list(self.tools.values())
+        if include_hidden:
+            return tools
+        return [td for td in tools if not td.hidden]
 
 
 def parse_response(resp: dict) -> tuple[bool, object, bool]:

@@ -8,6 +8,37 @@ each one is called out under **Breaking** below.
 
 ## [Unreleased]
 
+### Added
+
+- **Two-function delegation surface: `launch_subagent` / `launch_subagents`.**
+  Agents now delegate exclusively through two `async` launchers installed in
+  the REPL namespace. `await launch_subagent(query, num_steps=None,
+  context="", *, name="subagent", model="default")` spawns one child and
+  returns its finish string; `await launch_subagents(specs)` spawns many in
+  parallel (each spec a dict with `query` and optional
+  `num_steps`/`context`/`name`/`model`, or a bare query string) and returns a
+  `list[str]` in spec order. Both must be awaited. Sequential pipelines chain
+  `launch_subagent` calls (threading each result into the next `context=`);
+  parallel fanout uses a single `launch_subagents([...])`. The launchers are
+  registered as real core tools and compose over `rlm_delegate` / `rlm_wait`, so
+  they behave identically on local and remote runtimes.
+
+### Breaking
+
+- **`rlm_delegate` / `rlm_wait` are now internal primitives, not the
+  agent-facing API.** The launchers compose over them; agent code, the default
+  prompt, examples, and docs all use `launch_subagent` / `launch_subagents`
+  instead. The AST check (`check_wait_syntax`) now permits `await
+  launch_subagent(...)` / `await launch_subagents(...)` at action-block top
+  level. Update any custom prompts or hand-scripted REPL fixtures.
+- **`OrphanedDelegatesError` removed.** Because spawn and wait are fused inside
+  the launchers, an un-awaited delegate is no longer expressible, so the
+  orphaned-delegate detection, its `ErrorOutput(error="orphaned_delegates")`
+  node, and the remote exception-injection path are gone.
+- **`RLMConfig.async_children` renamed to `eager_children`.** Same semantics
+  (work-conserving child drain once a parent is supervising); update config
+  literals and any persisted `agent.json` fixtures.
+
 ## [0.3.2] — 2026-05-28
 
 ### Added

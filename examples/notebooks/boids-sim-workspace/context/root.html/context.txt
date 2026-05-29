@@ -1,0 +1,35 @@
+
+Goal: A runnable, fast boids simulation in the browser using plain HTML/CSS/JS.
+
+Hard requirements:
+- Main entry: index.html
+- Separate files: index.html, style.css, boids.js
+- No build tools, no external libraries.
+- No ES modules: do NOT use type="module", and do NOT use import/export.
+- Wire scripts with a plain <script src="boids.js"></script> tag.
+- Render hundreds of fast-moving, colorful boids on a 2D canvas, no configuration UI.
+- Canvas id must be "boids".
+- index.html must:
+  - include a <canvas id="boids"></canvas> element,
+  - link style.css via <link rel="stylesheet" href="style.css">,
+  - include the script tag for boids.js at the end of <body> without type="module".
+- boids.js must:
+  - Obtain a 2D context from the canvas, size it to window, and handle resize.
+  - Create 300-500 boids with separation, alignment, and cohesion behaviors.
+  - Use requestAnimationFrame for smooth animation.
+  - Use colorful rendering (e.g., HSL hues) for boids.
+  - Avoid top-level await and any module syntax.
+- style.css should make the canvas fill the viewport with no scrollbars and a dark background.
+
+Return format for each file:
+- First line exactly: PATH: <relative-path>
+- Then the full file content only.
+
+
+
+Create index.html per the shared spec. Keep it minimal:
+- Proper <!doctype html>, <meta charset>, <meta name="viewport">.
+- Title like "Boids".
+- A single <canvas id="boids"></canvas>.
+- <link rel="stylesheet" href="style.css"> in <head>.
+- A single <script src="boids.js"></script> as the last element in <body> (no defer, no module).

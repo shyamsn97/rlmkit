@@ -33,7 +33,7 @@ current step takes 10 seconds and child B's current step takes 2 seconds,
 child B's next step waits until child A's current step finishes.
 
 Set `eager_children=True` when you want a work-conserving drain after a parent
-hits `await rlm_wait(...)`:
+awaits a launcher (`await launch_subagents([...])`):
 
 ```python
 agent = RLMFlow(
@@ -48,8 +48,8 @@ agent = RLMFlow(
 )
 ```
 
-With that flag, children still do not run before the parent reaches
-`await rlm_wait(...)`. Once the parent is supervising, runnable children use
+With that flag, children still do not run before the parent reaches the
+awaited launcher. Once the parent is supervising, runnable children use
 the configured pool's `run_until_idle(...)` behavior:
 
 ```text
@@ -91,6 +91,36 @@ while not graph.finished:
     graph = agent.step(graph)
 ```
 
+## Node Injection
+
+Controllers can append typed nodes to a graph and commit them through the normal
+step loop. This is useful for budget nudges, human feedback, and forced
+finalization:
+
+```python
+from rlmflow import ExecAction, ExecOutput
+
+graph = graph.inject(
+    target="root.worker",
+    node=ExecOutput(
+        output="Injected controller observation: answer now.",
+        content="Injected controller observation: answer now.",
+    ),
+    reason="message budget nearly exhausted",
+)
+graph = agent.step(graph)
+
+graph = graph.inject(
+    target="root.worker",
+    node=ExecAction(code='done("best available answer")'),
+    reason="message budget exhausted",
+)
+graph = agent.step(graph)
+```
+
+See [`injections.md`](injections.md) for the concise guide and
+[`examples/injections.py`](../examples/injections.py) for a runnable offline demo.
+
 ## Branch workspaces
 
 Use `Workspace.fork(...)` when a branch needs isolated files, session,
@@ -114,7 +144,7 @@ The engine reads from `graph.states`, appends new states through the
 session, and produces a fresh snapshot on every `step`. There is no
 in-memory node graph to keep in sync with disk.
 
-For the runtime contract around `await rlm_wait(...)` and `ResumeAction`,
+For the runtime contract around awaited launchers and `ResumeAction`,
 the full REPL/await protocol, persistence layout, and engine
 extension surface, see [`internals.md`](internals.md).
 
@@ -216,20 +246,34 @@ full    = CONTEXT.read()        # full payload for handoff to a child
 
 ## Delegation
 
-Children are spawned with keyword-only arguments and a mandatory `context`:
+Agents delegate through two launchers (both must be awaited):
 
 ```python
-rlm_delegate(*, name, query, context, model=None)
+# One child — returns its finish string.
+answer = await launch_subagent(query, num_steps=None, context="", *, name="subagent", model="default")
+
+# Many children in parallel — returns finish strings in spec order.
+results = await launch_subagents([
+    {"name": "a", "query": "...", "context": chunk_a},
+    {"name": "b", "query": "...", "context": chunk_b},
+])
 ```
 
+- **Sequential** dependent steps: chain `await launch_subagent(...)` calls,
+  feeding each result into the next child's `context`.
+- **Parallel** independent work: pass every spec to `launch_subagents([...])`
+  in one call so the engine schedules them on its pool concurrently.
 - Pass `context=""` when the child works from the query alone (the most common
   case for code-only tasks).
 - Pass a `CONTEXT.lines(...)` / `CONTEXT.read(...)` slice when each
   child reasons over a different chunk of the parent's payload
-  (chunk-and-aggregate). `rlm_delegate` accepts the `list[str]` returned
-  by `CONTEXT.lines(...)` and stores it as newline-separated child context.
+  (chunk-and-aggregate). A `list[str]` from `CONTEXT.lines(...)` is stored as
+  newline-separated child context.
 - Pass `CONTEXT.read()` only when the child genuinely needs the
   parent's full view (reviewers, auditors, deterministic retry).
+
+(`rlm_delegate` / `rlm_wait` are the internal primitives the launchers compose
+over — agents never call them directly.)
 
 The default prompt biases toward a supervisor workflow for large context,
 parallel reasoning, and split artifacts. Inline work is still fine for small,

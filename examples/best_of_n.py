@@ -33,9 +33,8 @@ QUERY = (
 ROOT_REPLY = (
     "```repl\n"
     f"fruits = {[name for name, _ in FRUITS]!r}\n"
-    "handles = [rlm_delegate(name=f'classify_{name}', "
-    "query=f\"Classify {name} as 'citrus' or 'not_citrus'.\", context='') for name in fruits]\n"
-    "results = yield rlm_wait(*handles)\n"
+    "results = await launch_subagents([{'name': f'classify_{name}', "
+    "'query': f\"Classify {name} as 'citrus' or 'not_citrus'.\"} for name in fruits])\n"
     "done(', '.join(f'{name}={r}' for name, r in zip(fruits, results)))\n"
     "```"
 )

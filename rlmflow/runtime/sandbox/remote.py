@@ -24,7 +24,11 @@ from rlmflow.tools import get_tool_metadata
 from rlmflow.workspace import BaseWorkspace, ContextVariable, SessionVariable
 
 _REPL_ENTRYPOINT = "from rlmflow.runtime.repl import main; main()"
+# ``launch_subagent`` / ``launch_subagents`` are sandbox-local closures built
+# from the proxied primitives below; proxying async launchers themselves would
+# return host coroutine objects over JSON.
 _CONTROL_PROXY_TOOLS = {"done", "rlm_delegate", "rlm_wait"}
+_LAUNCHER_TOOLS = {"launch_subagent", "launch_subagents"}
 
 
 class RemoteFileRuntime(Runtime):
@@ -263,11 +267,6 @@ class RemoteFileRuntime(Runtime):
         if isinstance(value, SessionVariable):
             self.inject_remote_session(name, value)
             return
-        if getattr(value, "__name__", None) == "OrphanedDelegatesError":
-            self.inject_code(
-                "from rlmflow.utils import OrphanedDelegatesError as " f"{name}\n"
-            )
-            return
         super().inject(name, value)
 
     def register_tool(
@@ -276,10 +275,11 @@ class RemoteFileRuntime(Runtime):
         description: str | None = None,
         *,
         core: bool = False,
+        hidden: bool = False,
     ) -> None:
         """Register a remote tool without starting the sandbox immediately."""
 
-        td = ToolDef.from_fn(fn, description, core=core)
+        td = ToolDef.from_fn(fn, description, core=core, hidden=hidden)
         self.tools[td.name] = td
 
     def _install_tool(self, td: ToolDef) -> None:
@@ -289,8 +289,8 @@ class RemoteFileRuntime(Runtime):
             self.inject_show_vars()
             self._installed_tools.add(td.name)
             return
-        if td.name == "llm_query_batched":
-            self.inject_builtin_tool(td.name)
+        if td.name in _LAUNCHER_TOOLS:
+            self.inject_launcher(td.name)
             self._installed_tools.add(td.name)
             return
         if (
@@ -327,9 +327,6 @@ class RemoteFileRuntime(Runtime):
             f"node_id={value.node_id!r}, "
             f"branch_id={value.branch_id!r})\n"
         )
-
-    def inject_builtin_tool(self, name: str) -> None:
-        self.inject_code(f"from rlmflow.tools.builtins import {name}\n")
 
     def _inject_importable_tool(self, name: str, fn: Callable[..., object]) -> bool:
         module = getattr(fn, "__module__", "")

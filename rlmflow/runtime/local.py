@@ -45,6 +45,9 @@ class LocalRuntime(Runtime):
     def inject_show_vars(self) -> None:
         self.repl.namespace["SHOW_VARS"] = self.repl._show_vars
 
+    def inject_launcher(self, name: str) -> None:
+        self.repl._inject_launcher(name)
+
     def read(self, name: str) -> object:
         # In-process: dict lookup, skip the JSON round-trip.
         return self.repl.namespace.get(name)

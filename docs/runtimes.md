@@ -74,7 +74,7 @@ Each provider runtime lives under `rlmflow.runtime.sandbox` and keeps the
 same base `Runtime` protocol. Modal, E2B, and Daytona use
 `RemoteFileRuntime`, a public base class that keeps one remote REPL process
 alive and exchanges JSON messages through remote files. That keeps REPL
-variables and suspended `await rlm_wait(...)` state across turns even when
+variables and suspended launcher state across turns even when
 the provider exposes command execution as one-shot calls.
 
 ```python

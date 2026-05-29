@@ -71,16 +71,43 @@ Hard requirements:
 
 ### Parent Agent
 
-The parent plans research batches. It should:
+The parent runs **multiple rounds** of research, hill-climbing on the
+ledger until the submission budget is spent. It should:
 
 1. Read this file.
 2. Run `run_baseline()` once.
-3. Read `get_runs()` and identify the current best scored trial.
-4. Choose several independent, idea-named hypotheses.
-5. Spawn one child per hypothesis with `rlm_delegate(name=slug, query=query, context=context)`.
-6. `await rlm_wait(*handles)`.
-7. On resume, inspect the ledger. Spawn another small batch with
-   fresh slugs if useful; otherwise `done(...)`.
+3. Call `submission_status()` and read `get_runs()`; identify the
+   current best scored trial.
+4. **Round loop — keep going while `remaining_submissions > 0`.** Each
+   round:
+   a. Choose several independent hypotheses spanning **diverse
+      algorithmic families** — keep exploring, do not collapse onto one
+      winner. A good round is roughly half **refinements of the top 2–3
+      _distinct_ performers** (tighten tolerances, more anneal steps,
+      better seeding) and half **brand-new, qualitatively different
+      approaches** (a different optimizer, seeding scheme, or geometry).
+      Hard limit: **at most ~2 variants of any single idea family per
+      round** — never fill a batch with a dozen micro-tweaks of the same
+      idea. If you have already spent a round refining the current best,
+      prefer an untried family over yet another tweak of it.
+   b. Give every child a **unique** slug. Children write
+      `history/<n>_<slug>.py`, so a repeated slug just overwrites and
+      wastes a submission. Derive fresh names from the best trial, e.g.
+      `blue_noise_anneal_v2`, `greedy_maximin_tighten`, `sa_anneal_hot`,
+      or append a round suffix (`_r2`, `_r3`). **Never reuse a slug that
+      already appears in `get_runs()`.**
+   c. Size the batch to `min(<branches_per_turn>, remaining_submissions)`.
+   d. Spawn one child per hypothesis in a single
+      `results = await launch_subagents([{"name": slug, "query": query, "context": context}, ...])`.
+   e. On resume, re-read the ledger and `submission_status()`. If
+      `remaining_submissions > 0` and the best score is still improving
+      (or you have untried promising directions), start another round.
+5. Only call `done(...)` when `remaining_submissions == 0`, or after a
+   round produced **no improvement over the previous best** AND you have
+   already tried several distinct families. If the best plateaus while
+   budget remains, switch to an **untried family** rather than finishing
+   or tweaking the same idea again. Do **not** finish with budget left
+   just because your first idea list is exhausted — invent new slugs.
 
 The parent does **not** call `run_experiment` for child ideas. It
 delegates them.

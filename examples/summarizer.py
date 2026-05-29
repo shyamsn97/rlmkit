@@ -1,10 +1,10 @@
 """Recursive map-reduce summarization over a long document.
 
 The canonical RLM pattern: a document too long to summarize well in one shot
-is placed in `CONTEXT`, and the root agent splits it into chunks, delegates a
-summary of each chunk to a cheap `fast` child (the *map* step), waits on all of
-them with `await rlm_wait(...)`, then synthesizes the child summaries into one
-final summary (the *reduce* step).
+is placed in `CONTEXT`, and the root agent splits it into chunks, launches a
+summary of each chunk on a cheap `fast` child in parallel with
+`await launch_subagents([...])` (the *map* step), then synthesizes the child
+summaries into one final summary (the *reduce* step).
 
 Usage:
     python examples/summarizer.py
@@ -83,13 +83,18 @@ map-reduce strategy instead of reading it all at once:
 
 1. Use CONTEXT.line_count() and CONTEXT.lines(start, end) to split the
    document into a handful of contiguous chunks (aim for ~4-8 chunks).
-2. For each chunk, delegate a summary to a child using the "fast" model:
-   rlm_delegate(name="chunk-<i>", query="Summarize this passage in 3-4
-   sentences, preserving any concrete facts, dates, and decisions.",
-   context=<the chunk text>, model="fast").
-3. await rlm_wait(...) on all the child handles at once so they run in
-   parallel.
-4. Combine the child summaries into a single coherent summary of the whole
+2. Summarize all chunks in parallel with one call, using the "fast" model:
+   summaries = await launch_subagents([
+       {"name": f"chunk-{i}",
+        "query": "Summarize this passage in 3-4 sentences, preserving any "
+                 "concrete facts, dates, and decisions.",
+        "context": chunk_text,
+        "model": "fast"}
+       for i, chunk_text in enumerate(chunks)
+   ])
+   launch_subagents runs the children concurrently and returns their summaries
+   in order.
+3. Combine the child summaries into a single coherent summary of the whole
    document (a short intro paragraph plus bullet points), then call
    done(final_summary).
 """

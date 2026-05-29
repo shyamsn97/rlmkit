@@ -39,6 +39,19 @@ def get_tool_metadata(fn: Any) -> ToolMetadata | None:
     return getattr(target, "_tool_meta", None)
 
 
+from rlmflow.tools.context import (  # noqa: E402
+    ToolContext,
+    current_tool_context,
+    get_repl_tools,
+)
 from rlmflow.tools.filesystem import FILE_TOOLS  # noqa: E402
 
-__all__ = ["FILE_TOOLS", "ToolMetadata", "get_tool_metadata", "tool"]
+__all__ = [
+    "FILE_TOOLS",
+    "ToolContext",
+    "ToolMetadata",
+    "current_tool_context",
+    "get_repl_tools",
+    "get_tool_metadata",
+    "tool",
+]

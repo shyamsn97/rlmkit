@@ -5,11 +5,6 @@ from __future__ import annotations
 import ast
 import re
 
-
-class OrphanedDelegatesError(RuntimeError):
-    """Raised when rlm_delegate() is called without a matching await rlm_wait()."""
-
-
 _REPL_OPEN_RE = re.compile(r"```repl[ \t]*\n")
 _REPL_CLOSE_RE = re.compile(r"\n?```[ \t]*(?:\n|$)")
 
@@ -57,7 +52,7 @@ def replace_code_block(text: str, new_code: str) -> str:
 
 
 def check_wait_syntax(code: str) -> str | None:
-    """Return an error string for unsupported ``rlm_wait`` / ``await`` syntax."""
+    """Return an error string for unsupported ``await`` syntax."""
     try:
         tree = ast.parse(code)
     except SyntaxError:
@@ -68,11 +63,17 @@ def check_wait_syntax(code: str) -> str | None:
     return "ERROR: " + "; ".join(checker.errors) if checker.errors else None
 
 
-def _is_rlm_wait_call(node: ast.AST | None) -> bool:
+# The only calls an agent may ``await`` at action-block top level. The
+# launchers are the public surface; ``rlm_wait`` is the internal primitive they
+# compose over (kept awaitable for the engine's own replay path).
+_AWAITABLE_CALLS = {"launch_subagent", "launch_subagents", "rlm_wait"}
+
+
+def _is_awaitable_call(node: ast.AST | None) -> bool:
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "rlm_wait"
+        and node.func.id in _AWAITABLE_CALLS
     )
 
 
@@ -93,21 +94,29 @@ class _WaitSyntaxChecker(ast.NodeVisitor):
         self.errors.append(prefix + message)
 
     def visit_Await(self, node: ast.Await) -> None:  # noqa: N802
-        if not _is_rlm_wait_call(node.value):
-            self._add(node, "only `await rlm_wait(...)` is supported")
+        if not _is_awaitable_call(node.value):
+            self._add(
+                node,
+                "only `await launch_subagent(...)` / `await launch_subagents(...)` "
+                "is supported",
+            )
         self.await_depth += 1
         self.generic_visit(node)
         self.await_depth -= 1
 
     def visit_Yield(self, node: ast.Yield) -> None:  # noqa: N802
-        self._add(node, "use `await rlm_wait(...)`; top-level `yield` is not supported")
+        self._add(
+            node,
+            "use `await launch_subagent(...)`; top-level `yield` is not supported",
+        )
 
     def visit_YieldFrom(self, node: ast.YieldFrom) -> None:  # noqa: N802
         self._add(node, "top-level `yield from` is not supported")
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
-        if _is_rlm_wait_call(node) and self.await_depth == 0:
-            self._add(node, "`rlm_wait(...)` must be awaited: `await rlm_wait(...)`")
+        if _is_awaitable_call(node) and self.await_depth == 0:
+            name = node.func.id  # type: ignore[union-attr]
+            self._add(node, f"`{name}(...)` must be awaited: `await {name}(...)`")
         self.generic_visit(node)
 
     def visit_ListComp(self, node: ast.ListComp) -> None:  # noqa: N802
@@ -124,9 +133,10 @@ class _WaitSyntaxChecker(ast.NodeVisitor):
 
     def _check_comprehension(self, node: ast.AST) -> None:
         for child in ast.walk(node):
-            if isinstance(child, ast.Await) or _is_rlm_wait_call(child):
+            if isinstance(child, ast.Await) or _is_awaitable_call(child):
                 self._add(
-                    node, "`await rlm_wait(...)` is not supported in comprehensions"
+                    node,
+                    "`await launch_subagent(...)` is not supported in comprehensions",
                 )
                 return
 
@@ -144,8 +154,10 @@ class _WaitSyntaxChecker(ast.NodeVisitor):
 
     def _check_nested(self, node: ast.AST) -> None:
         for child in ast.walk(node):
-            if isinstance(child, ast.Await) or _is_rlm_wait_call(child):
+            if isinstance(child, ast.Await) or _is_awaitable_call(child):
                 self._add(
-                    node, "`rlm_wait(...)` is only supported at action-block top level"
+                    node,
+                    "`launch_subagent(...)` is only supported at action-block "
+                    "top level",
                 )
                 return

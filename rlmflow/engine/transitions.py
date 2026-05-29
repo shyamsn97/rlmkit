@@ -26,7 +26,7 @@ from rlmflow.graph import (
     ResumeAction,
     SupervisingOutput,
 )
-from rlmflow.prompts.messages import NO_CODE_BLOCK, ORPHANED_DELEGATES
+from rlmflow.prompts.messages import NO_CODE_BLOCK
 from rlmflow.utils import check_wait_syntax
 
 
@@ -141,27 +141,7 @@ def run_exec(
         return
     raw = truncate_output(raw, engine.config.max_output_length)
     env = runtime.env
-    delegated = list(env.get("DELEGATED") or [])
     done_result = env.get("DONE_RESULT")
-
-    if delegated and not suspended and done_result is None:
-        msg = ORPHANED_DELEGATES.format(names=", ".join(delegated))
-        base = raw if isinstance(raw, str) else ""
-        output = truncate_output(
-            runtime.execute(f"raise OrphanedDelegatesError({msg!r})"),
-            engine.config.max_output_length,
-        )
-        content = (base + "\n\n" + output).strip()
-        append_node(
-            engine.session,
-            graph,
-            ErrorOutput(
-                content=engine.format_exec_output(content),
-                error="orphaned_delegates",
-                output=content,
-            ),
-        )
-        return
 
     if done_result is not None:
         output = raw if isinstance(raw, str) else ""

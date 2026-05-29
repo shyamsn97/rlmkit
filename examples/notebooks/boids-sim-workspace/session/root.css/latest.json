@@ -1,0 +1,8 @@
+{
+  "agent_id": "root.css",
+  "latest_node_id": "n_02f4982ad83b",
+  "seq": 8,
+  "type": "done_output",
+  "terminal": true,
+  "result": "PATH: style.css\n/* Full-viewport canvas on a dark background; no scrollbars */\n\n*,\n*::before,\n*::after {\n  box-sizing: border-box;\n}\n\nhtml, body {\n  margin: 0;\n  padding: 0;\n  height: 100%;\n  background: #0b0f14; /* dark background */\n  overflow: hidden;     /* prevent scrollbars */\n}\n\n#boids {\n  display: block;\n  width: 100vw;\n  height: 100vh;        /* fill the viewport */\n}"
+}

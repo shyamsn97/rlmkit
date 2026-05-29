@@ -47,35 +47,35 @@ whole run as one recursive type:
     `SupervisingOutput`, `ErrorOutput`, `DoneOutput`.
   - Actions: `LLMAction`, `ExecAction`, `ResumeAction`.
 
-For example, an agent that delegates two children and combines their
-results writes one REPL block like this:
+The agent has exactly two delegation calls. `await launch_subagent(query, ...)`
+runs one child and returns its answer; `await launch_subagents([...])` runs many
+in parallel and returns their answers in order. An agent that delegates two
+children and combines their results writes one REPL block like this:
 
 ```python
-h1 = rlm_delegate(name="search", query="Find evidence", context=chunk_a)
-h2 = rlm_delegate(name="verify", query="Check the answer", context=chunk_b)
-results = await rlm_wait(h1, h2)   # ← supervision point: suspend here
+results = await launch_subagents([
+    {"name": "search", "query": "Find evidence", "context": chunk_a},
+    {"name": "verify", "query": "Check the answer", "context": chunk_b},
+])
 done(combine(results))
 ```
 
-`await rlm_wait(...)` is the supervision point. The REPL supports
-top-level await and the engine drives the resulting coroutine, roughly:
+The `await` is the supervision point: it suspends the parent at a single
+`WaitRequest`, the engine runs the children on its pool, then resumes the
+parent with their results. The REPL supports top-level await and the engine
+drives the resulting coroutine, roughly:
 
 ```python
 out = coro.send(None)              # run until the await
-# out is a WaitRequest([h1, h2]) -> suspend the parent, run children
+# out is a WaitRequest([search, verify]) -> suspend the parent, run children
 results = [c.result() for c in children]
 coro.send(results)                 # resume; `results` is now the list
 ```
 
-The REPL is stateful across blocks, so the next LLM turn can still
-see `h1`, `h2`, `results`. Use `await rlm_wait(...)` to supervise
-children; bare `rlm_wait(...)` and top-level `yield` are errors.
-
-```python
-await rlm_wait(h)    # suspend, then resume with children's results
-rlm_wait(h)          # error: forgot await
-yield 42             # error: top-level yield is not part of the REPL protocol
-```
+The REPL is stateful across blocks, so the next LLM turn can still see
+`results`. The launchers must be awaited; a bare call or a top-level `yield`
+are errors. (`rlm_delegate` / `rlm_wait` are the internal primitives the
+launchers compose over — agents never call them directly.)
 
 See [`docs/internals.md`](docs/internals.md) for the full protocol.
 
@@ -84,7 +84,7 @@ per step):
 
 ```text
 UserQuery(root)
-  -> LLMAction -> LLMOutput(code="rlm_delegate(search) + rlm_delegate(verify); rlm_wait(...)")
+  -> LLMAction -> LLMOutput(code="await launch_subagents([search, verify])")
   -> ExecAction -> SupervisingOutput(waiting_on=[root.search, root.verify])
       -> UserQuery(root.search)  -> ... -> DoneOutput(root.search)
       -> UserQuery(root.verify)  -> ... -> DoneOutput(root.verify)
@@ -158,8 +158,9 @@ print(graph.result())
 open_viewer(workspace)
 ```
 
-To let child agents drain work-conservingly after a parent reaches
-`await rlm_wait(...)`, enable `eager_children`:
+To let child agents drain work-conservingly after a parent reaches its
+delegation wait (`await launch_subagent(...)` / `await launch_subagents(...)`),
+enable `eager_children`:
 
 ```python
 agent = RLMFlow(
@@ -232,7 +233,7 @@ Every transition follows the same obs → action → obs shape:
 LLMOutput  -> ExecAction -> ExecOutput          (REPL output, normal continuation)
                          -> DoneOutput          (code called done())
                          -> ErrorOutput         (code raised / no code block)
-                         -> SupervisingOutput   (awaited rlm_wait — waiting on children)
+                         -> SupervisingOutput   (awaited a launcher — waiting on children)
 SupervisingOutput -> ResumeAction -> ExecOutput / Done / Error / Supervising
                                                 (children settled — supervisor unpaused)
 ExecOutput -> LLMAction -> LLMOutput            (back to the LLM for the next turn)
@@ -255,6 +256,38 @@ graph.nodes.where(type="llm_output", agent_id="root")  # kwargs match Node attrs
 graph.nodes.where(lambda n: n.type == "exec_output")    # or pass a predicate
 graph.to_dict()                               # full JSON-serializable payload
 ```
+
+## Inject controller events
+
+Because `Graph` is the control surface, external controllers can append typed
+events and commit them through the normal step loop. This is useful for human
+feedback, budget nudges, and forced finalization without losing traceability:
+
+```python
+from rlmflow import ExecAction, ExecOutput
+
+graph = graph.inject(
+    target="root.scanner_api",
+    node=ExecOutput(
+        output="Injected controller observation: answer with current evidence.",
+        content="Injected controller observation: answer with current evidence.",
+    ),
+    reason="message budget nearly exhausted",
+)
+graph = agent.step(graph)  # persists the observation, then continues
+
+graph = graph.inject(
+    target="root.scanner_api",
+    node=ExecAction(code='done("best available answer")'),
+    reason="message budget exhausted",
+)
+graph = agent.step(graph)  # executes the action and writes DoneOutput
+```
+
+Injected nodes are marked in the graph (`node.injected`,
+`node.injected_reason`) and persisted like normal states. See
+[`docs/injections.md`](docs/injections.md) and
+[`examples/injections.py`](examples/injections.py).
 
 ## Workspace, Branch, Replay
 
@@ -579,7 +612,7 @@ All examples share flags like `--no-viz`, `--docker-image rlmflow:local`,
 | [`coding-agent/agent.py`](examples/coding-agent/agent.py) | Interactive coding agent that writes and edits files. |
 | [`needle_haystack.py`](examples/needle_haystack.py) | Needle-in-a-haystack over a massive in-memory `CONTEXT`, using parallel child chunks. |
 | [`needle_haystack_filesystem.py`](examples/needle_haystack_filesystem.py) | Needle-in-a-haystack across many files with custom tools and `runtime_factory`. |
-| [`summarizer.py`](examples/summarizer.py) | Recursive map-reduce summarization over a long document — `rlm_delegate` fan-out + stateful combine. |
+| [`summarizer.py`](examples/summarizer.py) | Recursive map-reduce summarization over a long document — `launch_subagents` fan-out + stateful combine. |
 | [`eager_children.py`](examples/eager_children.py) | `eager_children=True` vs `False` — how child scheduling overlaps. |
 | [`fork_repair.py`](examples/fork_repair.py) | Fork a workspace into independent repair branches and run tests in each. |
 | [`best_of_n.py`](examples/best_of_n.py) | Run N independent workspace branches and pick the best result. |
@@ -655,8 +688,10 @@ in [`docs/internals.md`](docs/internals.md).
 - [Positioning](docs/positioning.md): when to use rlmflow vs
   rlm-minimal, ypi, LangGraph, CrewAI, AutoGen, SWE-agent, Aider.
 - [Control](docs/control.md): step loop, workspace resume, rewind,
-  forks, `CONTEXT.read()` / slices, `rlm_delegate(*, name, query, context)`,
+  forks, `CONTEXT.read()` / slices, `launch_subagent` / `launch_subagents`,
   inline-first strategy, custom tools.
+- [Node injection](docs/injections.md): append typed controller events to a
+  running graph and commit them through `agent.step(graph)`.
 - [Observability](docs/observability.md): querying the `Graph`,
   workspace layout, export helpers, live tree, gantt, topology
   exports, Gradio viewer, CLI.

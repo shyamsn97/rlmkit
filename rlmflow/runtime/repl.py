@@ -9,6 +9,7 @@ Reads JSON commands from stdin, writes JSON responses to stdout.
 Commands:
   - ``{"cmd": "inject",              "name": N, "value": expr}``       bind ``N = eval(expr)``
   - ``{"cmd": "inject_proxy",        "name": N}``                      bind ``N`` as proxy fn
+  - ``{"cmd": "inject_launcher",     "name": N}``                      bind launcher from proxy primitives
   - ``{"cmd": "inject_object_proxy", "name": N, "methods": [...]}``    bind ``N`` with each method as a proxy fn
   - ``{"cmd": "read",                "name": N}``                      returns ``{"value": namespace.get(N)}``
   - ``{"cmd": "run",                 "code": src}``                    exec; may suspend
@@ -38,11 +39,13 @@ from typing import Any, TextIO
 
 from rlmflow.graph import ChildHandle, WaitRequest
 from rlmflow.tools.builtins import DoneSignal
+from rlmflow.tools.context import ToolContext, reset_tool_context, set_tool_context
 from rlmflow.utils.code import check_wait_syntax
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _THIS_FILE = os.path.normpath(__file__)
 _REPL_ID_COUNTER = itertools.count(1)
+_HIDDEN_REPL_NAMES = {"rlm_delegate", "rlm_wait"}
 
 
 def strip_ansi(s: str) -> str:
@@ -165,6 +168,8 @@ class REPL:
         self.coro = None
         self.buf: io.StringIO | None = None
         self.errored: bool = False
+        self._visible_tool_names: set[str] | None = None
+        self._hidden_tool_names: set[str] | None = None
         self._repl_id = next(_REPL_ID_COUNTER)
         self._src_counter = 0
         if not isinstance(sys.stdout, _StdoutProxy):
@@ -176,8 +181,38 @@ class REPL:
         return {
             name: type(value).__name__
             for name, value in sorted(self.namespace.items())
-            if not name.startswith("_") and name != "SHOW_VARS"
+            if not name.startswith("_")
+            and name not in _HIDDEN_REPL_NAMES
+            and name != "SHOW_VARS"
         }
+
+    def _tool_context(self) -> ToolContext:
+        if self._visible_tool_names is not None or self._hidden_tool_names is not None:
+            visible_names = self._visible_tool_names or set()
+            hidden_names = self._hidden_tool_names or set()
+            return ToolContext(
+                tools={
+                    name: self.namespace[name]
+                    for name in visible_names
+                    if callable(self.namespace.get(name))
+                },
+                hidden_tools={
+                    name: self.namespace[name]
+                    for name in hidden_names
+                    if callable(self.namespace.get(name))
+                },
+            )
+
+        visible = {}
+        hidden = {}
+        for name, value in self.namespace.items():
+            if name.startswith("_") or name == "SHOW_VARS" or not callable(value):
+                continue
+            if name in _HIDDEN_REPL_NAMES:
+                hidden[name] = value
+            else:
+                visible[name] = value
+        return ToolContext(tools=visible, hidden_tools=hidden)
 
     # ── code execution ────────────────────────────────────────────────
 
@@ -202,6 +237,7 @@ class REPL:
           swallow ``GeneratorExit`` etc., which we want to bubble.
         """
         _capture.buf = self.buf
+        token = set_tool_context(self._tool_context())
         try:
             yield
         except DoneSignal:
@@ -213,6 +249,7 @@ class REPL:
             self.buf.write("\n" + _format_repl_traceback(exc))
             self.errored = True
         finally:
+            reset_tool_context(token)
             _capture.buf = None
 
     def _source_filename(self, code: str) -> str:
@@ -336,6 +373,10 @@ class REPL:
     def handle(self, msg: dict) -> dict:
         """Process a single command and return the response dict."""
         cmd = msg["cmd"]
+        tool_context = msg.get("tool_context")
+        if tool_context is not None:
+            self._visible_tool_names = set(tool_context.get("visible", []))
+            self._hidden_tool_names = set(tool_context.get("hidden", []))
         if cmd == "run":
             return self.format_result(*self.start(msg["code"]))
         if cmd == "resume":
@@ -346,6 +387,8 @@ class REPL:
             self.namespace[msg["name"]] = eval(msg["value"], self.namespace)
         elif cmd == "inject_proxy":
             self.namespace[msg["name"]] = self.make_proxy(msg["name"])
+        elif cmd == "inject_launcher":
+            self._inject_launcher(msg["name"])
         elif cmd == "inject_show_vars":
             self.namespace["SHOW_VARS"] = self._show_vars
         elif cmd == "inject_object_proxy":
@@ -366,6 +409,19 @@ class REPL:
         else:
             return {"error": f"unknown command: {cmd}"}
         return {"ok": True}
+
+    def _inject_launcher(self, name: str) -> None:
+        from rlmflow.tools.builtins import make_launch_subagent, make_launch_subagents
+
+        delegate = self.namespace["rlm_delegate"]
+        wait = self.namespace["rlm_wait"]
+        if name == "launch_subagent":
+            self.namespace[name] = make_launch_subagent(delegate, wait)
+            return
+        if name == "launch_subagents":
+            self.namespace[name] = make_launch_subagents(delegate, wait)
+            return
+        raise KeyError(f"unknown launcher: {name}")
 
     def serve(self) -> None:
         """Read JSON commands from stdin until EOF."""

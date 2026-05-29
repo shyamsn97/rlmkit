@@ -54,9 +54,10 @@ class TimelineLLM(LLMClient):
 
         return (
             "```repl\n"
-            'a = rlm_delegate(name="childa", query="Child A slow task", context="")\n'
-            'b = rlm_delegate(name="childb", query="Child B two-step task", context="")\n'
-            "results = await rlm_wait(a, b)\n"
+            "results = await launch_subagents([\n"
+            '    {"name": "childa", "query": "Child A slow task"},\n'
+            '    {"name": "childb", "query": "Child B two-step task"},\n'
+            "])\n"
             'done(" | ".join(results))\n'
             "```"
         )

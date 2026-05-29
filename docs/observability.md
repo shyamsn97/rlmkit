@@ -46,7 +46,7 @@ under four base classes (full spec:
 | `llm_output`          | `LLMOutput`          | `ObservationNode`      | reply, extracted REPL code, token deltas                          |
 | `exec_action`         | `ExecAction`         | `ActionNode`           | "ran fresh code" — optional code echo                             |
 | `exec_output`         | `ExecOutput`         | `CodeObservation` (obs)| runtime stdout/stderr                                             |
-| `supervising_output`  | `SupervisingOutput`  | `CodeObservation` (obs)| code suspended at `await rlm_wait`; `waiting_on` lists pending children |
+| `supervising_output`  | `SupervisingOutput`  | `CodeObservation` (obs)| code suspended at an awaited launcher; `waiting_on` lists pending children |
 | `error_output`        | `ErrorOutput`        | `CodeObservation` (obs)| failure observation                                               |
 | `done_output`         | `DoneOutput`         | `CodeObservation` (obs)| terminal answer from `done(...)`                                  |
 | `resume_action`       | `ResumeAction`       | `ActionNode`           | "supervisor resumed paused code" — produces a `CodeObservation`   |

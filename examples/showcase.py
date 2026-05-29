@@ -44,9 +44,10 @@ class DemoLLM(LLMClient):
         if "hello.py" in prompt and "goodbye.py" in prompt:
             return (
                 "```repl\n"
-                'h1 = rlm_delegate(name="hello", query="Create hello.py", context="")\n'
-                'h2 = rlm_delegate(name="goodbye", query="Create goodbye.py", context="")\n'
-                "results = await rlm_wait(h1, h2)\n"
+                "results = await launch_subagents([\n"
+                '    {"name": "hello", "query": "Create hello.py"},\n'
+                '    {"name": "goodbye", "query": "Create goodbye.py"},\n'
+                "])\n"
                 'done("\\n".join(results))\n'
                 "```"
             )

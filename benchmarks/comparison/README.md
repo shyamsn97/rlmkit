@@ -61,8 +61,9 @@ task, model, depth, and iteration budget aligned, then measures:
 - latency;
 - token usage when exposed by the implementation;
 - number of agents/subcalls used;
-- RLM method-call frequency (`rlmflow`: `rlm_delegate`, `llm_query_batched`;
-  upstream `rlm`: `rlm_query`, `llm_query_batched`, `llm_query`).
+- RLM method-call frequency (`rlmflow`: `launch_subagent` / `launch_subagents`,
+  `llm_query_batched`; upstream `rlm`: `rlm_query`, `llm_query_batched`,
+  `llm_query`).
 
 The frameworks still differ in their prompt text, runtime implementation,
 logging shape, and available inspection APIs. Treat misses and tree/subcall

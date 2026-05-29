@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from rlmflow.engine import scheduling
 from rlmflow import (
+    ExecAction,
+    ExecOutput,
     Graph,
     LLMClient,
     LLMUsage,
@@ -112,6 +114,71 @@ def test_step_drives_one_shot_to_result():
     assert is_done(graph.current())
     assert graph.result() == "ok"
     assert _types(graph) == ["user_query", "llm_action", "llm_output", "exec_action", "done_output"]
+
+
+def test_graph_inject_returns_new_graph_with_appended_node():
+    graph = _agent().start("say ok")
+
+    injected = graph.inject(
+        target="root",
+        node=ExecOutput(output="controller note", content="controller note"),
+        reason="test",
+    )
+
+    assert injected is not graph
+    assert _types(graph) == ["user_query"]
+    assert _types(injected) == ["user_query", "exec_output"]
+    assert injected.current().agent_id == "root"
+    assert injected.current().seq == 1
+    assert injected.current().injected is True
+    assert injected.current().injected_reason == "test"
+
+
+def test_graph_inject_rejects_multiple_pending_actions():
+    graph = _agent().start("say ok").inject(
+        target="root",
+        node=ExecAction(code="print('first')"),
+    )
+
+    try:
+        graph.inject(target="root", node=ExecAction(code="print('second')"))
+    except ValueError as exc:
+        assert "multiple pending actions" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected pending-action injection to fail")
+
+
+def test_step_materializes_injected_exec_action():
+    agent = _agent("```repl\nraise AssertionError('llm should not run')\n```")
+    graph = agent.start("say ok")
+    graph = graph.inject(target="root", node=ExecAction(code='done("injected ok")'))
+
+    graph = agent.step(graph)
+
+    assert is_done(graph.current())
+    assert graph.result() == "injected ok"
+    assert _types(graph) == ["user_query", "exec_action", "done_output"]
+    assert graph.states[1].injected is True
+
+
+def test_injected_observations_are_coalesced_in_messages():
+    agent = _agent()
+    graph = agent.start("say ok")
+    graph = graph.inject(
+        target="root",
+        node=ExecOutput(output="first injected", content="first injected"),
+    ).inject(
+        target="root",
+        node=ExecOutput(output="second injected", content="second injected"),
+    )
+
+    messages = agent.build_messages(graph)
+    user_messages = [m for m in messages if m["role"] == "user"]
+
+    assert len(user_messages) == 1
+    assert "say ok" in user_messages[0]["content"]
+    assert "first injected" in user_messages[0]["content"]
+    assert "second injected" in user_messages[0]["content"]
 
 
 def test_runtime_exception_after_exec_action_records_error():
@@ -366,6 +433,26 @@ def test_done_output_captures_stdout_from_same_block():
     assert terminal.result == "ok"
     assert "hello world" in terminal.output
     assert "hello world" in terminal.content
+
+
+def test_done_is_not_swallowed_by_broad_exception_handler():
+    """`done(...)` is control flow, not a normal agent-code exception."""
+    reply = (
+        "```repl\n"
+        "try:\n"
+        "    done('ok')\n"
+        "except Exception:\n"
+        "    print('swallowed')\n"
+        "    done('bad')\n"
+        "```"
+    )
+    agent = _agent(reply, max_iterations=3)
+    g = _run(agent, agent.start("say ok"))
+
+    terminal = g.current()
+    assert is_done(terminal)
+    assert terminal.result == "ok"
+    assert "swallowed" not in terminal.output
 
 
 def test_build_messages_never_emits_consecutive_user_turns():
@@ -988,26 +1075,49 @@ def test_each_step_advances_runnable_agents_once():
 # ── edge cases ───────────────────────────────────────────────────────
 
 
-def test_orphan_delegate_records_error_node():
-    """``rlm_delegate(...)`` without ``await rlm_wait(...)`` records an ErrorOutput."""
+def test_launch_subagent_runs_through_engine():
+    """``await launch_subagent(...)`` spawns one child and returns its answer."""
 
-    class _OrphanThenDone(LLMClient):
-        def __init__(self):
-            self.calls = 0
-
+    class _Parent(LLMClient):
         def chat(self, messages, *args, **kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                return '```repl\nrlm_delegate(name="c", query="leaf task", context="")\n```'  # no await wait
-            return '```repl\ndone("recovered")\n```'
+            convo = "\n".join(m["content"].lower() for m in messages)
+            if "leaf task" in convo:
+                return '```repl\ndone("leaf-answer")\n```'
+            return (
+                '```repl\nr = await launch_subagent("leaf task", num_steps=5)\n'
+                'done("parent:" + r)\n```'
+            )
 
     agent = RLMFlow(
-        _OrphanThenDone(), runtime=LocalRuntime(), config=RLMConfig(max_depth=1, max_iterations=5)
+        _Parent(), runtime=LocalRuntime(), config=RLMConfig(max_depth=2, max_iterations=6)
     )
     g = _run(agent, agent.start("p"))
-    errors = [s for s in g.states if is_errored(s)]
-    assert errors and any(e.error == "orphaned_delegates" for e in errors)
-    assert g.result() == "recovered"
+    assert g.result() == "parent:leaf-answer"
+
+
+def test_launch_subagents_parallel_returns_ordered_results():
+    """``await launch_subagents([...])`` fans out and returns results in order."""
+
+    class _Parent(LLMClient):
+        def chat(self, messages, *args, **kwargs):
+            convo = "\n".join(m["content"].lower() for m in messages)
+            if "task a" in convo:
+                return '```repl\ndone("A")\n```'
+            if "task b" in convo:
+                return '```repl\ndone("B")\n```'
+            return (
+                '```repl\nrs = await launch_subagents('
+                '[{"query": "task a", "num_steps": 5}, {"query": "task b", "num_steps": 5}])\n'
+                'done("|".join(rs))\n```'
+            )
+
+    agent = RLMFlow(
+        _Parent(),
+        runtime=LocalRuntime(),
+        config=RLMConfig(max_depth=2, max_iterations=6, max_concurrency=2),
+    )
+    g = _run(agent, agent.start("p"))
+    assert g.result() == "A|B"
 
 
 def test_max_depth_refusal_when_child_would_exceed_limit():

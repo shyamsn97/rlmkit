@@ -29,9 +29,10 @@ from rlmflow import LLMClient, LLMUsage, RLMConfig, RLMFlow, Workspace
 
 ROOT_SPLIT = (
     "```repl\n"
-    'h1 = rlm_delegate(name="a", query="do A", context="")\n'
-    'h2 = rlm_delegate(name="b", query="do B", context="")\n'
-    "results = yield rlm_wait(h1, h2)\n"
+    "results = await launch_subagents([\n"
+    '    {"name": "a", "query": "do A"},\n'
+    '    {"name": "b", "query": "do B"},\n'
+    "])\n"
     'done("/".join(results))\n'
     "```"
 )
@@ -86,7 +87,8 @@ def main() -> None:
                 or ""
             )
             preview = tag.splitlines()[0][:50] if tag else ""
-            print(f"  iter={n.iteration}  {n.agent_id:<7} {n.type:<12} {preview!r}")
+            iteration = getattr(n, "iteration", "-")
+            print(f"  iter={iteration}  {n.agent_id:<7} {n.type:<12} {preview!r}")
 
         banner("graph.history() — one snapshot per engine step()")
         snapshots = graph.history()

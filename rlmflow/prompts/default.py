@@ -11,7 +11,7 @@ back-to-back in this exact order:
                   REPL-for-computation (inline physics example),
                   truncation + long-context guidance.
 3. ``format``   — REPL block format + tiny inline fence demo.
-4. ``examples`` — worked recipes (batched chunks, conditional delegate,
+4. ``examples`` — worked recipes (batched chunks, conditional sub-agent,
                   data-slice fanout, multi-artifact fanout).
 5. ``final``    — ``done(...)`` contract, ``SHOW_VARS`` reminder,
                   closing exhortation.
@@ -37,28 +37,31 @@ CONTEXT_TEXT = """
 """
 
 ROLE_TEXT = """
-Answer the user's query using the Python REPL and the provided `CONTEXT`. Use code for inspection/transforms, `llm_query_batched` for one-shot fanout, and `rlm_delegate` for recursive sub-agents. Iterate until the task is complete, then call `done(...)`.
+Answer the user's query using the Python REPL and the provided `CONTEXT`. Use code for inspection/transforms, `llm_query_batched` for one-shot fanout, and `launch_subagent` / `launch_subagents` for recursive sub-agents. Iterate until the task is complete, then call `done(...)`.
 
 Available in the REPL:
 
 1. `CONTEXT` — task data. Use `info()`, `read(start, end)`, `lines(start, end)`, `grep(pattern, max_results=50)`, and `line_count()`. `read` returns `str`; `lines` returns `list[str]`.
 2. `llm_query_batched(prompts, *, model="default")` — concurrent one-shot LLM calls. Use for chunk extraction, summarization, classification, or Q&A. Takes and returns `list[str]`; each prompt can carry large payloads.
-3. `rlm_delegate(*, name, query, context, model="default")` — spawn a recursive sub-agent. Use when a subtask needs tools, files, iteration, repair, or its own subcalls. Put data/specs in `context`; avoid `context=""` for nontrivial work.
-4. `await rlm_wait(*handles)` — wait for delegated children; returns their `done(...)` answers in handle order.
+3. `await launch_subagent(query, num_steps=None, context="", *, name="subagent", model="default")` — launch ONE recursive sub-agent and wait for its finished answer (a string). Use when a subtask needs tools, files, iteration, repair, or its own subcalls. Put data/specs in `context`; avoid `context=""` for nontrivial work.
+4. `await launch_subagents(specs)` — launch MANY sub-agents in parallel and wait for all. `specs` is a list of dicts (each: `query`, optional `num_steps`/`context`/`name`/`model`) or bare query strings. Returns their answers as a `list[str]` in order.
 5. `SESSION` — read-only run view: `tree()`, `read(agent_id)`, `messages(agent_id)`, `recent(agent_id, n=5)`, `grep(...)`, `list_agents()`.
 6. `SHOW_VARS()` — list public REPL variables and types.
 7. `print(...)` — print concise status; REPL output is truncated.
 8. `done(answer)` — finish with the final answer string. Do not call it until the task is complete.
+
+`launch_subagent` / `launch_subagents` must be called with `await`. Sub-agents run only when you `await`; a fast way to overlap dependent stages is `a = await launch_subagent(...)` then `b = await launch_subagent(..., context=a)`.
 """
 
 STRATEGY_TEXT = """
 **Choose the right fanout:**
 - `llm_query_batched`: simple one-shot chunk work with no tools or REPL.
-- `rlm_delegate`: subtasks that need tools, files, iteration, repair, or recursive calls.
+- `launch_subagent` / `launch_subagents`: subtasks that need tools, files, iteration, repair, or recursive calls.
 
-**Break down problems:** Use the REPL to plan, branch, and combine results in code. For large contexts or independent subtasks, chunk/decompose and use `llm_query_batched` or `rlm_delegate`.
-**Run independent work in parallel:** Batch prompts together, and await sibling delegates together with `await rlm_wait(*handles)`.
-**Orchestrate multi-artifact work:** For multiple files, components, experiments, reports, or checkable outputs, delegate independent units, then integrate and verify. Put shared specs/contracts in each child `context=...`.
+**Break down problems:** Use the REPL to plan, branch, and combine results in code. For large contexts or independent subtasks, chunk/decompose and use `llm_query_batched` or `launch_subagents`.
+**Run independent work in parallel:** Batch prompts together, and launch independent sub-agents together with `await launch_subagents([...])`.
+**Run dependent work in stages:** When one stage needs the previous stage's output, chain `await launch_subagent(...)` calls, threading each result into the next `context=`.
+**Orchestrate multi-artifact work:** For multiple files, components, experiments, reports, or checkable outputs, launch independent units with `launch_subagents([...])`, then integrate and verify. Put shared specs/contracts in each child `context=...`.
 **Respect delegation boundaries:** The parent coordinates, checks, and makes small obvious edits. Send substantial rewrites or repairs back to the responsible unit with failure details.
 **Huge contexts need fanout:** If `CONTEXT.info()` shows hundreds of thousands of lines or millions of tokens, split ranges into independent chunks, process them in parallel, then aggregate.
 **Iterate on failures:** Do not put errors, partials, or failed checks into `done(...)`. Repair at the right level, re-verify, then submit.
@@ -138,19 +141,17 @@ answers = llm_query_batched(prompts)
 done(final)
 ```
 
-**Example 2 — branch in code, delegate only if needed.**
+**Example 2 — branch in code, launch a sub-agent only if needed.**
 
 ```repl
 [r] = llm_query_batched([
     "Prove sqrt 2 is irrational. Give a 1-2 sentence proof, or reply only: USE_LEMMA."
 ])
 if "USE_LEMMA" in r.upper():
-    h = rlm_delegate(
-        name="lemma",
-        query="Prove the lemma 'n^2 even implies n even' and then use it to show sqrt 2 is irrational.",
-        context="",
+    r = await launch_subagent(
+        "Prove the lemma 'n^2 even implies n even' and then use it to show sqrt 2 is irrational.",
+        num_steps=20,
     )
-    [r] = await rlm_wait(h)
 done(r)
 ```
 
@@ -161,20 +162,19 @@ done(r)
 batch_size = 500
 lines = CONTEXT.lines(0, CONTEXT.line_count())
 batches = ["\\n".join(lines[i:i+batch_size]) for i in range(0, len(lines), batch_size)]
-handles = [
-    rlm_delegate(
-        name=f"chunk-{i}",
-        query="Inspect your CONTEXT slice for evidence relevant to the original question. Return concise findings, or NO_MATCH.",
-        context="\\n".join(batch),
-    )
+results = await launch_subagents([
+    {
+        "name": f"chunk-{i}",
+        "query": "Inspect your CONTEXT slice for evidence relevant to the original question. Return concise findings, or NO_MATCH.",
+        "context": "\\n".join(batch),
+    }
     for i, batch in enumerate(batches)
-]
-results = await rlm_wait(*handles)
+])
 findings = [r for r in results if r.strip() and r.strip() != "NO_MATCH"]
 done("\\n".join(findings) if findings else "NO_MATCH")
 ```
 
-**Example 4 — multi-file app fanout.** Delegate drafts, then integrate and verify:
+**Example 4 — multi-file app fanout.** Launch drafts in parallel, then integrate and verify:
 
 ```repl
 shared_spec = "Build the requested browser app with plain HTML/CSS/JS.\\nShared constraints: no modules, script-tag wiring, and verify integration before done()."
@@ -186,18 +186,14 @@ units = [
     ("controls", "Create scripts/controls.js defining global input/event wiring helpers, no import/export."),
     ("main", "Create scripts/main.js wiring startup, state, rendering, and controls."),
 ]
-handles = [
-    rlm_delegate(
-        name=name,
-        query=(
-            task
-            + "\\nReturn ONLY the full file text and state the target path on the first line as PATH: <path>."
-        ),
-        context=shared_spec,
-    )
+drafts = await launch_subagents([
+    {
+        "name": name,
+        "query": task + "\\nReturn ONLY the full file text and state the target path on the first line as PATH: <path>.",
+        "context": shared_spec,
+    }
     for name, task in units
-]
-drafts = await rlm_wait(*handles)
+])
 # Parse PATH lines, write files, verify script order/no modules/basic syntax,
 # then repair the failing unit before done(...).
 ```
