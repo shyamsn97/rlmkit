@@ -53,21 +53,12 @@ results writes one REPL block like this:
 ```python
 h1 = rlm_delegate(name="search", query="Find evidence", context=chunk_a)
 h2 = rlm_delegate(name="verify", query="Check the answer", context=chunk_b)
-results = await rlm_wait(h1, h2)
+results = await rlm_wait(h1, h2)   # ← supervision point: suspend here
 done(combine(results))
 ```
 
 `await rlm_wait(...)` is the supervision point. The REPL supports
-top-level await and the engine drives the resulting coroutine:
-
-```python
-h1 = rlm_delegate(name="search", query="...", context=chunk_a)
-h2 = rlm_delegate(name="verify", query="...", context=chunk_b)
-results = await rlm_wait(h1, h2)   # ← suspend here
-done(combine(results))
-```
-
-The engine's loop, roughly:
+top-level await and the engine drives the resulting coroutine, roughly:
 
 ```python
 out = coro.send(None)              # run until the await
@@ -168,7 +159,7 @@ open_viewer(workspace)
 ```
 
 To let child agents drain work-conservingly after a parent reaches
-`await rlm_wait(...)`, enable `async_children`:
+`await rlm_wait(...)`, enable `eager_children`:
 
 ```python
 agent = RLMFlow(
@@ -178,24 +169,27 @@ agent = RLMFlow(
         max_depth=2,
         max_iterations=30,
         max_concurrency=8,
-        async_children=True,
+        eager_children=True,
     ),
 )
 ```
 
-With `async_children=False`, a fast child that finishes `task_1` waits for
+With `eager_children=False`, a fast child that finishes `task_1` waits for
 the rest of that parallel step before it can start `task_2`. With
-`async_children=True`, the fast child's `task_2` can start while a slow
+`eager_children=True`, the fast child's `task_2` can start while a slow
 sibling is still running `task_1`. See
-[`examples/async_children.py`](./examples/async_children.py) for a
+[`examples/eager_children.py`](./examples/eager_children.py) for a
 deterministic timestamped demo.
 
 `Workspace.create("./myproject")` writes a debuggable workspace as it runs:
 `session/<agent-id>/` holds the per-agent state log (`session.jsonl`,
-`agent.json`, `latest.json`), `graph.json` is the compact graph manifest
-for the whole run, and `context/<agent-id>/` holds payloads exposed as
-`CONTEXT`. The workspace is the saved run: reopen it later with
-`Workspace.open_path("./myproject").load_graph()` or `open_viewer("./myproject")`.
+`agent.json`, `latest.json`) plus `transcript.json` — the exact
+turn-by-turn conversation each agent's LLM saw, with per-message metadata
+(model, token counts, timing) for auditing or replay. `graph.json` is the
+compact graph manifest for the whole run, and `context/<agent-id>/` holds
+payloads exposed as `CONTEXT`. The workspace is the saved run: reopen it
+later with `Workspace.open_path("./myproject").load_graph()` or
+`open_viewer("./myproject")`.
 
 ## Drop-in `LLMClient`
 
@@ -238,7 +232,7 @@ Every transition follows the same obs → action → obs shape:
 LLMOutput  -> ExecAction -> ExecOutput          (REPL output, normal continuation)
                          -> DoneOutput          (code called done())
                          -> ErrorOutput         (code raised / no code block)
-                         -> SupervisingOutput   (code yielded — waiting on children)
+                         -> SupervisingOutput   (awaited rlm_wait — waiting on children)
 SupervisingOutput -> ResumeAction -> ExecOutput / Done / Error / Supervising
                                                 (children settled — supervisor unpaused)
 ExecOutput -> LLMAction -> LLMOutput            (back to the LLM for the next turn)
@@ -581,11 +575,16 @@ All examples share flags like `--no-viz`, `--docker-image rlmflow:local`,
 | [`showcase.py`](examples/showcase.py) | `Graph` snapshots, workspace persistence, session reads, time travel, gym-style stepping. |
 | [`drop_in_llm.py`](examples/drop_in_llm.py) | `RLMFlow` as an `LLMClient`. Nested agents. |
 | [`dspy_drop_in.py`](examples/dspy_drop_in.py) | Use an `RLMFlow` agent as the LM behind a DSPy program. |
-| [`sandbox/`](examples/sandbox/) | Chat agents whose Python code runs inside Modal, E2B, and Daytona sandboxes. |
+| [`sandbox/`](examples/sandbox/) | Build a small web app whose Python code runs inside Modal, E2B, and Daytona sandboxes. |
 | [`coding-agent/agent.py`](examples/coding-agent/agent.py) | Interactive coding agent that writes and edits files. |
 | [`needle_haystack.py`](examples/needle_haystack.py) | Needle-in-a-haystack over a massive in-memory `CONTEXT`, using parallel child chunks. |
 | [`needle_haystack_filesystem.py`](examples/needle_haystack_filesystem.py) | Needle-in-a-haystack across many files with custom tools and `runtime_factory`. |
-| [`summarizer.py`](examples/summarizer.py) | Recursive map-reduce over a long document. |
+| [`summarizer.py`](examples/summarizer.py) | Recursive map-reduce summarization over a long document — `rlm_delegate` fan-out + stateful combine. |
+| [`eager_children.py`](examples/eager_children.py) | `eager_children=True` vs `False` — how child scheduling overlaps. |
+| [`fork_repair.py`](examples/fork_repair.py) | Fork a workspace into independent repair branches and run tests in each. |
+| [`best_of_n.py`](examples/best_of_n.py) | Run N independent workspace branches and pick the best result. |
+| [`autoresearch/`](examples/autoresearch/) | Karpathy-style hill-climbing research loop with custom `@tool`s and delegation. |
+| [`graph-features/`](examples/graph-features/) | Offline tour of the `Graph` API: query, navigate, mutate, save/load, replay, fork, render. |
 | [`view_demo.py`](examples/view_demo.py) | Build synthetic `Graph` snapshots and launch the Gradio viewer. |
 | [`notebooks/coding_agent.ipynb`](examples/notebooks/coding_agent.ipynb) | Build the agent, run the boids task end-to-end, and inspect the workspace/viewer. Requires a live LLM. |
 | [`notebooks/viz_walkthrough.ipynb`](examples/notebooks/viz_walkthrough.ipynb) | Every visualization against the saved fixture: inline tree, Plotly graph, HTML stepper, topology renders (mermaid/dot/d2/sequence), step-indexed timeline, per-state detail, cost & reports, run-vs-run comparison, CLI equivalents. |
@@ -630,8 +629,15 @@ exports](#image-gif-and-html-exports) for what each produces and the
 scaling / label-normalization flags (`--marker-mult`, `--text-mult`,
 `--normalize-labels` / `--no-normalize-labels`).
 
-## Todo
-
+## Roadmap
+- [x] OOLONG long-context aggregation harness (`standard` / `rlm` / `rlm_tips`)
+- [x] `LocalRuntime` + `DockerRuntime` — battle-tested
+- [~] `ModalRuntime` / `E2BRuntime` / `DaytonaRuntime` — full support: native SDK file transfer, real-sandbox CI, depth>1 delegation, heavier example
+- [~] Depth × breadth sweep (accuracy vs `max_depth`) on an OOLONG/BABILong subset
+- [~] [RAO](https://apga.github.io/RAO/) (recursive agent optimization) support
+- [ ] OOLONG-Pairs harness — pairwise aggregation where flat LLMs fall over
+- [ ] Fork/resume determinism test in CI to guard the replay machinery
+- [ ] LongBench-v2 CodeQA + SWE-bench adapter for coding-agent credibility
 
 ## Docs
 
@@ -639,7 +645,7 @@ The top-level docs are short, user-facing guides. The deep dive lives
 in [`docs/internals.md`](docs/internals.md).
 
 - [**Internals**](docs/internals.md): deep reference — engine
-  architecture, step lifecycle (`act` → `apply_one`), the REPL `yield`
+  architecture, step lifecycle (`act` → `apply_one`), the REPL `await`
   protocol, resume semantics, cold-start replay, persistence, and the
   full `RLMFlow` override surface. Start here if you want to subclass
   the engine.
@@ -655,7 +661,7 @@ in [`docs/internals.md`](docs/internals.md).
   workspace layout, export helpers, live tree, gantt, topology
   exports, Gradio viewer, CLI.
 - [Runtimes](docs/runtimes.md): `Runtime` protocol, shipped runtimes
-  (Local / Subprocess / Docker / Modal), writing your own.
+  (Local / Docker / Modal / E2B / Daytona), writing your own.
 - [Prompt customization](docs/prompt_customization.md): `PromptBuilder`
   sections, deriving from the default prompt, full replacement.
 - [Security](docs/security.md): trust model, Docker isolation knobs,

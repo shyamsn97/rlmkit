@@ -19,7 +19,7 @@ Pick the doc that matches what you're trying to do.
   workspace layout, export helpers, live tree, gantt, topology
   exports, Gradio viewer, CLI.
 - [Runtimes](runtimes.md) — `Runtime` protocol, shipped runtimes
-  (Local / Subprocess / Docker / Modal), writing your own.
+  (Local / Docker / Modal / E2B / Daytona), writing your own.
 - [Prompt customization](prompt_customization.md) — `PromptBuilder`
   sections, deriving from the default prompt, full replacement.
 - [Security](security.md) — trust model, Docker isolation knobs,

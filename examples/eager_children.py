@@ -1,14 +1,16 @@
-"""Demonstrate `async_children=True` work-conserving child scheduling.
+"""Demonstrate `eager_children=True` work-conserving child scheduling.
 
 Run:
-    python examples/async_children.py
+    python examples/eager_children.py
 
 The key thing to watch in the output:
 
-- With `async_children=False`, child B's second LLM step starts only after
-  child A's slow first LLM step completes.
-- With `async_children=True`, child B's second LLM step starts while child A's
-  slow first LLM step is still running.
+- With `eager_children=False`, child B's second LLM step starts only after
+  child A's slow first LLM step completes (the scheduler advances in
+  synchronized waves).
+- With `eager_children=True`, child B's second LLM step starts while child A's
+  slow first LLM step is still running (a free worker picks up the next
+  runnable agent instead of idling at the wave boundary).
 """
 
 from __future__ import annotations
@@ -31,21 +33,18 @@ class TimelineLLM(LLMClient):
 
     def chat(self, messages, *args, **kwargs) -> str:
         self.last_usage = LLMUsage(input_tokens=1, output_tokens=1)
-        prompt = messages[-1]["content"].lower()
-        assistant_history = "\n".join(
-            m["content"].lower()
-            for m in messages
-            if m.get("role") == "assistant"
-        )
+        # An agent's query lives in its system prompt, so scan the whole
+        # conversation rather than just the latest "continue" nudge.
+        convo = "\n".join(m["content"].lower() for m in messages)
 
-        if "child a slow task" in prompt:
+        if "child a slow task" in convo:
             self.mark("childa.task_1 start")
             time.sleep(1.0)
             self.mark("childa.task_1 finish")
             return '```repl\ndone("A done")\n```'
 
-        if "child b two-step task" in prompt:
-            if "childb task_1 exec" not in assistant_history:
+        if "child b two-step task" in convo:
+            if "childb task_1 exec" not in convo:
                 self.mark("childb.task_1 start")
                 self.mark("childb.task_1 finish")
                 return '```repl\nprint("childb task_1 exec")\n```'
@@ -63,26 +62,26 @@ class TimelineLLM(LLMClient):
         )
 
 
-def run_case(*, async_children: bool) -> None:
+def run_case(*, eager_children: bool) -> None:
     llm = TimelineLLM()
     agent = RLMFlow(
         llm,
         runtime=LocalRuntime(),
         config=RLMConfig(
-            async_children=async_children,
-            max_depth=1,
+            eager_children=eager_children,
+            max_depth=2,
             max_iterations=8,
             max_concurrency=2,
         ),
     )
 
-    graph = agent.start("Show async child scheduling.")
+    graph = agent.start("Show eager child scheduling.")
     steps = 0
     while not graph.finished:
         graph = agent.step(graph)
         steps += 1
 
-    mode = "async_children=True" if async_children else "async_children=False"
+    mode = "eager_children=True" if eager_children else "eager_children=False"
     print(f"\n=== {mode} ===")
     print(f"outer step() calls: {steps}")
     for t, label in llm.events:
@@ -91,8 +90,8 @@ def run_case(*, async_children: bool) -> None:
 
 
 def main() -> None:
-    run_case(async_children=False)
-    run_case(async_children=True)
+    run_case(eager_children=False)
+    run_case(eager_children=True)
 
 
 if __name__ == "__main__":

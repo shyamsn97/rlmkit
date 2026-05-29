@@ -1,7 +1,7 @@
 # RLMFlow Internals
 
 A deep reference for the engine's mechanics: data model, step
-lifecycle, REPL/yield protocol, resume semantics, persistence, and
+lifecycle, REPL/await protocol, resume semantics, persistence, and
 the extension seams on `RLMFlow`. If you want to subclass the
 engine, debug a weird run, or write something on top of rlmflow,
 this is the doc.
@@ -91,7 +91,7 @@ types under four base classes:
 | `llm_output`         | `LLMOutput`         | `ObservationNode`       | reply, extracted REPL code, token deltas           |
 | `exec_action`        | `ExecAction`        | `ActionNode`            | "ran fresh code"                                   |
 | `exec_output`        | `ExecOutput`        | `CodeObservation` (obs) | runtime stdout                                     |
-| `supervising_output` | `SupervisingOutput` | `CodeObservation` (obs) | code yielded; `waiting_on` lists pending children  |
+| `supervising_output` | `SupervisingOutput` | `CodeObservation` (obs) | code suspended at `await rlm_wait`; `waiting_on` lists pending children |
 | `error_output`       | `ErrorOutput`       | `CodeObservation` (obs) | failure                                            |
 | `done_output`        | `DoneOutput`        | `CodeObservation` (obs) | terminal answer from `done(...)`                   |
 | `resume_action`      | `ResumeAction`      | `ActionNode`            | "supervisor resumed paused code"                   |
@@ -227,14 +227,14 @@ def step_exec(self, graph, llm_output):
 ```
 
 `_run_exec` is the long branch that calls into the runtime, handles
-`done(...)`, `rlm_delegate(...)` + `yield rlm_wait(...)`, orphaned delegates,
+`done(...)`, `rlm_delegate(...)` + `await rlm_wait(...)`, orphaned delegates,
 and exceptions. It produces exactly one of `ExecOutput`,
 `SupervisingOutput`, `ErrorOutput`, or `DoneOutput`.
 
 #### `step_after_supervising` — resume half
 
 Runs after all `waiting_on` children settle. Writes a `ResumeAction`,
-then either resumes the live generator or replays it (cold start; see
+then either resumes the live coroutine or replays it (cold start; see
 [Cold-start replay](#cold-start-replay)), then produces the next
 observation just like `step_exec`.
 
@@ -243,7 +243,7 @@ observation just like `step_exec`.
 ## The REPL `await` protocol
 
 The engine **only** intercepts top-level `await rlm_wait(*handles)`
-values. Top-level `yield` is not part of the action language.
+values.
 
 ### The protocol
 
@@ -274,24 +274,20 @@ descending at nested boundaries.
 # These count. The REPL compiles with top-level await.
 result = await rlm_wait(h)
 for h in handles:
-    result, = await rlm_wait(h)
+    result = await rlm_wait(h)
 
 # ── NOT top level ───────────────────────────────────────────────────
-# These don't count for engine suspension.
+# An `await` nested inside a function / comprehension scope doesn't make
+# the block a coroutine the engine can drive — it belongs to that scope.
+async def helper():
+    return await rlm_wait(h)         # belongs to `helper`, not the block
+# (the block would have to `await helper()` at top level to suspend)
+
+# Ordinary generators / comprehensions are plain Python — no await:
 def squares(n):
     for i in range(n):
-        yield i * i                  # belongs to `squares`
+        yield i * i
 print(list(squares(5)))
-
-xs = list(i * i for i in range(10))   # genexp yield is hidden
-
-f = lambda: (yield 1)
-print(next(f()))
-
-class Counter:
-    def __iter__(self):
-        for i in range(3):
-            yield i
 ```
 
 ### Allowed shapes
@@ -327,83 +323,67 @@ These are errors. **Use `await rlm_wait(handle)`.**
 
 The engine has exactly two decisions to make about a REPL block.
 
-#### Decision 1 — wrap as a generator?
+#### Decision 1 — coroutine or straight exec?
 
-The REPL builds a synthetic function around the LLM's code:
+If the block has a **top-level `await`**, the REPL compiles it with
+Python's `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` flag and `eval`s it, which
+yields a *coroutine object* the engine drives via `coro.send(...)`. If
+there's no top-level await, the block is plain `exec`'d straight
+through. **The decision hinges on top-level awaits, not awaits anywhere
+in the block.**
 
-```python
-def __rlm_gen__():
-    <code from the LLMOutput>
-```
+`_has_top_level_await(tree)` walks the AST but stops descending at
+function / async function / lambda / class / comprehension boundaries,
+so an `await` buried inside a nested `async def` helper doesn't make the
+whole block a coroutine. (This mirrors why a `yield` inside a nested
+`def` generator doesn't escape its scope.)
 
-…and calls it. If `<code>` contains a `yield` at the top level,
-calling `__rlm_gen__()` returns a generator object the engine drives
-via `send()`. If there's no top-level yield, it just runs straight
-through. **The wrapping decision hinges on top-level yields, not
-yields anywhere in the block.**
+#### Decision 2 — suspend or finish?
 
-This is what fixed the old "`def squares(n): yield i*i` crashes the
-agent" bug. `ast.walk` was finding the inner yield and wrapping the
-block, but `__rlm_gen__` itself had no top-level yield, so calling it
-ran straight through and returned `None`. The engine then did
-`None.agent_ids` and crashed. The fix:
-`_has_top_level_yield(tree)` walks the AST but stops at function /
-async function / lambda / class boundaries.
-
-#### Decision 2 — suspend or pump?
-
-Once the block is wrapped, every `gen.send(...)` returns whichever
-value the next top-level yield produced. The engine handles it:
+Once the block is a coroutine, the engine drives it with `send()`. Each
+suspension surfaces whatever `rlm_wait(...)` awaited:
 
 ```python
-result = gen.send(prev_value)
-while not isinstance(result, WaitRequest):
-    result = gen.send(None)        # pump past non-Wait yields
-suspend(result.agent_ids)          # the thing we know how to do
+request = coro.send(prev_value)        # advance to the next await
+if isinstance(request, WaitRequest):
+    suspend(request.agent_ids)         # the thing we know how to do
+# else: TypeError — only `await rlm_wait(...)` is supported
 ```
 
-So:
-
-```python
-yield rlm_wait(h)         # WaitRequest → suspend on h
-yield 42              # int → pump, immediately resume
-yield                 # None → pump, immediately resume
-yield handle          # ChildHandle → pump, immediately resume
-```
-
-The agent only suspends on the thing the engine actually has a plan
-for: a `WaitRequest`. Every other yield value is treated like a plain
-Python generator yield — discard, resume, no engine involvement.
+`await rlm_wait(...)` evaluates to a `WaitRequest`, which is the only
+value the engine knows how to suspend on. Awaiting anything else is an
+error. When the coroutine raises `StopIteration`, the block is done and
+the engine records the captured stdout.
 
 ### Net effect on the graph
 
 | Block did this                          | `<observation>` is                          | Graph effect                                                                                  |
 |-----------------------------------------|---------------------------------------------|-----------------------------------------------------------------------------------------------|
-| Ran to completion (no yield)            | `ExecOutput` (stdout)                       | Single `ExecAction → ExecOutput` pair.                                                        |
-| Top-level non-Wait yields only          | `ExecOutput` (stdout)                       | **Same as above.** Non-Wait yields are invisible to the graph.                                |
-| Top-level `yield rlm_wait(h1, h2)`          | `SupervisingOutput(waiting_on=[h1, h2])`    | Agent suspends. Children run. When they finish, a `ResumeAction` resumes.                     |
+| Ran to completion (no await)            | `ExecOutput` (stdout)                       | Single `ExecAction → ExecOutput` pair.                                                        |
+| Top-level `await rlm_wait(h1, h2)`      | `SupervisingOutput(waiting_on=[h1, h2])`    | Agent suspends. Children run. When they finish, a `ResumeAction` resumes.                     |
 | `done(...)` called (any path)           | `DoneOutput`                                | Agent terminates.                                                                             |
 | Exception                               | `ErrorOutput`                               | Surfaces in the next user message as a retry observation.                                     |
 
-**Rule:** non-Wait yields never produce a new graph node. They're
-internal to one `ExecAction`'s execution. Only `yield rlm_wait(...)`
-introduces a `SupervisingOutput` and the eventual `ResumeAction`.
+**Rule:** only `await rlm_wait(...)` introduces a `SupervisingOutput`
+and the eventual `ResumeAction`. A block with no top-level await is a
+single `ExecAction → ExecOutput`.
 
 ### Implementation
 
-- `rlmflow/runtime/repl.py::_has_top_level_yield(tree)` — AST walk that
-  skips `FunctionDef` / `AsyncFunctionDef` / `Lambda` / `ClassDef`
-  bodies.
-- `rlmflow/runtime/repl.py::REPL.advance()` — after `gen.send(...)`,
-  loops sending `None` until either the generator yields a
-  `WaitRequest` (return suspended) or raises `StopIteration` (done).
+- `rlmflow/runtime/repl.py::_has_top_level_await(tree)` — AST walk that
+  skips `FunctionDef` / `AsyncFunctionDef` / `Lambda` / `ClassDef` /
+  comprehension bodies.
+- `rlmflow/runtime/repl.py::REPL.start()` / `REPL.advance()` — compile
+  with top-level-await, then `coro.send(...)` until the coroutine
+  suspends on a `WaitRequest` (return suspended) or raises
+  `StopIteration` (done).
 - Tests in `tests/test_repl_yield.py` cover the exhaustive matrix.
 
 ---
 
 ## Resume semantics
 
-`yield rlm_wait(...)` is a Python generator suspension point. It is
+`await rlm_wait(...)` is a Python coroutine suspension point. It is
 **not** a request to copy child outputs into the next LLM prompt.
 
 ### The data path
@@ -412,24 +392,24 @@ For code like:
 
 ```python
 handles = [rlm_delegate(name="a", query=q_a, context=c_a), rlm_delegate(name="b", query=q_b, context=c_b)]
-results = yield rlm_wait(*handles)
+results = await rlm_wait(*handles)
 print(len(results))
 ```
 
 the flow is:
 
-1. The parent REPL runs until `yield rlm_wait(*handles)`.
-2. The generator suspends. The assignment to `results` has **not**
+1. The parent REPL runs until `await rlm_wait(*handles)`.
+2. The coroutine suspends. The assignment to `results` has **not**
    happened yet.
 3. The graph records a `SupervisingOutput(waiting_on=[a, b])`.
 4. The scheduler runs the child agents until they finish.
 5. When all children have a terminal `DoneOutput`, the runtime
-   resumes the same parent generator and sends the child results
-   list back into the suspended `yield`.
+   resumes the same parent coroutine and sends the child results
+   list back into the suspended `await`.
 6. The line becomes equivalent to `results = child_results`.
 7. The same stateful REPL continues and runs `print(len(results))`.
 8. If the resumed code ends without `done(...)` or another
-   `yield rlm_wait(...)`, the engine records an `ExecOutput`
+   `await rlm_wait(...)`, the engine records an `ExecOutput`
    (`resumed_from=[...]`) and the next LLM turn continues in the same
    stateful REPL — variables assigned after the wait are still in
    scope.
@@ -444,7 +424,7 @@ Child DoneOutput.result
 ```
 
 `ResumeAction` is **not** part of the data path. It's structured
-graph metadata: "the suspended generator resumed and ran some more
+graph metadata: "the suspended coroutine resumed and ran some more
 code." The next prompt does **not** receive child result blobs or
 "wait completed" text — the LLM inspects `results` directly because
 the REPL is stateful.
@@ -477,14 +457,14 @@ jobs = [
     ("analyst",      "Collect analyst targets.",           contract),
 ]
 handles = [rlm_delegate(name=name, query=q, context=c, model="fast") for name, q, c in jobs]
-results = yield rlm_wait(*handles)
+results = await rlm_wait(*handles)
 print(f"got {len(results)} child results")
 ```
 
 Runtime execution:
 
 1. `rlm_delegate(...)` creates four child agents.
-2. `yield rlm_wait(*handles)` suspends the root generator.
+2. `await rlm_wait(*handles)` suspends the root coroutine.
 3. The graph records `SupervisingOutput(waiting_on=[...4 ids...])`.
 
 ```
@@ -503,7 +483,7 @@ root.analyst       [0] UserQuery
 ```
 
 Data location: child outputs do not exist yet. Root REPL is suspended
-at `yield rlm_wait(*handles)`. `handles` exists in the root REPL.
+at `await rlm_wait(*handles)`. `handles` exists in the root REPL.
 `results` does not.
 
 #### Step 2 — children run
@@ -538,7 +518,7 @@ child_results = [
 line:
 
 ```python
-results = yield rlm_wait(*handles)
+results = await rlm_wait(*handles)
 ```
 
 continues as if it were `results = child_results`. The same REPL
@@ -548,8 +528,8 @@ continues:
 print(f"got {len(results)} child results")  # prints "got 4 child results"
 ```
 
-The generator ends. The agent isn't done yet (no `done(...)` was
-called and no further yield). The engine records:
+The coroutine ends. The agent isn't done yet (no `done(...)` was
+called and no further await). The engine records:
 
 ```
 root
@@ -606,26 +586,26 @@ root.{identity,valuation,fundamentals,analyst}
   [4] DoneOutput
 ```
 
-### Multi-yield in one block
+### Multi-wait in one block
 
-A block can yield twice:
+A block can await twice:
 
 ```python
-h1 = rlm_delegate(name="a", query=..., context=...);  r1 = yield rlm_wait(h1)
-h2 = rlm_delegate(name="b", query=..., context=...);  r2 = yield rlm_wait(h2)
+h1 = rlm_delegate(name="a", query=..., context=...);  r1 = await rlm_wait(h1)
+h2 = rlm_delegate(name="b", query=..., context=...);  r2 = await rlm_wait(h2)
 done(combine(r1, r2))
 ```
 
-Each yield/resume pair gets its own `(SupervisingOutput, ResumeAction)`
-in the parent's trajectory. The REPL is the same generator both
+Each wait/resume pair gets its own `(SupervisingOutput, ResumeAction)`
+in the parent's trajectory. The REPL is the same coroutine both
 times — variables persist.
 
-### Multi-yield across blocks
+### Multi-wait across blocks
 
 ```python
 # Block 1
 h = rlm_delegate(name="a", query=..., context=...)
-yield rlm_wait(h)            # block ends right after the yield
+await rlm_wait(h)            # block ends right after the await
 
 # Block 2
 done("p:" + results[0])
@@ -645,14 +625,14 @@ turn and the second block's code runs in a *fresh* REPL submission
 When the engine is attached to a freshly-loaded workspace
 (`Workspace.fork(...)` or just opening a saved run later), the
 durable graph contains every `SupervisingOutput` that was recorded —
-but the live Python generator that yielded inside the runtime is
+but the live Python coroutine that suspended inside the runtime is
 gone.
 
-`engine/replay.py::replay_to_yield(graph, target, runtime)` handles
+`engine/replay.py::replay_to_suspension(graph, target, runtime)` handles
 this. It re-runs the action code with `rlm_delegate` in *replay mode*
 (returns existing child handles instead of spawning new ones), so the
-generator pauses again at the same yield. The regular resume path
-then takes over.
+coroutine pauses again at the same `await` the original recorded. The
+regular resume path then takes over.
 
 ```python
 def step_after_supervising(self, graph, last):
@@ -663,23 +643,23 @@ def step_after_supervising(self, graph, last):
     append_node(self.session, graph, resume_action)
     runtime = self.inject_env(graph, resume_action)
     if not runtime.suspended:
-        # Live generator is gone — process restart, fork, etc.
+        # Live coroutine is gone — process restart, fork, etc.
         # Replay action code with rlm_delegate in replay mode so the
-        # generator pauses at the same yield we recorded.
-        replay_to_yield(graph, last, runtime)
-    # Now the runtime is suspended at the right yield; resume.
+        # coroutine pauses at the same await we recorded.
+        replay_to_suspension(graph, last, runtime)
+    # Now the runtime is suspended at the right await; resume.
     suspended, raw, errored = runtime.resume_code(results)
     ...
 ```
 
-`replay_to_yield` walks the trajectory back to the originating
+`replay_to_suspension` walks the trajectory back to the originating
 `LLMOutput.code`, sets `runtime.env["_REPLAY_QUEUE"]` to the agent
-IDs the original yield was waiting on, runs the code, and verifies
-that the new yield's `WaitRequest.agent_ids` matches what we
-recorded. On divergence, it raises.
+IDs the original `await` was waiting on, runs the code, and verifies
+that the new `WaitRequest.agent_ids` matches what we recorded. On
+divergence, it raises.
 
-For multi-yield blocks, it walks the prior `SupervisingOutput`/
-`ResumeAction` chain in the same execution and replays each yield in
+For multi-wait blocks, it walks the prior `SupervisingOutput`/
+`ResumeAction` chain in the same execution and replays each `await` in
 order.
 
 ---
@@ -774,7 +754,7 @@ under `context/<child_id>/context.txt` before the child's first
 ## Runtime sessions
 
 The engine keeps a separate runtime session per agent so each agent's
-REPL state, suspended generator, and tool closures are isolated.
+REPL state, suspended coroutine, and tool closures are isolated.
 
 ```python
 self.runtime_sessions: dict[str, Runtime] = {ROOT_RUNTIME_ID: root_runtime}
@@ -908,7 +888,7 @@ A few edge cases that crop up in real runs:
 
 ### Orphaned delegates
 
-If a block calls `rlm_delegate(...)` but never `yield rlm_wait(...)`'s on the
+If a block calls `rlm_delegate(...)` but never `await rlm_wait(...)`'s on the
 handle, the engine surfaces an `ErrorOutput(error="orphaned_delegates")`
 and re-raises the corresponding exception inside the REPL on the next
 turn so the LLM sees the failure inline. Children that were already

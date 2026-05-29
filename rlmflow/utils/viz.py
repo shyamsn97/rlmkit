@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import warnings
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -501,8 +502,14 @@ def tee(
         for sink in sinks:
             try:
                 sink(graph)
-            except Exception:
-                pass
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 — one bad sink shouldn't stop the stream
+                warnings.warn(
+                    f"tee sink {getattr(sink, '__name__', sink)!r} failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    stacklevel=2,
+                )
         yield graph
 
 

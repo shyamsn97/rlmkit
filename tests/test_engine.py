@@ -178,8 +178,8 @@ def test_remote_like_runtime_syncs_artifacts_before_exec_observation(tmp_path):
     assert runtime.stale_count >= 1
 
 
-def test_remote_like_runtime_cross_notifies_siblings_under_async_children():
-    """With ``async_children=True`` and one runtime per agent, every
+def test_remote_like_runtime_cross_notifies_siblings_under_eager_children():
+    """With ``eager_children=True`` and one runtime per agent, every
     completed exec/resume on one runtime must fire ``on_workspace_changed``
     on *every* sibling runtime (and never on itself).
     """
@@ -229,7 +229,7 @@ def test_remote_like_runtime_cross_notifies_siblings_under_async_children():
         runtime=_RemoteLike(),
         runtime_factory=_RemoteLike,
         config=RLMConfig(
-            async_children=True,
+            eager_children=True,
             max_depth=1,
             max_iterations=5,
             max_concurrency=2,
@@ -266,13 +266,13 @@ def test_async_refill_does_not_own_runtime_sync():
             return Graph(agent_id="root")
 
     class _Engine:
-        config = RLMConfig(async_children=True)
+        config = RLMConfig(eager_children=True)
         terminate_requested = set()
         session = _Session()
 
     engine = _Engine()
 
-    tasks = scheduling.refill_async_children(
+    tasks = scheduling.refill_eager_children(
         engine,
         "root.child",
         None,
@@ -505,7 +505,7 @@ def test_remote_like_runtime_syncs_artifacts_before_resume_observation(tmp_path)
     assert root_runtime.stale_count >= 2
 
 
-def test_async_children_drains_waiting_subtree_and_resumes_parent_same_step():
+def test_eager_children_drains_waiting_subtree_and_resumes_parent_same_step():
     class _SlowChildLLM(LLMClient):
         def chat(self, messages, *args, **kwargs):
             text = "\n".join(m["content"] for m in messages).lower()
@@ -530,7 +530,7 @@ def test_async_children_drains_waiting_subtree_and_resumes_parent_same_step():
         _SlowChildLLM(),
         runtime=LocalRuntime(),
         config=RLMConfig(
-            async_children=True,
+            eager_children=True,
             max_depth=1,
             max_iterations=8,
             max_concurrency=2,
@@ -583,7 +583,7 @@ def test_default_children_do_not_drain_waiting_subtree_in_parent_exec_step():
         _ChildLLM(),
         runtime=LocalRuntime(),
         config=RLMConfig(
-            async_children=False,
+            eager_children=False,
             max_depth=1,
             max_iterations=8,
             max_concurrency=2,
@@ -597,7 +597,7 @@ def test_default_children_do_not_drain_waiting_subtree_in_parent_exec_step():
     assert _types(graph["root.child"]) == ["user_query"]
 
 
-def test_async_children_uses_configured_pool_run_until_idle():
+def test_eager_children_uses_configured_pool_run_until_idle():
     class _RecordingPool:
         def __init__(self) -> None:
             self.execute_calls = 0
@@ -623,7 +623,7 @@ def test_async_children_uses_configured_pool_run_until_idle():
     agent = RLMFlow(
         _StaticLLM('```repl\ndone("ok")\n```'),
         runtime=LocalRuntime(),
-        config=RLMConfig(async_children=True, max_iterations=3),
+        config=RLMConfig(eager_children=True, max_iterations=3),
         pool=pool,
     )
 
@@ -869,12 +869,12 @@ def test_depth_three_chain_each_level_records_supervising():
     assert g.result() == "root->root.child->root.child.child->leaf:root.child.child.child"
 
 
-def test_async_children_drains_depth_three_chain_in_one_parent_exec_step():
+def test_eager_children_drains_depth_three_chain_in_one_parent_exec_step():
     agent = RLMFlow(
         _DeepChainLLM(max_child_depth=3),
         runtime=LocalRuntime(),
         config=RLMConfig(
-            async_children=True,
+            eager_children=True,
             max_depth=3,
             max_iterations=30,
             max_concurrency=4,

@@ -37,7 +37,8 @@ e2b = ["e2b"]
 daytona = ["daytona-sdk"]
 sandbox = ["modal", "e2b", "daytona-sdk"]
 # Gradio viewer pulls plotly transitively (used by the interactive timeline).
-viewer = ["gradio>=4.29", "plotly>=5.0"]
+# `rich` powers the live terminal tree (`LiveView`) and `rlmflow view` output.
+viewer = ["gradio>=4.29", "plotly>=5.0", "rich>=13.0"]
 # Static image export of `node.plot()` (PNG/SVG/PDF). Used by
 # `save_image` / `save_steps` and `node.save_image()`. Kaleido is its
 # own optional dep because it ships native binaries.
@@ -52,8 +53,15 @@ all = [
     "gradio>=4.29",
     "plotly>=5.0",
     "kaleido>=0.2.1",
+    "rich>=13.0",
 ]
-dev = ["pytest>=7.0", "pytest-cov>=5.0", "pytest-timeout>=2.0", "ruff>=0.4"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=5.0",
+    "pytest-timeout>=2.0",
+    "ruff>=0.4",
+    "rich>=13.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/shyamsn97/rlmflow"

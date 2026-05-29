@@ -32,20 +32,20 @@ def step(engine, graph: Graph) -> Graph:
         (aid, (lambda action=action: engine.apply_one(action)))
         for aid, action in plan.items()
     ]
-    if engine.config.async_children:
-        engine.pool.run_until_idle(tasks, engine._refill_async_children)
+    if engine.config.eager_children:
+        engine.pool.run_until_idle(tasks, engine._refill_eager_children)
     else:
         engine.pool.execute(tasks)
     return engine.session.load_graph()
 
 
-def refill_async_children(
+def refill_eager_children(
     engine,
     done_id: str,
     _result: object,
     active_ids: set[str],
 ) -> list[tuple[str, Callable[[], None]]]:
-    """Return newly runnable async-child tasks after one task completes."""
+    """Return newly runnable eager-child tasks after one task completes."""
 
     graph = engine.session.load_graph()
     tasks: list[tuple[str, Callable[[], None]]] = []
@@ -55,7 +55,7 @@ def refill_async_children(
         cur = supervisor.current()
         if not isinstance(cur, SupervisingOutput):
             continue
-        if not supervisor.config.get("async_children", engine.config.async_children):
+        if not supervisor.config.get("eager_children", engine.config.eager_children):
             continue
 
         runnable = (
@@ -82,4 +82,4 @@ def refill_async_children(
     return tasks
 
 
-__all__ = ["refill_async_children", "step"]
+__all__ = ["refill_eager_children", "step"]

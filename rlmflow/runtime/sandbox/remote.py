@@ -50,15 +50,54 @@ class RemoteFileRuntime(Runtime):
         self._started = False
         self._workspace_pushed = False
         self._pending_wait_ack = False
+        # Provider adapters that pip-install rlmflow on first use override
+        # these (see ``_run_setup`` / ``_resolve_setup_commands``). Modal,
+        # which bakes rlmflow into its image, leaves them empty.
+        self.setup_commands: list[str] = []
+        self._setup_done = False
+
+    #: Default first-boot commands for providers that don't ship rlmflow.
+    DEFAULT_SETUP_COMMANDS = ("python -m pip install -q rlmflow",)
+
+    @classmethod
+    def _resolve_setup_commands(cls, setup_commands: list[str] | None) -> list[str]:
+        """Normalize a caller-supplied ``setup_commands`` list.
+
+        ``None`` means "use the default install command"; an explicit
+        (possibly empty) list is taken verbatim — so ``setup_commands=[]``
+        really means "run nothing".
+        """
+
+        if setup_commands is not None:
+            return list(setup_commands)
+        return list(cls.DEFAULT_SETUP_COMMANDS)
 
     def exec(self, command: str, *, timeout: float | None = None) -> str:
         """Execute ``command`` in the provider sandbox and return stdout."""
 
         raise NotImplementedError
 
+    def _provider_prepare(self) -> None:
+        """Bring the provider sandbox up and run setup before launching the REPL.
+
+        Default is a no-op. File-based adapters (E2B, Daytona) override this
+        to create the sandbox and pip-install rlmflow on first use.
+        """
+
+    def _run_setup(self) -> None:
+        """Run ``self.setup_commands`` once, before the REPL launches."""
+
+        if self._setup_done:
+            return
+        for command in self.setup_commands:
+            self.exec(command, timeout=self.repl_timeout)
+        self._setup_done = True
+
     def _ensure_started(self) -> None:
         if self._started:
             return
+
+        self._provider_prepare()
 
         remote_dir = shlex.quote(self._remote_dir)
         input_path = shlex.quote(self._input_path)
@@ -333,11 +372,36 @@ class RemoteFileRuntime(Runtime):
         if sync_error is not None:
             raise sync_error
 
+    def remove_path(self, remote_path: str, *, recursive: bool = False) -> None:
+        """Delete ``remote_path`` in the sandbox via ``rm``."""
+
+        flag = "-rf" if recursive else "-f"
+        self.exec(f"rm {flag} -- {shlex.quote(remote_path)}")
+
+    def list_files(self, remote_root: str) -> list[str]:
+        """Return sandbox file paths under ``remote_root``, relative to it."""
+
+        output = self.exec(
+            f"find {shlex.quote(remote_root)} -type f -print 2>/dev/null || true"
+        )
+        prefix = remote_root.rstrip("/") + "/"
+        return sorted(line.removeprefix(prefix) for line in output.splitlines() if line)
+
     def _copy_tools_to(self, new: Runtime) -> None:
         for name, td in self.tools.items():
             if td.core:
                 continue
             new.tools[name] = td
+
+    @staticmethod
+    def _close_with_methods(sandbox: object, method_names: Iterable[str]) -> None:
+        """Call the first available teardown method on a provider sandbox."""
+
+        for name in method_names:
+            method = getattr(sandbox, name, None)
+            if callable(method):
+                method()
+                return
 
     def _close_sandbox(self) -> None:
         """Provider-specific resource cleanup hook."""

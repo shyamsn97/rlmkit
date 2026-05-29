@@ -10,7 +10,7 @@
     "max_output_length": 12000,
     "max_messages": null,
     "child_max_iterations": null,
-    "async_children": false,
+    "eager_children": false,
     "single_block": true,
     "max_budget": null
   },

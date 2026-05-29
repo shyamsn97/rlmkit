@@ -7,7 +7,6 @@ Requires ``e2b`` to be installed (``pip install rlmflow[e2b]``) and an
 
 from __future__ import annotations
 
-import shlex
 import shutil
 from pathlib import Path
 
@@ -38,14 +37,9 @@ class E2BRuntime(RemoteFileRuntime):
         self.template = template
         self.timeout = timeout
         self.envs = envs
-        self.setup_commands = (
-            list(setup_commands)
-            if setup_commands is not None
-            else ["python -m pip install -q rlmflow"]
-        )
+        self.setup_commands = self._resolve_setup_commands(setup_commands)
         self.sandbox_kwargs = dict(sandbox_kwargs or {})
         self.sandbox = None
-        self._setup_done = False
 
     def _ensure_sandbox(self) -> None:
         if self.sandbox is not None:
@@ -66,12 +60,9 @@ class E2BRuntime(RemoteFileRuntime):
             **self.sandbox_kwargs,
         )
 
-    def _run_setup(self) -> None:
-        if self._setup_done:
-            return
-        for command in self.setup_commands:
-            self.exec(command, timeout=self.repl_timeout)
-        self._setup_done = True
+    def _provider_prepare(self) -> None:
+        self._ensure_sandbox()
+        self._run_setup()
 
     def exec(self, command: str, *, timeout: float | None = None) -> str:
         self._ensure_sandbox()
@@ -85,11 +76,6 @@ class E2BRuntime(RemoteFileRuntime):
         if exit_code:
             raise RuntimeError(f"E2B command failed ({exit_code}): {stderr or stdout}")
         return stdout
-
-    def _ensure_started(self) -> None:
-        self._ensure_sandbox()
-        self._run_setup()
-        super()._ensure_started()
 
     def upload_file(self, local_path: str | Path, remote_path: str) -> None:
         self._ensure_sandbox()
@@ -117,17 +103,6 @@ class E2BRuntime(RemoteFileRuntime):
             return
         shutil.copy2(remote_path, dst)
 
-    def remove_path(self, remote_path: str, *, recursive: bool = False) -> None:
-        flag = "-rf" if recursive else "-f"
-        self.exec(f"rm {flag} -- {shlex.quote(remote_path)}")
-
-    def list_files(self, remote_root: str) -> list[str]:
-        output = self.exec(
-            f"find {shlex.quote(remote_root)} -type f -print 2>/dev/null || true"
-        )
-        prefix = remote_root.rstrip("/") + "/"
-        return sorted(line.removeprefix(prefix) for line in output.splitlines() if line)
-
     def clone(self, workspace: BaseWorkspace | str | Path | None = None) -> E2BRuntime:
         new = E2BRuntime(
             workspace=workspace or self.workspace_obj,
@@ -149,11 +124,7 @@ class E2BRuntime(RemoteFileRuntime):
         sandbox, self.sandbox = self.sandbox, None
         if sandbox is None:
             return
-        for method_name in ("kill", "close", "disconnect"):
-            method = getattr(sandbox, method_name, None)
-            if callable(method):
-                method()
-                break
+        self._close_with_methods(sandbox, ("kill", "close", "disconnect"))
 
 
 __all__ = ["E2BRuntime"]

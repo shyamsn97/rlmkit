@@ -298,14 +298,14 @@ class RLMFlow(LLMClient):
         """
         return scheduling.step(self, graph)
 
-    def _refill_async_children(
+    def _refill_eager_children(
         self,
         _done_id: str,
         _result: object,
         active_ids: set[str],
     ) -> list[tuple[str, Callable[[], None]]]:
-        """Return newly runnable async-child tasks after one task completes."""
-        return scheduling.refill_async_children(self, _done_id, _result, active_ids)
+        """Return newly runnable eager-child tasks after one task completes."""
+        return scheduling.refill_eager_children(self, _done_id, _result, active_ids)
 
     def terminate(self, graph: Graph) -> Graph:
         """Mark every still-running agent for a final-answer turn.
@@ -885,7 +885,7 @@ class RLMFlow(LLMClient):
             "max_output_length": self.config.max_output_length,
             "max_messages": self.config.max_messages,
             "child_max_iterations": self.config.child_max_iterations,
-            "async_children": self.config.async_children,
+            "eager_children": self.config.eager_children,
             "single_block": self.config.single_block,
             "max_budget": self.config.max_budget,
         }

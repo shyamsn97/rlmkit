@@ -91,7 +91,13 @@ class ModalRuntime(RemoteFileRuntime):
         if self.container is not None:
             return
 
-        import modal
+        try:
+            import modal
+        except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency.
+            raise ModuleNotFoundError(
+                "ModalRuntime requires the optional `modal` dependency. "
+                "Install it with `pip install rlmflow[modal]`."
+            ) from exc
 
         self._log(f"looking up Modal app {self.app_name!r}")
         app = modal.App.lookup(self.app_name, create_if_missing=True)
@@ -244,13 +250,6 @@ class ModalRuntime(RemoteFileRuntime):
             return
         flag = "-rf" if recursive else "-f"
         self.exec(f"rm {flag} -- {shlex.quote(remote_path)}")
-
-    def list_files(self, remote_root: str) -> list[str]:
-        output = self.exec(
-            f"find {shlex.quote(remote_root)} -type f -print 2>/dev/null || true"
-        )
-        prefix = remote_root.rstrip("/") + "/"
-        return sorted(line.removeprefix(prefix) for line in output.splitlines() if line)
 
     def send(self, msg: dict) -> None:
         self._trace(f"sending REPL command: {msg.get('cmd', '<proxy-response>')}")

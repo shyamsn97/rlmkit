@@ -46,7 +46,7 @@ under four base classes (full spec:
 | `llm_output`          | `LLMOutput`          | `ObservationNode`      | reply, extracted REPL code, token deltas                          |
 | `exec_action`         | `ExecAction`         | `ActionNode`           | "ran fresh code" — optional code echo                             |
 | `exec_output`         | `ExecOutput`         | `CodeObservation` (obs)| runtime stdout/stderr                                             |
-| `supervising_output`  | `SupervisingOutput`  | `CodeObservation` (obs)| code yielded; `waiting_on` lists pending children                 |
+| `supervising_output`  | `SupervisingOutput`  | `CodeObservation` (obs)| code suspended at `await rlm_wait`; `waiting_on` lists pending children |
 | `error_output`        | `ErrorOutput`        | `CodeObservation` (obs)| failure observation                                               |
 | `done_output`         | `DoneOutput`         | `CodeObservation` (obs)| terminal answer from `done(...)`                                  |
 | `resume_action`       | `ResumeAction`       | `ActionNode`           | "supervisor resumed paused code" — produces a `CodeObservation`   |
@@ -98,14 +98,25 @@ workspace/
       agent.json              # per-agent invariants written once
       session.jsonl           # one Node per line, in seq order
       latest.json             # cached summary of the latest state
+      transcript.json         # exact LLM conversation + per-message metadata
     root.child/
       agent.json
       session.jsonl
       latest.json
+      transcript.json
   context/
     root/context.txt          # CONTEXT payload + metadata
     root.child/context.txt
 ```
+
+`transcript.json` is the ground-truth record of what each agent's LLM
+actually saw: `messages` is the flat `[{role, content}, ...]`
+conversation across every turn, and `metadata` is a parallel list with
+one dict per message (per-assistant entries carry `model`, token counts,
+`elapsed_s`, and the node/seq the turn was appended after). Useful for
+debugging prompt issues, replaying a turn under a different model, or
+auditing context growth. Read it via the `Session` API
+(`session.read_transcript(agent_id)`).
 
 `Workspace.open_path(...).load_graph()` rehydrates the persisted state
 as the same `Graph` shape the engine emits — `flows_to` edges are

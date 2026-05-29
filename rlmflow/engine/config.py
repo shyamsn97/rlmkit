@@ -34,7 +34,7 @@ class RLMConfig:
     max_messages: int | None = None
     max_concurrency: int | None = field(default_factory=_default_max_concurrency)
     child_max_iterations: int | None = None
-    async_children: bool = False
+    eager_children: bool = False
     single_block: bool = True
     system_prompt: str | None = None
     max_budget: int | None = None

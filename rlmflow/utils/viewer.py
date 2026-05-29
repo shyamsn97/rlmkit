@@ -464,9 +464,9 @@ def _build_graph_figure(
         return None
 
     # An ActionNode is hidden when its successor "absorbs" it — see
-    # :func:`rlmflow.graph.timeline.is_bookkeeping`. Same rule that
-    # ``retrace_steps`` uses to merge bookkeeping states into the
-    # previous tick, so the figure and the slider stay in sync.
+    # :func:`is_bookkeeping` above. Same rule that ``retrace_steps`` uses to
+    # merge bookkeeping states into the previous tick, so the figure and the
+    # slider stay in sync.
     next_in_agent: dict[str, Node] = {}
     for sub in graph.walk():
         states = sub.states

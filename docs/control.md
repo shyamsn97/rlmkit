@@ -26,13 +26,13 @@ finest-grained reproducible step the engine exposes — see
 [`internal/node_model.md`](internal/node_model.md) for the full
 state-machine spec and worked simulations.
 
-## Async Children
+## Eager Children
 
 By default, children advance in synchronized `step(...)` batches. If child A's
 current step takes 10 seconds and child B's current step takes 2 seconds,
 child B's next step waits until child A's current step finishes.
 
-Set `async_children=True` when you want a work-conserving drain after a parent
+Set `eager_children=True` when you want a work-conserving drain after a parent
 hits `await rlm_wait(...)`:
 
 ```python
@@ -43,7 +43,7 @@ agent = RLMFlow(
         max_depth=2,
         max_iterations=30,
         max_concurrency=8,
-        async_children=True,
+        eager_children=True,
     ),
 )
 ```
@@ -61,7 +61,7 @@ childa.task_1 finishes
 parent resumes when all waited-on children are done
 ```
 
-See [`examples/async_children.py`](../examples/async_children.py) for a
+See [`examples/eager_children.py`](../examples/eager_children.py) for a
 deterministic offline demo that prints both modes side by side.
 
 ## Workspace Resume
