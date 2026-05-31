@@ -1,0 +1,8 @@
+{
+  "agent_id": "root.search-batch-2.haystack_file_0020_txt",
+  "latest_node_id": "n_f5e152ab464a",
+  "seq": 8,
+  "type": "done_output",
+  "terminal": true,
+  "result": "NO_MATCH"
+}

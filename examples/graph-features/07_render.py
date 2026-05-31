@@ -20,57 +20,58 @@ from __future__ import annotations
 from pathlib import Path
 
 from rlmflow.graph import (
-    ActionNode,
+    DoneOutput,
+    ExecAction,
     Graph,
-    QueryNode,
-    ResultNode,
-    SupervisingNode,
+    LLMAction,
+    LLMOutput,
+    SupervisingOutput,
+    UserQuery,
 )
 
 
 def build_graph() -> Graph:
-    root_q = QueryNode(agent_id="root", seq=0, content="write hello world", iteration=1)
-    root_action = ActionNode(
+    root_q = UserQuery(agent_id="root", seq=0, content="write hello world")
+    root_call = LLMAction(agent_id="root", seq=1, model="demo")
+    root_reply = LLMOutput(
         agent_id="root",
-        seq=1,
+        seq=2,
         reply="I'll delegate the file write.",
         code='await launch_subagent("write hello.py", name="hello")',
-        iteration=2,
         input_tokens=120,
         output_tokens=30,
     )
-    root_sup = SupervisingNode(
-        agent_id="root", seq=2, waiting_on=["root.hello"], iteration=2,
+    root_exec = ExecAction(agent_id="root", seq=3, code=root_reply.code)
+    root_sup = SupervisingOutput(
+        agent_id="root", seq=4, waiting_on=["root.hello"],
     )
-    root_done = ResultNode(agent_id="root", seq=3, result="hello.py created", iteration=4)
+    root_done = DoneOutput(agent_id="root", seq=5, result="hello.py created")
 
-    hello_q = QueryNode(agent_id="root.hello", seq=0, content="write hello.py", iteration=2)
-    hello_action = ActionNode(
+    hello_q = UserQuery(agent_id="root.hello", seq=0, content="write hello.py")
+    hello_reply = LLMOutput(
         agent_id="root.hello",
         seq=1,
         reply="writing the file",
         code='write_file("hello.py", "print(\\"hello\\")\\n")',
-        iteration=3,
         input_tokens=80,
         output_tokens=20,
     )
-    hello_done = ResultNode(
-        agent_id="root.hello", seq=2, result="wrote hello.py", iteration=3,
-    )
+    hello_exec = ExecAction(agent_id="root.hello", seq=2, code=hello_reply.code)
+    hello_done = DoneOutput(agent_id="root.hello", seq=3, result="wrote hello.py")
 
     hello = Graph.from_meta_dict(
         {
             "agent_id": "root.hello",
             "depth": 1,
             "parent_agent_id": "root",
-            "parent_node_id": root_action.id,
+            "parent_node_id": root_reply.id,
             "query": "write hello.py",
         },
-        states=[hello_q, hello_action, hello_done],
+        states=[hello_q, hello_reply, hello_exec, hello_done],
     )
     return Graph.from_meta_dict(
         {"agent_id": "root", "depth": 0, "query": "write hello world"},
-        states=[root_q, root_action, root_sup, root_done],
+        states=[root_q, root_call, root_reply, root_exec, root_sup, root_done],
         children={"root.hello": hello},
     )
 

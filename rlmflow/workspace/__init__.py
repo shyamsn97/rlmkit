@@ -5,7 +5,6 @@ from rlmflow.workspace.base import (
     Context,
     ContextVariable,
     Session,
-    SessionVariable,
 )
 from rlmflow.workspace.filesystem import (
     FileContext,
@@ -16,6 +15,7 @@ from rlmflow.workspace.memory import (
     InMemoryContext,
     InMemorySession,
 )
+from rlmflow.workspace.session_view import SessionVariable
 from rlmflow.workspace.store import FileStore, MemoryStore, Store
 from rlmflow.workspace.sync import (
     DEFAULT_EXCLUDES,

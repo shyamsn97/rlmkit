@@ -1,5 +1,8 @@
 # Engine Simplification Plan
 
+Status: Superseded by the current split engine modules, host-bound core tool
+closures, and `get_repl_tools()` contextvars model. Keep for historical context.
+
 `rlmflow/rlm.py` is one class doing too many jobs: lifecycle, scheduling, state
 transitions, persistence, runtime tool wiring, prompt assembly, and child
 spawning. This document locks in a small redesign that keeps the observable

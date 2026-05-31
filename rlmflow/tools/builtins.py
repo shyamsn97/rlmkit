@@ -17,6 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rlmflow.graph import ChildHandle, WaitRequest
+from rlmflow.runtime.env import AGENT_ID, DONE_RESULT, PARENT_NODE_ID, replay_queue
 from rlmflow.tools import tool
 
 
@@ -34,10 +35,10 @@ def make_done(env: dict[str, Any]):
 
     @tool("Return this agent's final answer.")
     def done(answer: str) -> str:
-        if env.get("DONE_RESULT") is None:
-            env["DONE_RESULT"] = str(answer).strip()
-            print(f"[done] {env['DONE_RESULT']}")
-        raise DoneSignal(env["DONE_RESULT"])
+        if env.get(DONE_RESULT) is None:
+            env[DONE_RESULT] = str(answer).strip()
+            print(f"[done] {env[DONE_RESULT]}")
+        raise DoneSignal(env[DONE_RESULT])
 
     return done
 
@@ -83,7 +84,7 @@ def make_delegate(
     Passing the callable instead of the whole engine keeps this
     module decoupled from :class:`RLMFlow`.
 
-    In *replay mode* (``env['_REPLAY_QUEUE']`` is a list), ``rlm_delegate``
+    In *replay mode* (``env[REPLAY_QUEUE]`` is a list), ``rlm_delegate``
     does not spawn a new child — it pops the next expected agent id
     off the queue and returns a :class:`ChildHandle` to it. This lets
     the engine re-execute action code after a fork or cold start to
@@ -105,18 +106,18 @@ def make_delegate(
         max_iterations: int | None = None,
         model: str = "default",
     ) -> ChildHandle | str:
-        replay_queue = env.get("_REPLAY_QUEUE")
-        if replay_queue is not None:
-            if not replay_queue:
+        queue = replay_queue(env)
+        if queue is not None:
+            if not queue:
                 return (
                     f"[replay error: no expected child for rlm_delegate({name!r}). "
                     "Recorded trajectory diverges from the action code.]"
                 )
-            return ChildHandle(replay_queue.pop(0))
+            return ChildHandle(queue.pop(0))
         context_text = "\n".join(context) if isinstance(context, list) else context
         return spawn_child(
-            env["AGENT_ID"],
-            env["PARENT_NODE_ID"],
+            env[AGENT_ID],
+            env[PARENT_NODE_ID],
             name,
             query,
             context_text,
@@ -197,11 +198,30 @@ def make_launch_subagents(
     return launch_subagents
 
 
+def make_launcher(
+    name: str,
+    rlm_delegate: Callable[..., object],
+    rlm_wait: Callable[..., Any],
+):
+    """Build a public launcher tool by registered name."""
+
+    factories = {
+        "launch_subagent": make_launch_subagent,
+        "launch_subagents": make_launch_subagents,
+    }
+    try:
+        factory = factories[name]
+    except KeyError as exc:
+        raise KeyError(f"unknown launcher: {name}") from exc
+    return factory(rlm_delegate, rlm_wait)
+
+
 __all__ = [
     "DoneSignal",
     "SHOW_VARS",
     "make_delegate",
     "make_done",
+    "make_launcher",
     "make_launch_subagent",
     "make_launch_subagents",
     "make_wait",

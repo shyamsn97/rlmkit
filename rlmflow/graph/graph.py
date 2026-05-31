@@ -23,17 +23,15 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable
 
 from pydantic import BaseModel
 
 from rlmflow.graph.node import Node, parse_node_obj
-
-_MISSING = object()
-
+from rlmflow.graph.views import AgentsView, Edge, EdgesView, NodesView
 
 # ── refs (small Pydantic models for serializable external pointers) ──
 
@@ -49,22 +47,6 @@ class RuntimeRef(BaseModel):
     """Serializable reference to a durable runtime / REPL session."""
 
     id: str
-
-
-# ── derived edges (for viz) ──────────────────────────────────────────
-
-
-class Edge(NamedTuple):
-    """A derived flow- or spawn-edge between two nodes.
-
-    Edges are *not* stored on a :class:`Graph` — they're computed on
-    demand from the recursive structure (``states`` ordering yields
-    ``flows_to``; ``children`` + ``parent_node_id`` yield ``spawns``).
-    """
-
-    from_: str
-    to: str
-    kind: str  # "flows_to" | "spawns"
 
 
 # ── Graph ────────────────────────────────────────────────────────────
@@ -347,7 +329,6 @@ class Graph:
         target: str | re.Pattern[str] | Callable[[Graph], Iterable[str | Graph]],
         node: Node,
         mode: str = "append",
-        reason: str | None = None,
     ) -> Graph:
         """Return a new graph with ``node`` injected at ``target``.
 
@@ -355,25 +336,9 @@ class Graph:
         or a callable returning agent ids / subgraphs. Only append mode is
         supported for now.
         """
-        if mode != "append":
-            raise NotImplementedError(
-                "Graph.inject currently supports append mode only"
-            )
-        out = self.copy(deep=True)
-        targets = out._resolve_injection_targets(target)
-        if not targets:
-            raise KeyError(f"no injection targets matched {target!r}")
-        for sub in targets:
-            fixed = _node_for_injection(sub, node, reason=reason)
-            cur = sub.current()
-            if cur is not None and cur.terminal:
-                raise ValueError(f"cannot inject into finished agent {sub.agent_id!r}")
-            if cur is not None and _is_action_like(cur) and _is_action_like(fixed):
-                raise ValueError(
-                    f"cannot queue multiple pending actions for {sub.agent_id!r}"
-                )
-            sub.states.append(fixed)
-        return out
+        from rlmflow.graph.injection import inject
+
+        return inject(self, target=target, node=node, mode=mode)
 
     def inject_output(
         self,
@@ -381,29 +346,22 @@ class Graph:
         target: str | re.Pattern[str] | Callable[[Graph], Iterable[str | Graph]],
         output: str,
         content: str | None = None,
-        reason: str | None = None,
     ) -> Graph:
-        from rlmflow.graph.node import ExecOutput
+        from rlmflow.graph.injection import inject_output
 
-        return self.inject(
+        return inject_output(
+            self,
             target=target,
-            node=ExecOutput(output=output, content=content or output),
-            reason=reason,
+            output=output,
+            content=content,
         )
 
     def _resolve_injection_targets(
         self, target: str | re.Pattern[str] | Callable[[Graph], Iterable[str | Graph]]
     ) -> list[Graph]:
-        if callable(target):
-            raw = list(target(self))
-            out: list[Graph] = []
-            for item in raw:
-                out.append(item if isinstance(item, Graph) else self[item])
-            return out
-        if isinstance(target, str) and target in self.agents:
-            return [self[target]]
-        compiled = re.compile(target) if isinstance(target, str) else target
-        return [g for g in self.walk() if compiled.search(g.agent_id)]
+        from rlmflow.graph.injection import resolve_injection_targets
+
+        return resolve_injection_targets(self, target)
 
     # ── rendering ────────────────────────────────────────────────────
 
@@ -552,226 +510,6 @@ def _path_prefixes(start: str, full: str) -> Iterator[str]:
     for piece in rest:
         cur = f"{cur}.{piece}"
         yield cur
-
-
-def _is_action_like(node: Node) -> bool:
-    from rlmflow.graph.node import ActionNode
-
-    return isinstance(node, ActionNode)
-
-
-def _node_for_injection(sub: Graph, node: Node, *, reason: str | None = None) -> Node:
-    fields = node.model_dump(
-        exclude={"id", "agent_id", "seq", "injected", "injected_reason"},
-        mode="python",
-    )
-    next_seq = (sub.states[-1].seq + 1) if sub.states else 0
-    return node.__class__(
-        agent_id=sub.agent_id,
-        seq=next_seq,
-        injected=True,
-        injected_reason=reason,
-        **fields,
-    )
-
-
-# ── flat views over the subtree ──────────────────────────────────────
-
-
-class NodesView:
-    """``graph.nodes`` — flat view over every node in the subtree."""
-
-    __slots__ = ("_g",)
-
-    def __init__(self, g: Graph) -> None:
-        self._g = g
-
-    def _iter(self) -> Iterator[Node]:
-        for g in self._g.walk():
-            yield from g.states
-
-    def __iter__(self) -> Iterator[Node]:
-        return self._iter()
-
-    def __len__(self) -> int:
-        return sum(1 for _ in self._iter())
-
-    def __contains__(self, node_id: object) -> bool:
-        return any(n.id == node_id for n in self._iter())
-
-    def __repr__(self) -> str:
-        return f"NodesView({len(self)} nodes)"
-
-    def find(self, node_id: str) -> Node | None:
-        return self._g.find(node_id)
-
-    def _locate(self, node_id: str) -> tuple[Graph, int]:
-        for g in self._g.walk():
-            for i, s in enumerate(g.states):
-                if s.id == node_id:
-                    return g, i
-        raise KeyError(node_id)
-
-    # ── mutations across the subtree ─────────────────────────────────
-
-    def replace(self, node_id: str, new_node: Node) -> Node:
-        """Find a node anywhere in the subtree and swap it in place."""
-        g, i = self._locate(node_id)
-        g.states[i] = new_node
-        return new_node
-
-    def update(self, node_id: str, **changes: Any) -> Node:
-        """Apply ``changes`` to the node with ``node_id`` (anywhere in subtree)."""
-        g, i = self._locate(node_id)
-        g.states[i] = g.states[i].update(**changes)
-        return g.states[i]
-
-    def remove(self, node_id: str) -> Node:
-        """Drop a node from the subtree by id and return it."""
-        g, i = self._locate(node_id)
-        return g.states.pop(i)
-
-    # ── filters ──────────────────────────────────────────────────────
-
-    def where(
-        self,
-        predicate: Callable[[Node], bool] | None = None,
-        /,
-        **filters: Any,
-    ) -> list[Node]:
-        return _filter(self, predicate, filters)
-
-    def queries(self) -> list[Node]:
-        """Bootstrap user queries (``type == "user_query"``)."""
-        return self.where(type="user_query")
-
-    def llm_actions(self) -> list[Node]:
-        """LLM action records (``type == "llm_action"``)."""
-        return self.where(type="llm_action")
-
-    def llm_outputs(self) -> list[Node]:
-        """LLM replies (``type == "llm_output"``)."""
-        return self.where(type="llm_output")
-
-    def exec_actions(self) -> list[Node]:
-        """Code-execution actions (``type == "exec_action"``)."""
-        return self.where(type="exec_action")
-
-    def resume_actions(self) -> list[Node]:
-        """Resume actions (``type == "resume_action"``)."""
-        return self.where(type="resume_action")
-
-    def observations(self) -> list[Node]:
-        """:class:`ExecOutput` nodes that were *not* produced by a resume."""
-        return [
-            n
-            for n in self._iter()
-            if n.type == "exec_output" and not getattr(n, "resumed_from", None)
-        ]
-
-    def supervising(self) -> list[Node]:
-        """Yielded code observations (``type == "supervising_output"``)."""
-        return self.where(type="supervising_output")
-
-    def resumes(self) -> list[Node]:
-        """Code observations produced by a :class:`ResumeAction`."""
-        return [
-            n
-            for n in self._iter()
-            if n.type
-            in ("exec_output", "supervising_output", "error_output", "done_output")
-            and bool(getattr(n, "resumed_from", None))
-        ]
-
-    def results(self) -> list[Node]:
-        """Terminal results (``type == "done_output"``)."""
-        return self.where(type="done_output")
-
-    def errors(self) -> list[Node]:
-        """Error observations (``type == "error_output"``)."""
-        return self.where(type="error_output")
-
-
-class AgentsView(Mapping[str, Graph]):
-    """``graph.agents`` — Mapping[agent_id, sub-Graph] across the subtree."""
-
-    __slots__ = ("_g",)
-
-    def __init__(self, g: Graph) -> None:
-        self._g = g
-
-    def __iter__(self) -> Iterator[str]:
-        for g in self._g.walk():
-            yield g.agent_id
-
-    def __len__(self) -> int:
-        return sum(1 for _ in self._g.walk())
-
-    def __getitem__(self, aid: str) -> Graph:
-        return self._g[aid]
-
-    def __repr__(self) -> str:
-        return f"AgentsView({list(self)})"
-
-
-class EdgesView:
-    """``graph.edges`` — derived flow + spawn edges across the subtree.
-
-    Recomputed on every call so it stays consistent with a mutable graph.
-    """
-
-    __slots__ = ("_g",)
-
-    def __init__(self, g: Graph) -> None:
-        self._g = g
-
-    def _build(self) -> list[Edge]:
-        out: list[Edge] = []
-        for g in self._g.walk():
-            for prev, curr in zip(g.states, g.states[1:]):
-                out.append(Edge(from_=prev.id, to=curr.id, kind="flows_to"))
-            for child in g.children.values():
-                if child.parent_node_id and child.states:
-                    out.append(
-                        Edge(
-                            from_=child.parent_node_id,
-                            to=child.states[0].id,
-                            kind="spawns",
-                        )
-                    )
-        return out
-
-    def __iter__(self) -> Iterator[Edge]:
-        return iter(self._build())
-
-    def __len__(self) -> int:
-        return len(self._build())
-
-    def __repr__(self) -> str:
-        return f"EdgesView({len(self)} edges)"
-
-    def where(
-        self,
-        predicate: Callable[[Edge], bool] | None = None,
-        /,
-        **filters: Any,
-    ) -> list[Edge]:
-        return _filter(self._build(), predicate, filters)
-
-    def spawns(self) -> list[Edge]:
-        return [e for e in self._build() if e.kind == "spawns"]
-
-    def flows_to(self) -> list[Edge]:
-        return [e for e in self._build() if e.kind == "flows_to"]
-
-
-def _filter(items, predicate, filters):
-    def matches(x):
-        if predicate is not None and not predicate(x):
-            return False
-        return all(getattr(x, k, _MISSING) == v for k, v in filters.items())
-
-    return [x for x in items if matches(x)]
 
 
 __all__ = [

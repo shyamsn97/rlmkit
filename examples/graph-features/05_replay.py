@@ -1,4 +1,4 @@
-"""Replaying a real engine run with ``graph.history()``.
+"""Retracing a real engine run with ``retrace_steps(graph)``.
 
 The replay system is genuinely driven by the engine. Every call to
 ``RLMFlow.step()`` bumps an internal counter; every node it appends is
@@ -9,7 +9,7 @@ after each bucket.
 This script:
   1. runs the real engine end-to-end with a tiny scripted LLM,
   2. prints the iteration stamps the engine wrote,
-  3. calls ``graph.history()`` and shows the snapshots line up with the
+3. calls ``retrace_steps(graph)`` and shows the snapshots line up with the
      engine's actual scheduling rounds.
 
 Two children advance in parallel during the same step, which shows up as
@@ -24,7 +24,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from rlmflow import LLMClient, LLMUsage, RLMConfig, RLMFlow, Workspace
+from rlmflow import LLMClient, LLMUsage, RLMConfig, RLMFlow, Workspace, retrace_steps
 
 
 ROOT_SPLIT = (
@@ -57,6 +57,11 @@ def banner(title: str) -> None:
     print("─" * 60)
 
 
+def current_type(subgraph) -> str:
+    current = subgraph.current()
+    return current.type if current else "empty"
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         workspace = Workspace.create(Path(tmp).resolve() / "ws")
@@ -73,7 +78,7 @@ def main() -> None:
             tick += 1
             graph = engine.step(graph)
             print(f"step {tick}: agents=" + ", ".join(
-                f"{aid}:{sub.current().type}"
+                f"{aid}:{current_type(sub)}"
                 for aid, sub in graph.agents.items()
             ))
         print(f"\nfinal result: {graph.result()!r}")
@@ -90,12 +95,12 @@ def main() -> None:
             iteration = getattr(n, "iteration", "-")
             print(f"  iter={iteration}  {n.agent_id:<7} {n.type:<12} {preview!r}")
 
-        banner("graph.history() — one snapshot per engine step()")
-        snapshots = graph.history()
+        banner("retrace_steps(graph) — one snapshot per stable transition")
+        snapshots = retrace_steps(graph)
         print(f"{len(snapshots)} snapshots ({tick} engine ticks)\n")
         for i, snap in enumerate(snapshots, start=1):
             agents = ", ".join(
-                f"{aid}:{sub.current().type}" for aid, sub in snap.agents.items()
+                f"{aid}:{current_type(sub)}" for aid, sub in snap.agents.items()
             )
             print(f"snapshot {i}  states={len(snap.nodes)}  ({agents})")
 

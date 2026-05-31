@@ -9,13 +9,14 @@ and runtime events.
 The primitive is:
 
 ```python
-graph2 = graph.inject(target="root", node=ExecOutput(...), reason="controller")
+graph2 = graph.inject(target="root", node=ExecOutput(...))
 graph3 = agent.step(graph2)
 ```
 
 `graph.inject(...)` returns a new graph value. It does not write to the active
-session. `agent.step(graph2)` is the commit point: it persists injected nodes,
-updates the transcript/message projection, and then continues normal scheduling.
+session. `agent.step(graph2)` is the commit point: it persists the appended
+nodes as ordinary graph states, updates the transcript/message projection, and
+then continues normal scheduling.
 
 For a runnable offline demo, see [`examples/injections.py`](../examples/injections.py).
 
@@ -35,7 +36,6 @@ graph = graph.inject(
         output="Injected controller observation: submit your final answer now.",
         content="Injected controller observation: submit your final answer now.",
     ),
-    reason="message budget nearly exhausted",
 )
 
 graph = agent.step(graph)  # persists the observation, then calls the LLM
@@ -56,7 +56,6 @@ from rlmflow import ExecAction
 graph = graph.inject(
     target="root.worker",
     node=ExecAction(code='done("message budget exhausted; best available answer")'),
-    reason="message budget exhausted",
 )
 
 graph = agent.step(graph)  # executes the injected action and writes DoneOutput
@@ -82,7 +81,8 @@ Useful traversal helpers include `graph.leaves()`, `graph.where(fn)`,
 ## Rules
 
 - Injection is append-only in the public API today.
-- Injected nodes are marked with `node.injected` and `node.injected_reason`.
+- Injected nodes are stored as ordinary node rows; there is no per-node
+  injection metadata.
 - Do not inject into a finished agent.
 - Multiple adjacent observation nodes are allowed.
 - Only one pending injected action per agent is allowed; queue another action

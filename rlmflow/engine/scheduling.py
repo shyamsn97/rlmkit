@@ -56,7 +56,7 @@ def materialize_injected_nodes(engine, graph: Graph) -> tuple[Graph, bool]:
 
     ``Graph.inject(...)`` is immutable and does not touch the active session.
     ``agent.step(graph)`` is the commit point: observation nodes are appended
-    directly, while an injected ``ExecAction`` is executed before returning.
+    directly, while an appended ``ExecAction`` is executed before returning.
     """
     persisted = engine.session.load_graph()
     materialized = False
@@ -76,12 +76,8 @@ def materialize_injected_nodes(engine, graph: Graph) -> tuple[Graph, bool]:
 
         extra = candidate.states[len(current.states) :]
         for index, node in enumerate(extra):
-            if not node.injected:
-                raise ValueError(
-                    f"unpersisted node {node.id!r} on {aid!r} was not injected"
-                )
             if action_materialized:
-                raise ValueError("cannot materialize nodes after an injected action")
+                raise ValueError("cannot materialize nodes after an appended action")
 
             engine.session.write_state(node)
             materialized = True
@@ -89,14 +85,14 @@ def materialize_injected_nodes(engine, graph: Graph) -> tuple[Graph, bool]:
             if isinstance(node, ExecAction):
                 if index != len(extra) - 1:
                     raise ValueError(
-                        "an injected action must be the final pending node"
+                        "an appended action must be the final pending node"
                     )
                 fresh = engine.session.load_graph().agents[aid]
                 engine._run_exec(fresh, node, node.code)
                 action_materialized = True
             elif isinstance(node, (LLMAction, ResumeAction, ActionNode)):
                 raise NotImplementedError(
-                    f"injected {node.type!r} actions are not executable yet"
+                    f"appended {node.type!r} actions are not executable yet"
                 )
             elif isinstance(node, DoneOutput):
                 fresh = engine.session.load_graph().agents[aid]

@@ -272,20 +272,18 @@ graph = graph.inject(
         output="Injected controller observation: answer with current evidence.",
         content="Injected controller observation: answer with current evidence.",
     ),
-    reason="message budget nearly exhausted",
 )
 graph = agent.step(graph)  # persists the observation, then continues
 
 graph = graph.inject(
     target="root.scanner_api",
     node=ExecAction(code='done("best available answer")'),
-    reason="message budget exhausted",
 )
 graph = agent.step(graph)  # executes the action and writes DoneOutput
 ```
 
-Injected nodes are marked in the graph (`node.injected`,
-`node.injected_reason`) and persisted like normal states. See
+Injected nodes become ordinary graph states with the same shape as organic
+states. See
 [`docs/injections.md`](docs/injections.md) and
 [`examples/injections.py`](examples/injections.py).
 

@@ -21,14 +21,14 @@ Run:
 
 from __future__ import annotations
 
-from rlmflow.graph import Graph, QueryNode, ResultNode
+from rlmflow.graph import DoneOutput, Graph, UserQuery
 
 
 def base_graph() -> Graph:
-    root_q = QueryNode(agent_id="root", seq=0, content="hello")
-    root_done = ResultNode(agent_id="root", seq=1, result="ok")
-    child_q = QueryNode(agent_id="root.child", seq=0, content="sub")
-    child_done = ResultNode(agent_id="root.child", seq=1, result="sub ok")
+    root_q = UserQuery(agent_id="root", seq=0, content="hello")
+    root_done = DoneOutput(agent_id="root", seq=1, result="ok")
+    child_q = UserQuery(agent_id="root.child", seq=0, content="sub")
+    child_done = DoneOutput(agent_id="root.child", seq=1, result="sub ok")
     child = Graph.from_meta_dict(
         {"agent_id": "root.child", "depth": 1, "parent_agent_id": "root"},
         states=[child_q, child_done],
@@ -70,7 +70,7 @@ def main() -> None:
     print(summary(g))
 
     banner("replace_state — swap a state object")
-    g.replace_state(result_id, ResultNode(
+    g.replace_state(result_id, DoneOutput(
         agent_id="root", seq=1, result="ok (full swap)", id=result_id,
     ))
     print(summary(g))
@@ -81,13 +81,13 @@ def main() -> None:
     print(f"root.child result -> {g['root.child'].result()!r}")
 
     banner("add_state — append onto a sub-Graph")
-    g["root.child"].add_state(QueryNode(agent_id="root.child", seq=2, content="follow-up"))
+    g["root.child"].add_state(UserQuery(agent_id="root.child", seq=2, content="follow-up"))
     print(f"root.child states: {[n.type for n in g['root.child'].states]}")
 
     banner("add_child / remove_child — attach + detach sub-agents")
     sibling = Graph.from_meta_dict(
         {"agent_id": "root.sibling", "depth": 1, "parent_agent_id": "root"},
-        states=[QueryNode(agent_id="root.sibling", seq=0, content="hi")],
+        states=[UserQuery(agent_id="root.sibling", seq=0, content="hi")],
     )
     g.add_child(sibling)
     print(f"after add_child : {list(g.agents)}")

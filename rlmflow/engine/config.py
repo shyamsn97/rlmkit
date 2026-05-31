@@ -33,6 +33,7 @@ class RLMConfig:
     max_output_length: int = 12000
     max_messages: int | None = None
     max_concurrency: int | None = field(default_factory=_default_max_concurrency)
+    llm_max_concurrency: int | None = None
     child_max_iterations: int | None = None
     eager_children: bool = False
     single_block: bool = True

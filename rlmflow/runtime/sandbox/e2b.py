@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from rlmflow.runtime.sandbox.common import command_output, optional_dependency_error
 from rlmflow.runtime.sandbox.remote import RemoteFileRuntime
 from rlmflow.workspace import BaseWorkspace
 
@@ -49,8 +50,7 @@ class E2BRuntime(RemoteFileRuntime):
             from e2b import Sandbox
         except ModuleNotFoundError as exc:  # pragma: no cover - optional dependency.
             raise ModuleNotFoundError(
-                "E2BRuntime requires the optional `e2b` dependency. "
-                "Install it with `pip install rlmflow[e2b]`."
+                optional_dependency_error("E2BRuntime", "e2b")
             ) from exc
 
         self.sandbox = Sandbox.create(
@@ -70,12 +70,7 @@ class E2BRuntime(RemoteFileRuntime):
         result = self.sandbox.commands.run(
             command, timeout=timeout or self.repl_timeout
         )
-        exit_code = getattr(result, "exit_code", 0)
-        stdout = getattr(result, "stdout", "")
-        stderr = getattr(result, "stderr", "")
-        if exit_code:
-            raise RuntimeError(f"E2B command failed ({exit_code}): {stderr or stdout}")
-        return stdout
+        return command_output(result, "E2B")
 
     def upload_file(self, local_path: str | Path, remote_path: str) -> None:
         self._ensure_sandbox()

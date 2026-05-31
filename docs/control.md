@@ -106,14 +106,12 @@ graph = graph.inject(
         output="Injected controller observation: answer now.",
         content="Injected controller observation: answer now.",
     ),
-    reason="message budget nearly exhausted",
 )
 graph = agent.step(graph)
 
 graph = graph.inject(
     target="root.worker",
     node=ExecAction(code='done("best available answer")'),
-    reason="message budget exhausted",
 )
 graph = agent.step(graph)
 ```

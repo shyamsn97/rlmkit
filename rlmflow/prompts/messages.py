@@ -18,10 +18,6 @@ REPL_BLOCK_RULE = """Use exactly one fenced REPL code block per assistant messag
 ```
 Do not write bare `repl` without the opening and closing triple backticks."""
 
-# USER_PROMPT = """Think step-by-step on what to do using the REPL environment (which contains the context) to answer the prompt.
-
-# Continue using the REPL environment, which has the `CONTEXT` variable, and querying sub-LLMs / sub-agents by writing to ```repl``` tags, and determine your answer. Your next action:"""
-
 USER_PROMPT_WITH_ROOT = """Think step-by-step on what to do using the REPL environment (which contains the context) to answer the original prompt: "{query}".
 
 Continue using the REPL environment, which has the `CONTEXT` variable, and querying sub-LLMs / sub-agents by writing to ```repl``` tags, and determine your answer. Your next action:"""
@@ -63,21 +59,16 @@ CONTINUE_ACTION = "Continue your next action:"
 
 FIRST_TURN_INSPECTION_NUDGE = """\
 Your first REPL block should usually inspect the environment/task `CONTEXT` and/or `SESSION` variables, then stop so you can use that output in the next turn.
-```
 """
 
 FIRST_TURN_DECOMPOSITION_NUDGE = """\
-After the initial inspection output, if the task decomposes into independent
-units, fan them out with `await launch_subagents([...])` or issue a
-`llm_query_batched(...)` fanout rather than solving every unit yourself.
+After the initial inspection, delegate independent units with
+`await launch_subagents([...])` or `llm_query_batched(...)` instead of doing all
+work yourself. The parent should combine child results, make final decisions,
+and verify the outcome.
 
-For multi-file or multi-component browser/app tasks, this usually means one
-sub-agent per file/component via `await launch_subagents([...])`, then integrate,
-write files, and verify in the parent.
-
-Put each sub-agent's requirements/data in its `context=...` so the child can
-inspect them through `CONTEXT.read()`. This could mean shared contracts, file
-specs, task-specific info for a particular child, etc.
+Put child-specific requirements and shared contracts in each sub-agent's
+`context=...` so the child can inspect them through `CONTEXT.read()`.
 """
 
 

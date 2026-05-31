@@ -21,14 +21,10 @@ from pathlib import Path
 from rlmflow.graph import WaitRequest
 from rlmflow.runtime.runtime import Runtime, ToolDef
 from rlmflow.tools import get_tool_metadata
+from rlmflow.tools.registry import CONTROL_PROXY_TOOLS, LAUNCHER_TOOLS, SHOW_VARS_NAME
 from rlmflow.workspace import BaseWorkspace, ContextVariable, SessionVariable
 
 _REPL_ENTRYPOINT = "from rlmflow.runtime.repl import main; main()"
-# ``launch_subagent`` / ``launch_subagents`` are sandbox-local closures built
-# from the proxied primitives below; proxying async launchers themselves would
-# return host coroutine objects over JSON.
-_CONTROL_PROXY_TOOLS = {"done", "rlm_delegate", "rlm_wait"}
-_LAUNCHER_TOOLS = {"launch_subagent", "launch_subagents"}
 
 
 class RemoteFileRuntime(Runtime):
@@ -285,17 +281,17 @@ class RemoteFileRuntime(Runtime):
     def _install_tool(self, td: ToolDef) -> None:
         if td.name in self._installed_tools:
             return
-        if td.name == "SHOW_VARS":
+        if td.name == SHOW_VARS_NAME:
             self.inject_show_vars()
             self._installed_tools.add(td.name)
             return
-        if td.name in _LAUNCHER_TOOLS:
+        if td.name in LAUNCHER_TOOLS:
             self.inject_launcher(td.name)
             self._installed_tools.add(td.name)
             return
         if (
             td.fn is not None
-            and td.name not in _CONTROL_PROXY_TOOLS
+            and td.name not in CONTROL_PROXY_TOOLS
             and self._inject_importable_tool(td.name, td.fn)
         ):
             self._installed_tools.add(td.name)

@@ -17,6 +17,9 @@ Covers:
 
 from __future__ import annotations
 
+import threading
+import time
+
 from rlmflow.engine import scheduling
 from rlmflow import (
     ExecAction,
@@ -34,6 +37,7 @@ from rlmflow import (
 )
 from rlmflow.runtime.local import LocalRuntime
 from rlmflow.utils.trace import load_trace, save_trace
+from tests.helpers import StaticLLM, make_agent, run_to_completion
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -42,12 +46,6 @@ from rlmflow.utils.trace import load_trace, save_trace
 def _types(g: Graph) -> list[str]:
     """Trajectory types in order — strict obs/action alternation."""
     return [s.type for s in g.states]
-
-
-def _run(agent: RLMFlow, graph: Graph) -> Graph:
-    while not graph.finished:
-        graph = agent.step(graph)
-    return graph
 
 
 def _assert_seqs_monotonic(g: Graph) -> None:
@@ -78,17 +76,9 @@ def _assert_spawn_links(g: Graph, spawner_seq: int | None = None) -> None:
             assert child.parent_node_id == g.states[spawner_seq].id
 
 
-class _StaticLLM(LLMClient):
-    def __init__(self, reply: str) -> None:
-        self.reply = reply
-
-    def chat(self, messages, *args, **kwargs) -> str:
-        return self.reply
-
-
-def _agent(reply: str = '```repl\ndone("ok")\n```', **config_kwargs) -> RLMFlow:
-    config_kwargs.setdefault("max_iterations", 3)
-    return RLMFlow(_StaticLLM(reply), runtime=LocalRuntime(), config=RLMConfig(**config_kwargs))
+_StaticLLM = StaticLLM
+_agent = make_agent
+_run = run_to_completion
 
 
 # ── lifecycle ────────────────────────────────────────────────────────
@@ -122,7 +112,6 @@ def test_graph_inject_returns_new_graph_with_appended_node():
     injected = graph.inject(
         target="root",
         node=ExecOutput(output="controller note", content="controller note"),
-        reason="test",
     )
 
     assert injected is not graph
@@ -130,8 +119,6 @@ def test_graph_inject_returns_new_graph_with_appended_node():
     assert _types(injected) == ["user_query", "exec_output"]
     assert injected.current().agent_id == "root"
     assert injected.current().seq == 1
-    assert injected.current().injected is True
-    assert injected.current().injected_reason == "test"
 
 
 def test_graph_inject_rejects_multiple_pending_actions():
@@ -158,7 +145,6 @@ def test_step_materializes_injected_exec_action():
     assert is_done(graph.current())
     assert graph.result() == "injected ok"
     assert _types(graph) == ["user_query", "exec_action", "done_output"]
-    assert graph.states[1].injected is True
 
 
 def test_injected_observations_are_coalesced_in_messages():
@@ -385,6 +371,51 @@ def test_llm_query_batched_returns_ordered_results_without_children():
     assert llm.prompts[-2:] == ["alpha", "beta"]
 
 
+def test_llm_query_batched_uses_shared_channel_and_records_batch_usage():
+    class _FakeChannel:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def batch(self, model, prompts):
+            self.calls.append((model, prompts))
+            return [
+                (prompt.upper(), LLMUsage(input_tokens=index + 1, output_tokens=1))
+                for index, prompt in enumerate(prompts)
+            ]
+
+    agent = _agent(max_iterations=3)
+    channel = _FakeChannel()
+    agent.llm_channel = channel
+
+    assert agent.llm_query_batched(["alpha", "beta"]) == ["ALPHA", "BETA"]
+    assert channel.calls == [("default", ["alpha", "beta"])]
+    assert agent.last_usage == LLMUsage(input_tokens=3, output_tokens=2)
+
+
+def test_llm_turn_uses_shared_channel_and_records_call_usage():
+    class _FakeChannel:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def call(self, model, messages):
+            self.calls.append((model, messages))
+            return '```repl\ndone("ok from channel")\n```', LLMUsage(
+                input_tokens=3,
+                output_tokens=4,
+            )
+
+    agent = _agent(max_iterations=3)
+    channel = _FakeChannel()
+    agent.llm_channel = channel
+
+    graph = _run(agent, agent.start("use channel"))
+
+    assert graph.result() == "ok from channel"
+    assert len(channel.calls) == 1
+    assert channel.calls[0][0] == "default"
+    assert agent.last_usage == LLMUsage(input_tokens=3, output_tokens=4)
+
+
 def test_llm_query_batched_unknown_model_errors():
     reply = (
         "```repl\n"
@@ -400,6 +431,86 @@ def test_llm_query_batched_unknown_model_errors():
 
     assert is_errored(graph.current())
     assert "unknown model" in graph.current().content
+
+
+def test_parallel_child_agents_with_batches_share_llm_channel_cap():
+    class _ParallelBatchingLLM(LLMClient):
+        thread_safe = True
+
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+            self.batch_prompts: list[str] = []
+
+        def chat(self, messages, *args, **kwargs):
+            text, _usage = self.completion(messages, *args, **kwargs)
+            return text
+
+        def completion(self, messages, *args, **kwargs):
+            prompt = messages[-1]["content"]
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.02)
+            with self.lock:
+                self.active -= 1
+
+            if prompt.startswith("batch:"):
+                with self.lock:
+                    self.batch_prompts.append(prompt)
+                self.last_usage = LLMUsage(input_tokens=999, output_tokens=999)
+                return f"answer:{prompt}", LLMUsage(input_tokens=1, output_tokens=1)
+
+            if "child task" in prompt:
+                self.last_usage = LLMUsage(input_tokens=999, output_tokens=999)
+                return (
+                    "```repl\n"
+                    "answers = llm_query_batched([\n"
+                    '    f"batch:{AGENT_ID}:0",\n'
+                    '    f"batch:{AGENT_ID}:1",\n'
+                    '    f"batch:{AGENT_ID}:2",\n'
+                    "])\n"
+                    'done(AGENT_ID + ":" + ",".join(answers))\n'
+                    "```"
+                ), LLMUsage(input_tokens=2, output_tokens=1)
+
+            child_count = 4
+            delegates = "\n".join(
+                f'h{i} = rlm_delegate(name="c{i}", query="child task", context="")'
+                for i in range(child_count)
+            )
+            handles = ", ".join(f"h{i}" for i in range(child_count))
+            self.last_usage = LLMUsage(input_tokens=999, output_tokens=999)
+            return (
+                "```repl\n"
+                f"{delegates}\n"
+                f"results = await rlm_wait({handles})\n"
+                'done("|".join(sorted(results)))\n'
+                "```"
+            ), LLMUsage(input_tokens=3, output_tokens=1)
+
+    llm = _ParallelBatchingLLM()
+    agent = RLMFlow(
+        llm,
+        runtime=LocalRuntime(),
+        config=RLMConfig(
+            max_depth=1,
+            max_iterations=8,
+            max_concurrency=4,
+            llm_max_concurrency=2,
+        ),
+    )
+
+    graph = _run(agent, agent.start("parallel children with nested batches"))
+
+    assert graph.finished
+    assert set(graph.children) == {f"root.c{i}" for i in range(4)}
+    assert len(llm.batch_prompts) == 12
+    assert llm.max_active == 2
+    assert llm.max_active <= agent.config.llm_max_concurrency
+    for aid in graph.children:
+        assert f"{aid}:answer:batch:{aid}:0" in graph.result()
 
 
 def test_chat_uses_last_user_message_as_query():

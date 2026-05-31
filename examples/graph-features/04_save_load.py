@@ -22,13 +22,13 @@ import tempfile
 from pathlib import Path
 
 from rlmflow import (
+    DoneOutput,
     Graph,
     LLMClient,
     LLMUsage,
-    QueryNode,
     RLMConfig,
     RLMFlow,
-    ResultNode,
+    UserQuery,
     Workspace,
 )
 
@@ -53,8 +53,8 @@ def main() -> None:
         g = Graph.from_meta_dict(
             {"agent_id": "root", "depth": 0, "query": "hi"},
             states=[
-                QueryNode(agent_id="root", seq=0, content="hi"),
-                ResultNode(agent_id="root", seq=1, result="hello"),
+                UserQuery(agent_id="root", seq=0, content="hi"),
+                DoneOutput(agent_id="root", seq=1, result="hello"),
             ],
         )
         path = g.save(tmp_path / "graph.json")

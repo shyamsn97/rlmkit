@@ -1,0 +1,8 @@
+{
+  "agent_id": "root.search-batch-3",
+  "latest_node_id": "n_a7130428c098",
+  "seq": 10,
+  "type": "done_output",
+  "terminal": true,
+  "result": "'haystack/file_0036.txt' -> 36"
+}

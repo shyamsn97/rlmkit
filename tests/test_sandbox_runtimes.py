@@ -1,275 +1,24 @@
-from __future__ import annotations
-
-import json
 import queue
-import re
-import subprocess
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 from rlmflow.graph import ChildHandle, ExecAction, Graph, WaitRequest
-from rlmflow.llm import LLMClient
 from rlmflow.rlm import RLMConfig, RLMFlow
 from rlmflow.runtime.sandbox.remote import RemoteFileRuntime
 from rlmflow.tools import FILE_TOOLS
 from rlmflow.tools.builtins import SHOW_VARS
 from rlmflow.workspace import ContextVariable, SessionVariable, Workspace
-
-
-import contextlib
-import io
-import shlex as _shlex
-
-
-# --- in-process REPL watcher for fake sandbox tests --------------------------
-#
-# The real ``RemoteFileRuntime._ensure_started`` shells out to a long-running
-# ``tail -n +1 -f <in.jsonl> | python -u -c '<REPL entrypoint>'`` pipeline.
-# In a real provider this is fine — the sandbox boots once and stays warm —
-# but the fake-sandbox tests pay ~1.5–2s of Python cold start plus
-# ``rlmflow`` import cost on every test (function-scoped runtime).
-#
-# Instead, when the fake sees the REPL-launch shell command, it spins up the
-# same ``rlmflow.runtime.repl.REPL`` object in a daemon thread that watches
-# the input file. Each test still gets its own fresh REPL instance (state
-# isolation), but we skip subprocess startup entirely.
-_REPL_DETECT = "from rlmflow.runtime.repl import main"
-_REMOTE_DIR_RE = re.compile(r"mkdir -p (/[^\s]*rlmflow-[a-f0-9]+)\s+(\S+)")
-_KILL_PID_RE = re.compile(r"kill \$\(cat ([^)]+)/pid\)")
-
-_inproc_sessions: dict[str, "_InProcessReplSession"] = {}
-
-
-class _InProcessReplSession:
-    """Hold a ``rlmflow.runtime.repl.REPL`` instance and process queued input
-    synchronously when ``process_pending()`` is called.
-
-    Synchronous (no background thread) so the fake's stdout-redirecting
-    ``python -c`` fast-path can't race with the REPL's stdout capture.
-    """
-
-    def __init__(self, remote_dir: str, workdir: str | None = None) -> None:
-        from rlmflow.runtime.repl import REPL
-
-        self.remote_dir = Path(remote_dir)
-        self.workdir = Path(workdir) if workdir else None
-        self.input_path = self.remote_dir / "in.jsonl"
-        self.output_path = self.remote_dir / "out.jsonl"
-        self.stderr_path = self.remote_dir / "stderr.log"
-        self.remote_dir.mkdir(parents=True, exist_ok=True)
-        if self.workdir is not None:
-            self.workdir.mkdir(parents=True, exist_ok=True)
-        for p in (self.input_path, self.output_path, self.stderr_path):
-            p.write_text("")
-        (self.remote_dir / "pid").write_text("0")
-        self.repl = REPL()
-        self.offset = 0
-
-    def process_pending(self) -> None:
-        if not self.input_path.exists():
-            return
-        text = self.input_path.read_text()
-        import os
-
-        prev_cwd = os.getcwd() if self.workdir is not None else None
-        try:
-            if self.workdir is not None:
-                os.chdir(self.workdir)
-            while True:
-                nl = text.find("\n", self.offset)
-                if nl < 0:
-                    return
-                line = text[self.offset : nl]
-                self.offset = nl + 1
-                try:
-                    msg = json.loads(line)
-                    resp = self.repl.handle(msg)
-                except Exception as exc:  # noqa: BLE001 — mirror REPL error semantics
-                    resp = {"error": f"{type(exc).__name__}: {exc}"}
-                with self.output_path.open("a") as f:
-                    f.write(json.dumps(resp) + "\n")
-        finally:
-            if prev_cwd is not None:
-                os.chdir(prev_cwd)
-
-
-def _drain_all_sessions() -> None:
-    for session in _inproc_sessions.values():
-        session.process_pending()
-
-
-def _maybe_handle_repl_lifecycle(command: str) -> tuple[int, str, str] | None:
-    """Intercept REPL launch and kill shell commands; return ``(0, '', '')``
-    after wiring up an in-process REPL session, or ``None`` if unrelated."""
-
-    if _REPL_DETECT in command:
-        m = _REMOTE_DIR_RE.search(command)
-        if m is None:
-            return None
-        remote_dir = m.group(1)
-        remote_workdir = m.group(2)
-        if remote_dir not in _inproc_sessions:
-            _inproc_sessions[remote_dir] = _InProcessReplSession(
-                remote_dir, workdir=remote_workdir
-            )
-        return 0, "", ""
-    m = _KILL_PID_RE.search(command)
-    if m is not None:
-        _inproc_sessions.pop(m.group(1), None)
-        return 0, "", ""
-    return None
-
-
-def _maybe_eval_python_dash_c(command: str) -> tuple[int, str, str] | None:
-    """If ``command`` is a ``python -c '<script>'`` invocation, run it in-process.
-
-    The remote runtime's REPL transport sends every send/recv as
-    ``python -c "<small inline script>"`` (see ``RemoteFileRuntime.send/recv``).
-    Forking a real Python for each of those costs ~300-500ms on macOS, which
-    inflates these fake-backed tests by 10x+ without testing anything different
-    than running them in-process.
-
-    Returns ``(returncode, stdout, stderr)`` if we handled the command, else
-    ``None`` so the caller falls back to ``subprocess.run``.
-    """
-
-    try:
-        parts = _shlex.split(command)
-    except ValueError:
-        return None
-    if len(parts) < 3 or parts[0] not in ("python", "python3"):
-        return None
-    if "-c" not in parts:
-        return None
-    c_idx = parts.index("-c")
-    if c_idx + 1 >= len(parts):
-        return None
-    script = parts[c_idx + 1]
-    stdout, stderr = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-        try:
-            exec(compile(script, "<fake-sandbox>", "exec"), {"__name__": "__main__"})
-        except SystemExit as exc:
-            code = int(exc.code) if isinstance(exc.code, int) else 0 if exc.code is None else 1
-            if exc.code and not isinstance(exc.code, int):
-                stderr.write(str(exc.code))
-            return code, stdout.getvalue(), stderr.getvalue()
-        except BaseException as exc:  # noqa: BLE001 — mirror subprocess semantics
-            import traceback
-
-            traceback.print_exc(file=stderr)
-            del exc
-            return 1, stdout.getvalue(), stderr.getvalue()
-    return 0, stdout.getvalue(), stderr.getvalue()
-
-
-def _run_local(command: str, *, timeout: float | None = None):
-    repl_lifecycle = _maybe_handle_repl_lifecycle(command)
-    if repl_lifecycle is not None:
-        return repl_lifecycle
-    fast = _maybe_eval_python_dash_c(command)
-    if fast is not None:
-        _drain_all_sessions()
-        return fast
-    proc = subprocess.run(
-        command,
-        shell=True,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
-    return proc.returncode, proc.stdout, proc.stderr
-
-
-class _FakeE2BCommands:
-    def run(self, command: str, timeout: float | None = None):
-        code, stdout, stderr = _run_local(command, timeout=timeout)
-        return SimpleNamespace(exit_code=code, stdout=stdout, stderr=stderr)
-
-
-class _FakeE2BSandbox:
-    def __init__(self):
-        self.commands = _FakeE2BCommands()
-        self.killed = False
-
-    def kill(self):
-        self.killed = True
-
-
-class _FakeE2BSandboxFactory:
-    created: list[_FakeE2BSandbox] = []
-
-    @classmethod
-    def create(cls, **kwargs):
-        sandbox = _FakeE2BSandbox()
-        cls.created.append(sandbox)
-        return sandbox
-
-
-class _FakeDaytonaProcess:
-    def exec(self, command: str, env=None, timeout: int | None = None):
-        code, stdout, stderr = _run_local(command, timeout=timeout)
-        return SimpleNamespace(
-            exit_code=code,
-            artifacts=SimpleNamespace(stdout=stdout),
-            stderr=stderr,
-        )
-
-
-class _FakeDaytonaSandbox:
-    def __init__(self):
-        self.process = _FakeDaytonaProcess()
-        self.deleted = False
-
-    def delete(self):
-        self.deleted = True
-
-
-class _FakeDaytonaClient:
-    def __init__(self):
-        self.created: list[_FakeDaytonaSandbox] = []
-
-    def create(self, *args, **kwargs):
-        sandbox = _FakeDaytonaSandbox()
-        self.created.append(sandbox)
-        return sandbox
-
-
-class _NoopLLM(LLMClient):
-    def chat(self, messages, *args, **kwargs) -> str:
-        del messages, args, kwargs
-        return '```repl\ndone("ok")\n```'
-
-
-class _NoStartRemoteRuntime(RemoteFileRuntime):
-    def __init__(self, workspace):
-        super().__init__(workspace=workspace, remote_workdir="/workspace")
-        self.touched_remote = False
-
-    def send(self, msg: dict) -> None:
-        del msg
-        self.touched_remote = True
-        raise AssertionError("runtime should not start during child spawn")
-
-    def recv(self) -> dict:
-        self.touched_remote = True
-        raise AssertionError("runtime should not start during child spawn")
-
-    def exec(self, command: str, *, timeout: float | None = None) -> str:
-        del command, timeout
-        self.touched_remote = True
-        raise AssertionError("runtime should not exec during child spawn")
-
-    def list_files(self, remote_root: str) -> list[str]:
-        del remote_root
-        return []
-
+from tests.fakes.sandbox import (
+    FakeDaytonaClient,
+    FakeE2BSandboxFactory,
+    NoopLLM,
+    NoStartRemoteRuntime,
+)
 
 def test_e2b_runtime_executes_repl_protocol_with_sdk_shape(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=_FakeE2BSandboxFactory))
+    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=FakeE2BSandboxFactory))
     from rlmflow.runtime.sandbox.e2b import E2BRuntime
 
     runtime = E2BRuntime(
@@ -284,7 +33,7 @@ def test_e2b_runtime_executes_repl_protocol_with_sdk_shape(monkeypatch, tmp_path
 
 
 def test_e2b_runtime_exposes_public_exec(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=_FakeE2BSandboxFactory))
+    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=FakeE2BSandboxFactory))
     from rlmflow.runtime.sandbox.e2b import E2BRuntime
 
     runtime = E2BRuntime(
@@ -299,7 +48,7 @@ def test_e2b_runtime_exposes_public_exec(monkeypatch, tmp_path):
 
 
 def test_e2b_runtime_syncs_workspace_on_start_and_close(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=_FakeE2BSandboxFactory))
+    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=FakeE2BSandboxFactory))
     from rlmflow.runtime.sandbox.e2b import E2BRuntime
 
     host = tmp_path / "host"
@@ -327,7 +76,7 @@ def test_e2b_runtime_syncs_workspace_on_start_and_close(monkeypatch, tmp_path):
 def test_daytona_runtime_executes_repl_protocol_with_sdk_shape(tmp_path):
     from rlmflow.runtime.sandbox.daytona import DaytonaRuntime
 
-    client = _FakeDaytonaClient()
+    client = FakeDaytonaClient()
     runtime = DaytonaRuntime(
         workspace=tmp_path / "host",
         remote_workdir=str(tmp_path / "remote"),
@@ -352,7 +101,7 @@ def test_remote_file_runtime_is_publicly_exported():
 
 
 def test_remote_runtime_clone_does_not_copy_core_tools(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=_FakeE2BSandboxFactory))
+    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=FakeE2BSandboxFactory))
     from rlmflow.runtime.sandbox.e2b import E2BRuntime
 
     def custom_tool() -> str:
@@ -373,10 +122,10 @@ def test_remote_runtime_clone_does_not_copy_core_tools(monkeypatch, tmp_path):
 
 
 def test_remote_child_spawn_does_not_start_child_runtime(tmp_path):
-    root_runtime = _NoStartRemoteRuntime(tmp_path / "root")
-    child_runtime = _NoStartRemoteRuntime(tmp_path / "child")
+    root_runtime = NoStartRemoteRuntime(tmp_path / "root")
+    child_runtime = NoStartRemoteRuntime(tmp_path / "child")
     agent = RLMFlow(
-        _NoopLLM(),
+        NoopLLM(),
         runtime=root_runtime,
         runtime_factory=lambda: child_runtime,
         config=RLMConfig(max_depth=1),
@@ -399,7 +148,7 @@ def test_remote_child_spawn_does_not_start_child_runtime(tmp_path):
 
 
 def test_e2b_runtime_injects_workspace_handles_remotely(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=_FakeE2BSandboxFactory))
+    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=FakeE2BSandboxFactory))
     from rlmflow.runtime.sandbox.e2b import E2BRuntime
 
     workspace = Workspace.create(tmp_path / "host")
@@ -426,7 +175,7 @@ def test_e2b_runtime_injects_workspace_handles_remotely(monkeypatch, tmp_path):
 
 
 def test_e2b_runtime_imports_file_tools_remotely(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=_FakeE2BSandboxFactory))
+    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=FakeE2BSandboxFactory))
     from rlmflow.runtime.sandbox.e2b import E2BRuntime
 
     runtime = E2BRuntime(
@@ -443,7 +192,7 @@ def test_e2b_runtime_imports_file_tools_remotely(monkeypatch, tmp_path):
 
 
 def test_e2b_runtime_keeps_control_tools_as_proxies(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=_FakeE2BSandboxFactory))
+    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=FakeE2BSandboxFactory))
     from rlmflow.runtime.sandbox.e2b import E2BRuntime
     from rlmflow.tools.builtins import make_delegate, make_done, make_wait
 
@@ -531,7 +280,7 @@ def test_internal_delegation_primitives_are_hidden_from_public_tools(tmp_path):
     from rlmflow.runtime.local import LocalRuntime
 
     runtime = LocalRuntime(workspace=tmp_path / "workspace")
-    RLMFlow(_NoopLLM(), runtime=runtime, config=RLMConfig(max_depth=1))
+    RLMFlow(NoopLLM(), runtime=runtime, config=RLMConfig(max_depth=1))
 
     visible = {td.name for td in runtime.get_tool_defs()}
     assert "launch_subagent" in visible
@@ -720,7 +469,7 @@ def test_inject_env_preserves_suspended_remote_repl(tmp_path):
     runtime.responses.put({"ok": True})
     runtime.responses.put({"ok": True})
     agent = RLMFlow(
-        _NoopLLM(),
+        NoopLLM(),
         runtime=runtime,
         config=RLMConfig(max_depth=1),
     )
@@ -741,7 +490,7 @@ def test_inject_env_preserves_suspended_remote_repl(tmp_path):
 
 
 def test_e2b_runtime_proxies_llm_query_batched_to_engine(monkeypatch, tmp_path):
-    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=_FakeE2BSandboxFactory))
+    monkeypatch.setitem(sys.modules, "e2b", SimpleNamespace(Sandbox=FakeE2BSandboxFactory))
     from rlmflow.runtime.sandbox.e2b import E2BRuntime
 
     runtime = E2BRuntime(
@@ -750,7 +499,7 @@ def test_e2b_runtime_proxies_llm_query_batched_to_engine(monkeypatch, tmp_path):
         setup_commands=[],
     )
     try:
-        RLMFlow(_NoopLLM(), runtime=runtime, config=RLMConfig(max_depth=1))
+        RLMFlow(NoopLLM(), runtime=runtime, config=RLMConfig(max_depth=1))
         assert runtime.execute("print(callable(llm_query_batched))") == "True"
         assert "llm_query_batched" in runtime.proxied
     finally:

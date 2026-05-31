@@ -17,61 +17,75 @@ Run:
 from __future__ import annotations
 
 from rlmflow.graph import (
-    ActionNode,
-    ErrorNode,
+    DoneOutput,
+    ErrorOutput,
+    ExecAction,
     Graph,
-    QueryNode,
-    ResultNode,
-    SupervisingNode,
+    LLMAction,
+    LLMOutput,
+    ResumeAction,
+    SupervisingOutput,
+    UserQuery,
 )
 
 
 def build_graph() -> Graph:
     """A root with two children, one of which errors before succeeding."""
-    root_q = QueryNode(agent_id="root", seq=0, content="ship a tiny package")
-    root_action = ActionNode(
+    root_q = UserQuery(agent_id="root", seq=0, content="ship a tiny package")
+    root_call = LLMAction(agent_id="root", seq=1, model="demo")
+    root_reply = LLMOutput(
         agent_id="root",
-        seq=1,
+        seq=2,
         reply="splitting into two children",
         code='await launch_subagents([{"name": "write", "query": "..."}, {"name": "test", "query": "..."}])',
         input_tokens=120,
         output_tokens=40,
     )
-    root_sup = SupervisingNode(
+    root_exec = ExecAction(agent_id="root", seq=3, code=root_reply.code)
+    root_sup = SupervisingOutput(
         agent_id="root",
-        seq=2,
+        seq=4,
         waiting_on=["root.write", "root.test"],
-        input_tokens=0,
-        output_tokens=0,
     )
-    root_done = ResultNode(agent_id="root", seq=3, result="package shipped")
+    root_resume = ResumeAction(
+        agent_id="root",
+        seq=5,
+        resumed_from=["root.write", "root.test"],
+    )
+    root_done = DoneOutput(
+        agent_id="root",
+        seq=6,
+        result="package shipped",
+    )
 
-    write_q = QueryNode(agent_id="root.write", seq=0, content="write the module")
-    write_done = ResultNode(agent_id="root.write", seq=1, result="wrote pkg/__init__.py")
+    write_q = UserQuery(agent_id="root.write", seq=0, content="write the module")
+    write_done = DoneOutput(agent_id="root.write", seq=1, result="wrote pkg/__init__.py")
 
-    test_q = QueryNode(agent_id="root.test", seq=0, content="run pytest")
-    test_err = ErrorNode(
+    test_q = UserQuery(agent_id="root.test", seq=0, content="run pytest")
+    test_err = ErrorOutput(
         agent_id="root.test",
         seq=1,
         error="exec_error",
         content="ModuleNotFoundError: pkg",
     )
-    test_action = ActionNode(
+    test_call = LLMAction(agent_id="root.test", seq=2, model="demo")
+    test_reply = LLMOutput(
         agent_id="root.test",
-        seq=2,
+        seq=3,
         reply="retrying after install",
         code="install_and_run()",
         input_tokens=80,
         output_tokens=20,
     )
-    test_done = ResultNode(agent_id="root.test", seq=3, result="3 passed")
+    test_exec = ExecAction(agent_id="root.test", seq=4, code=test_reply.code)
+    test_done = DoneOutput(agent_id="root.test", seq=5, result="3 passed")
 
     write = Graph.from_meta_dict(
         {
             "agent_id": "root.write",
             "depth": 1,
             "parent_agent_id": "root",
-            "parent_node_id": root_action.id,
+            "parent_node_id": root_reply.id,
         },
         states=[write_q, write_done],
     )
@@ -80,13 +94,13 @@ def build_graph() -> Graph:
             "agent_id": "root.test",
             "depth": 1,
             "parent_agent_id": "root",
-            "parent_node_id": root_action.id,
+            "parent_node_id": root_reply.id,
         },
-        states=[test_q, test_err, test_action, test_done],
+        states=[test_q, test_err, test_call, test_reply, test_exec, test_done],
     )
     return Graph.from_meta_dict(
         {"agent_id": "root", "depth": 0, "query": "ship a tiny package"},
-        states=[root_q, root_action, root_sup, root_done],
+        states=[root_q, root_call, root_reply, root_exec, root_sup, root_resume, root_done],
         children={"root.write": write, "root.test": test},
     )
 
@@ -108,7 +122,12 @@ def main() -> None:
 
     banner("filters on graph.nodes")
     print(f"queries     : {len(g.nodes.queries())}")
-    print(f"actions     : {len(g.nodes.actions())}")
+    action_count = (
+        len(g.nodes.llm_actions())
+        + len(g.nodes.exec_actions())
+        + len(g.nodes.resume_actions())
+    )
+    print(f"actions     : {action_count}")
     print(f"errors      : {[n.error for n in g.nodes.errors()]}")
     print(f"results     : {[n.result for n in g.nodes.results()]}")
 
@@ -116,7 +135,7 @@ def main() -> None:
     print(f"long replies: {len(long_replies)}")
 
     banner("graph.find by id")
-    sup = g.nodes.where(type="supervising")[0]
+    sup = g.nodes.where(type="supervising_output")[0]
     found = g.find(sup.id)
     print(f"find({sup.id[:10]}…) -> {type(found).__name__} agent={found.agent_id}")
 

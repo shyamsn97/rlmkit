@@ -174,28 +174,48 @@ findings = [r for r in results if r.strip() and r.strip() != "NO_MATCH"]
 done("\\n".join(findings) if findings else "NO_MATCH")
 ```
 
-**Example 4 — multi-file app fanout.** Launch drafts in parallel, then integrate and verify:
+**Example 4 — multi-file app fanout.** Delegate independent file units, then either collect drafts or let children write their own assigned files. Paths belong in the parent plan or child `context`, not in a `PATH:` answer convention.
 
 ```repl
+from pathlib import Path
+
 shared_spec = "Build the requested browser app with plain HTML/CSS/JS.\\nShared constraints: no modules, script-tag wiring, and verify integration before done()."
 units = [
-    ("html", "Create index.html with the app container, stylesheet link, and script tags in dependency order."),
-    ("css", "Create styles.css for the requested layout, visual polish, and responsive behavior."),
-    ("state", "Create scripts/state.js defining global app state and pure update helpers, no import/export."),
-    ("view", "Create scripts/view.js defining global rendering helpers, no import/export."),
-    ("controls", "Create scripts/controls.js defining global input/event wiring helpers, no import/export."),
-    ("main", "Create scripts/main.js wiring startup, state, rendering, and controls."),
+    ("index.html", "Create the app container, stylesheet link, and script tags in dependency order."),
+    ("styles.css", "Create the requested layout, visual polish, and responsive behavior."),
+    ("scripts/state.js", "Define global app state and pure update helpers, no import/export."),
+    ("scripts/view.js", "Define global rendering helpers, no import/export."),
+    ("scripts/controls.js", "Define global input/event wiring helpers, no import/export."),
+    ("scripts/main.js", "Wire startup, state, rendering, and controls."),
 ]
 drafts = await launch_subagents([
     {
-        "name": name,
-        "query": task + "\\nReturn ONLY the full file text and state the target path on the first line as PATH: <path>.",
-        "context": shared_spec,
+        "name": path.replace("/", "_").replace(".", "_"),
+        "query": task + "\\nReturn ONLY the file contents. Do not include markdown fences or a filename header.",
+        "context": shared_spec + f"\\nTarget file: {path}",
     }
-    for name, task in units
+    for path, task in units
 ])
-# Parse PATH lines, write files, verify script order/no modules/basic syntax,
-# then repair the failing unit before done(...).
+for (path, _), content in zip(units, drafts):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+# Verify script order/no modules/basic syntax, then repair the failing unit before done(...).
+```
+
+The agent can also ask sub-agents to write their assigned files directly:
+
+```repl
+statuses = await launch_subagents([
+    {
+        "name": path.replace("/", "_").replace(".", "_"),
+        "query": "Read CONTEXT for the target file and task. Create the file yourself with pathlib.Path(...).write_text(...). Return only a concise status.",
+        "context": shared_spec + f"\\nTarget file: {path}\\nTask: {task}",
+    }
+    for path, task in units
+])
+print(statuses)
+# Verify the files on disk, then repair any failing unit before done(...).
 ```
 """
 

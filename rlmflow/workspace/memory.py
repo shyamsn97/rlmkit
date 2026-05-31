@@ -5,6 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from rlmflow.workspace.base import Context, Session, build_graph
+from rlmflow.workspace.context_helpers import (
+    context_keys_for_agents,
+    first_context_value,
+)
 
 
 class InMemoryContext(Context):
@@ -25,16 +29,18 @@ class InMemoryContext(Context):
         self.blobs[(agent_id, key)] = value
 
     def read(self, key: str = "context", *, agent_id: str = "root") -> str:
-        for aid in (agent_id, "root"):
-            if (aid, key) in self.blobs:
-                return self.blobs[(aid, key)]
-        raise KeyError(f"context {key!r} not found for {agent_id!r}")
+        return first_context_value(
+            key,
+            agent_id=agent_id,
+            exists=lambda aid, k: (aid, k) in self.blobs,
+            read=lambda aid, k: self.blobs[(aid, k)],
+        )
 
     def list_contexts(self, *, agent_id: str | None = None) -> list[str]:
-        agent_ids = [agent_id] if agent_id else ["root"]
-        if agent_id and agent_id != "root":
-            agent_ids.append("root")
-        return sorted({key for aid, key in self.blobs if aid in agent_ids})
+        return context_keys_for_agents(
+            agent_id,
+            lambda target: (key for aid, key in self.blobs if aid == target),
+        )
 
     def fork(self, new_location: object) -> Context:
         del new_location

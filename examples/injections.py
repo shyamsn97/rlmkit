@@ -15,6 +15,8 @@ from __future__ import annotations
 from rlmflow import ExecAction, ExecOutput, LLMClient, LLMUsage, RLMConfig, RLMFlow
 from rlmflow.runtime.local import LocalRuntime
 
+OBSERVATION = "Injected controller observation: finalize using this note."
+
 
 class DemoLLM(LLMClient):
     """Deterministic model so the example runs offline."""
@@ -34,10 +36,20 @@ def banner(title: str) -> None:
     print("=" * 72)
 
 
-def print_states(graph) -> None:
+def state_types(graph) -> list[str]:
+    return [state.type for state in graph.states]
+
+
+def assert_types(graph, expected: list[str]) -> None:
+    actual = state_types(graph)
+    assert actual == expected, f"expected states {expected}, got {actual}"
+
+
+def print_states(label: str, graph) -> None:
+    print(f"\n{label}")
+    print("state types:", " -> ".join(state_types(graph)))
     for state in graph.states:
-        marker = " [injected]" if state.injected else ""
-        print(f"{state.seq}: {state.type}{marker}")
+        print(f"{state.seq}: {state.type}")
 
 
 def observation_injection() -> None:
@@ -49,30 +61,54 @@ def observation_injection() -> None:
         config=RLMConfig(max_depth=0, max_iterations=4),
     )
     graph = agent.start("Wait for a controller note, then finish.")
+    assert_types(graph, ["user_query"])
 
     injected = graph.inject(
         target="root",
         node=ExecOutput(
-            output="Injected controller observation: finalize using this note.",
-            content="Injected controller observation: finalize using this note.",
+            output=OBSERVATION,
+            content=OBSERVATION,
         ),
-        reason="demo controller note",
     )
 
-    print("Original graph is unchanged:")
-    print_states(graph)
-    print("\nInjected graph has one extra observation:")
-    print_states(injected)
+    assert injected is not graph
+    assert_types(graph, ["user_query"])
+    assert_types(injected, ["user_query", "exec_output"])
 
-    preview = agent.build_messages(injected)[-1]["content"]
-    print("\nNext LLM user message contains the injected observation:")
-    print(preview)
+    extra = injected.states[-1]
+    extra_keys = set(extra.to_dict())
+    assert isinstance(extra, ExecOutput)
+    assert "injected" not in extra_keys
+    assert "injected_reason" not in extra_keys
+
+    print_states("start(): original graph", graph)
+    print_states("graph.inject(...): returned graph with one plain ExecOutput", injected)
+    print("original graph is unchanged:", state_types(graph))
+    print("extra node keys do not include injection metadata:", sorted(extra_keys))
+
+    projected = agent.build_messages(injected)[-1]["content"]
+    assert OBSERVATION in projected
+    print("message projection contains the controller observation:", OBSERVATION)
 
     graph = agent.step(injected)  # materializes ExecOutput, then calls the LLM
-    graph = agent.step(graph)  # executes the LLM's done(...) block
+    assert_types(graph, ["user_query", "exec_output", "llm_action", "llm_output"])
+    print_states("agent.step(injected): committed observation and asked the LLM", graph)
 
-    print("\nFinal graph:")
-    print_states(graph)
+    graph = agent.step(graph)  # executes the LLM's done(...) block
+    assert_types(
+        graph,
+        [
+            "user_query",
+            "exec_output",
+            "llm_action",
+            "llm_output",
+            "exec_action",
+            "done_output",
+        ],
+    )
+    assert graph.result() == "used the injected controller observation"
+
+    print_states("agent.step(...): executed the LLM's done(...) block", graph)
     print(f"result={graph.result()!r}")
 
 
@@ -85,15 +121,24 @@ def action_injection() -> None:
         config=RLMConfig(max_depth=0, max_iterations=4),
     )
     graph = agent.start("This run will be stopped by the controller.")
+    assert_types(graph, ["user_query"])
 
-    graph = graph.inject(
+    injected = graph.inject(
         target="root",
         node=ExecAction(code='done("controller stopped the run")'),
-        reason="message budget exhausted",
     )
-    graph = agent.step(graph)  # persists the ExecAction and executes it directly
+    assert injected is not graph
+    assert_types(graph, ["user_query"])
+    assert_types(injected, ["user_query", "exec_action"])
 
-    print_states(graph)
+    print_states("start(): original graph", graph)
+    print_states("graph.inject(...): returned graph with one plain ExecAction", injected)
+
+    graph = agent.step(injected)  # persists the ExecAction and executes it directly
+    assert_types(graph, ["user_query", "exec_action", "done_output"])
+    assert graph.result() == "controller stopped the run"
+
+    print_states("agent.step(injected): executed the appended action", graph)
     print(f"result={graph.result()!r}")
 
 

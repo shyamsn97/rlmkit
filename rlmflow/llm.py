@@ -50,6 +50,7 @@ class LLMUsage:
 
 class LLMClient(metaclass=abc.ABCMeta):
     last_usage: LLMUsage | None = None
+    thread_safe: bool = False
 
     @abc.abstractmethod
     def chat(self, messages: list[dict[str, str]], *args, **kwargs) -> str:
@@ -62,9 +63,23 @@ class LLMClient(metaclass=abc.ABCMeta):
         """
         yield self.chat(messages, *args, **kwargs)
 
+    def completion(
+        self, messages: list[dict[str, str]], *args, **kwargs
+    ) -> tuple[str, LLMUsage]:
+        """Return response text and usage for one request.
+
+        The default adapter preserves the existing ``stream`` / ``last_usage``
+        contract. Shared schedulers should guard this method for clients that
+        do not override it, because ``last_usage`` is mutable client state.
+        """
+        text = "".join(self.stream(messages, *args, **kwargs))
+        return text, self.last_usage or LLMUsage()
+
 
 class OpenAIClient(LLMClient):
     """OpenAI-compatible client. Requires `pip install openai`."""
+
+    thread_safe = True
 
     def __init__(self, model: str = "gpt-4o", **client_kwargs) -> None:
         from openai import OpenAI
@@ -72,18 +87,26 @@ class OpenAIClient(LLMClient):
         self.client = OpenAI(**client_kwargs)
         self.model = model
 
-    @retry_transient
     def chat(self, messages: list[dict[str, str]], *args, **kwargs) -> str:
+        text, _usage = self.completion(messages, *args, **kwargs)
+        return text
+
+    @retry_transient
+    def completion(
+        self, messages: list[dict[str, str]], *args, **kwargs
+    ) -> tuple[str, LLMUsage]:
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
         )
+        usage = LLMUsage()
         if resp.usage:
-            self.last_usage = LLMUsage(
+            usage = LLMUsage(
                 input_tokens=resp.usage.prompt_tokens or 0,
                 output_tokens=resp.usage.completion_tokens or 0,
             )
-        return resp.choices[0].message.content or ""
+            self.last_usage = usage
+        return resp.choices[0].message.content or "", usage
 
     def stream(self, messages: list[dict[str, str]], *args, **kwargs) -> Iterator[str]:
         # Buffer until the stream is fully consumed before yielding any
@@ -115,6 +138,8 @@ class OpenAIClient(LLMClient):
 class AnthropicClient(LLMClient):
     """Anthropic client. Requires `pip install anthropic`."""
 
+    thread_safe = True
+
     def __init__(
         self,
         model: str = "claude-sonnet-4-20250514",
@@ -137,8 +162,14 @@ class AnthropicClient(LLMClient):
                 chat_msgs.append(m)
         return system, chat_msgs
 
-    @retry_transient
     def chat(self, messages: list[dict[str, str]], *args, **kwargs) -> str:
+        text, _usage = self.completion(messages, *args, **kwargs)
+        return text
+
+    @retry_transient
+    def completion(
+        self, messages: list[dict[str, str]], *args, **kwargs
+    ) -> tuple[str, LLMUsage]:
         system, chat_msgs = self.split_messages(messages)
         resp = self.client.messages.create(
             model=self.model,
@@ -146,11 +177,12 @@ class AnthropicClient(LLMClient):
             system=system,
             messages=chat_msgs,
         )
-        self.last_usage = LLMUsage(
+        usage = LLMUsage(
             input_tokens=resp.usage.input_tokens,
             output_tokens=resp.usage.output_tokens,
         )
-        return resp.content[0].text
+        self.last_usage = usage
+        return resp.content[0].text, usage
 
     def stream(self, messages: list[dict[str, str]], *args, **kwargs) -> Iterator[str]:
         yield from self.collect_stream(messages)

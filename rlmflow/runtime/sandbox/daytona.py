@@ -9,6 +9,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from rlmflow.runtime.sandbox.common import command_output, optional_dependency_error
 from rlmflow.runtime.sandbox.remote import RemoteFileRuntime
 from rlmflow.workspace import BaseWorkspace
 
@@ -35,7 +36,7 @@ class DaytonaRuntime(RemoteFileRuntime):
         )
         self.create_params = create_params
         self.create_timeout = create_timeout
-        self.env = env
+        self.command_env = env
         self.setup_commands = self._resolve_setup_commands(setup_commands)
         self.daytona = daytona
         self.sandbox = None
@@ -51,8 +52,7 @@ class DaytonaRuntime(RemoteFileRuntime):
                 ModuleNotFoundError
             ) as exc:  # pragma: no cover - optional dependency.
                 raise ModuleNotFoundError(
-                    "DaytonaRuntime requires the optional `daytona-sdk` dependency. "
-                    "Install it with `pip install rlmflow[daytona]`."
+                    optional_dependency_error("DaytonaRuntime", "daytona")
                 ) from exc
             self.daytona = Daytona()
 
@@ -72,17 +72,10 @@ class DaytonaRuntime(RemoteFileRuntime):
         assert self.sandbox is not None
         result = self.sandbox.process.exec(
             command,
-            env=self.env,
+            env=self.command_env,
             timeout=int(timeout or self.repl_timeout),
         )
-        exit_code = getattr(result, "exit_code", 0)
-        stdout = _stdout(result)
-        stderr = getattr(result, "stderr", "") or getattr(result, "error", "")
-        if exit_code:
-            raise RuntimeError(
-                f"Daytona command failed ({exit_code}): {stderr or stdout}"
-            )
-        return stdout
+        return command_output(result, "Daytona", stdout_getter=_stdout)
 
     def upload_file(self, local_path: str | Path, remote_path: str) -> None:
         self._ensure_sandbox()
@@ -119,7 +112,7 @@ class DaytonaRuntime(RemoteFileRuntime):
             create_timeout=self.create_timeout,
             remote_workdir=self.remote_workdir,
             repl_timeout=self.repl_timeout,
-            env=self.env,
+            env=self.command_env,
             setup_commands=self.setup_commands,
             daytona=self.daytona,
         )

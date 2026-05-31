@@ -17,20 +17,20 @@ Run:
 
 from __future__ import annotations
 
-from rlmflow.graph import ActionNode, Graph, QueryNode, ResultNode
+from rlmflow.graph import DoneOutput, Graph, LLMOutput, UserQuery
 
 
 def build_graph() -> Graph:
-    root_q = QueryNode(agent_id="root", seq=0, content="ship pkg")
-    root_action = ActionNode(agent_id="root", seq=1, reply="split", code="...")
+    root_q = UserQuery(agent_id="root", seq=0, content="ship pkg")
+    root_action = LLMOutput(agent_id="root", seq=1, reply="split", code="...")
 
-    writer_q = QueryNode(agent_id="root.write", seq=0, content="write code")
-    writer_action = ActionNode(agent_id="root.write", seq=1, reply="lint", code="...")
-    linter_q = QueryNode(agent_id="root.write.linter", seq=0, content="lint pass")
-    linter_done = ResultNode(agent_id="root.write.linter", seq=1, result="clean")
+    writer_q = UserQuery(agent_id="root.write", seq=0, content="write code")
+    writer_action = LLMOutput(agent_id="root.write", seq=1, reply="lint", code="...")
+    linter_q = UserQuery(agent_id="root.write.linter", seq=0, content="lint pass")
+    linter_done = DoneOutput(agent_id="root.write.linter", seq=1, result="clean")
 
-    test_q = QueryNode(agent_id="root.test", seq=0, content="run pytest")
-    test_done = ResultNode(agent_id="root.test", seq=1, result="3 passed")
+    test_q = UserQuery(agent_id="root.test", seq=0, content="run pytest")
+    test_done = DoneOutput(agent_id="root.test", seq=1, result="3 passed")
 
     linter = Graph.from_meta_dict(
         {

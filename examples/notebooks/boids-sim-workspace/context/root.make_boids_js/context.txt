@@ -1,0 +1,49 @@
+Build a runnable browser-based Boids simulation with plain HTML, CSS, and JavaScript.
+
+Global constraints:
+- No build tools. No external libraries or CDNs.
+- No ES modules. Use classic script tags only: <script src="..."></script>.
+- The main runnable interface must be index.html at project root.
+- Files to create: index.html, style.css, boids.js (all at project root).
+- Use a dark color background.
+- Render hundreds of colorful boids on a 2D <canvas> that fills the viewport.
+- Do not add configuration controls or extra UI — just the canvas.
+- The app should run when index.html is opened in a browser.
+
+Verification expectations (the parent agent will check later):
+- index.html includes a link to style.css and a script tag for boids.js (non-module).
+- The <canvas> appears before the script tag so the script can bind to it without waiting.
+- boids.js should have no obvious syntax errors and should not reference undefined globals.
+- All files must exist after your write operation.
+
+You are allowed (and expected) to write the target file yourself with write_file(path, content) and then return a concise status message.
+
+Target file: boids.js
+Requirements:
+- Implement a Boids flocking simulation rendering hundreds of colorful boids (>= 300 recommended) on the 2D canvas with id "boidsCanvas".
+- No UI controls — just draw into the canvas that fills the viewport.
+- Use requestAnimationFrame for animation.
+- Use a dark background (from CSS) and draw boids in varying colors (e.g., random HSL hues).
+- Each boid should show orientation (e.g., small triangle pointing in its velocity direction).
+- Include standard boids rules:
+  - Alignment: steer towards the average heading of nearby boids.
+  - Cohesion: steer towards the average position of nearby boids.
+  - Separation: steer to avoid crowding neighbors.
+- Keep performance in mind for ~300-500 boids:
+  - Reasonable perception radius (e.g., 50-70px).
+  - Limit speeds and steering forces.
+  - Optional: simple spatial hashing/grid for neighbor queries (good but not required if code remains smooth).
+- Handle window resize (update canvas size and internal dimensions).
+- Handle devicePixelRatio so boids look crisp on HiDPI displays.
+- Use only classic global script style (no exports/imports, no top-level await). Avoid polluting global scope excessively (wrap in an IIFE if desired).
+- Script should assume the canvas element already exists (script tag placed after the canvas).
+
+Implementation hints (not mandatory but preferred):
+- Constants: BOID_COUNT ~ 400, MAX_SPEED ~ 2.2, MAX_FORCE ~ 0.05, PERCEPTION ~ 60, SEPARATION ~ 24.
+- Boid state: position (x,y), velocity (vx,vy), and color (e.g., HSL hue).
+- Draw: Save/transform/rotate context per boid, draw a small triangle (size ~ 6-8px).
+- Edge behavior: Wrap around screen edges.
+
+Deliverable:
+- Write a complete, self-contained boids.js using write_file("boids.js", content).
+- Ensure there are no obvious syntax or runtime wiring errors (e.g., referencing undefined variables).

@@ -1,21 +1,24 @@
-/* Full-viewport canvas on a dark background; no scrollbars */
+/* Boids app base styles */
+:root { color-scheme: dark; }
 
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 html, body {
   margin: 0;
   padding: 0;
+  width: 100%;
   height: 100%;
-  background: #0b0f14; /* dark background */
-  overflow: hidden;     /* prevent scrollbars */
+  background: #0d1117; /* pleasant dark */
 }
 
-#boids {
+body {
+  overflow: hidden; /* prevent scrollbars when canvas is 100vh/vw */
+}
+
+canvas {
   display: block;
   width: 100vw;
-  height: 100vh;        /* fill the viewport */
+  height: 100vh;
+  touch-action: none;
+  background: inherit;
 }

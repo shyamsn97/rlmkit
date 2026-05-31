@@ -1,0 +1,10 @@
+haystack/file_0000.txt
+haystack/file_0001.txt
+haystack/file_0002.txt
+haystack/file_0003.txt
+haystack/file_0004.txt
+haystack/file_0005.txt
+haystack/file_0006.txt
+haystack/file_0007.txt
+haystack/file_0008.txt
+haystack/file_0009.txt

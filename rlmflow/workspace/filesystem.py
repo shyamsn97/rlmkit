@@ -9,6 +9,10 @@ from typing import Any
 
 from rlmflow.graph import WorkspaceRef, parse_node_obj
 from rlmflow.workspace.base import BaseWorkspace, Context, Session, build_graph
+from rlmflow.workspace.context_helpers import (
+    context_keys_for_agents,
+    first_context_value,
+)
 from rlmflow.workspace.store import Store, copy_workspace_paths, resolve_backend
 
 
@@ -50,25 +54,27 @@ class FileContext(Context):
         )
 
     def read(self, key: str = "context", *, agent_id: str = "root") -> str:
-        for aid in (agent_id, "root"):
-            path, _ = self._context_paths(key, agent_id=aid)
-            if self.store.exists(str(path)):
-                return self.store.read_text(str(path))
-        raise KeyError(f"context {key!r} not found for {agent_id!r}")
+        return first_context_value(
+            key,
+            agent_id=agent_id,
+            exists=lambda aid, k: self.store.exists(
+                str(self._context_paths(k, agent_id=aid)[0])
+            ),
+            read=lambda aid, k: self.store.read_text(
+                str(self._context_paths(k, agent_id=aid)[0])
+            ),
+        )
 
     def list_contexts(self, *, agent_id: str | None = None) -> list[str]:
-        agent_ids = [agent_id] if agent_id else ["root"]
-        if agent_id and agent_id != "root":
-            agent_ids.append("root")
-        keys: set[str] = set()
-        for aid in agent_ids:
-            if aid is None:
-                continue
+        def keys_for_agent(aid: str) -> list[str]:
             base = Path("context") / _safe_name(aid, default="root")
-            for path in self.store.list(str(base)):
-                if path.endswith(".txt"):
-                    keys.add(Path(path).stem)
-        return sorted(keys)
+            return [
+                Path(path).stem
+                for path in self.store.list(str(base))
+                if path.endswith(".txt")
+            ]
+
+        return context_keys_for_agents(agent_id, keys_for_agent)
 
     def fork(self, new_location: object) -> Context:
         return FileContext(copy_workspace_paths(self.store, new_location, ("context",)))

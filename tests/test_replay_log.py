@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from rlmflow import (
     FileSession,
     Graph,
@@ -25,6 +27,19 @@ def test_file_session_round_trips_states_through_load_graph(tmp_path):
     states = graph.states
     assert [s.id for s in states] == [q.id, r.id]
     assert states[-1].result == "done"
+
+
+def test_file_session_writes_plain_node_rows(tmp_path):
+    session = FileSession(tmp_path / "workspace")
+    session.write_agent(Graph(agent_id="root", query="hello"))
+
+    session.write_state(UserQuery(agent_id="root", seq=0, content="start"))
+    row = json.loads(
+        (tmp_path / "workspace" / "session" / "root" / "session.jsonl").read_text()
+    )
+
+    assert row["type"] == "user_query"
+    assert row["content"] == "start"
 
 
 def test_in_memory_session_fork_isolates_subsequent_writes():

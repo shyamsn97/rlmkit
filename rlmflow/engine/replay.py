@@ -26,6 +26,7 @@ from rlmflow.graph import (
     is_supervising,
 )
 from rlmflow.runtime import Runtime
+from rlmflow.runtime.env import clear_replay_queue, set_replay_queue
 
 
 def can_resume(graph: Graph, supervising: SupervisingOutput) -> bool:
@@ -118,7 +119,7 @@ def replay_to_suspension(
             f"replay: could not locate originating LLMOutput.code for "
             f"agent {graph.agent_id!r} at supervise seq={target.seq}"
         )
-    runtime.env["_REPLAY_QUEUE"] = list(chain[0].waiting_on)
+    set_replay_queue(runtime.env, list(chain[0].waiting_on))
     suspended, raw, _ = runtime.start_code(code)
     if not suspended:
         raise RuntimeError(
@@ -129,7 +130,7 @@ def replay_to_suspension(
 
     for prev, nxt in zip(chain[:-1], chain[1:]):
         prev_results = results_for_supervise(graph, prev)
-        runtime.env["_REPLAY_QUEUE"] = list(nxt.waiting_on)
+        set_replay_queue(runtime.env, list(nxt.waiting_on))
         suspended, raw, _ = runtime.resume_code(prev_results)
         if not suspended:
             raise RuntimeError(
@@ -138,7 +139,7 @@ def replay_to_suspension(
             )
         _verify_replay_wait(raw, nxt, graph.agent_id)
 
-    runtime.env.pop("_REPLAY_QUEUE", None)
+    clear_replay_queue(runtime.env)
 
 
 def _verify_replay_wait(

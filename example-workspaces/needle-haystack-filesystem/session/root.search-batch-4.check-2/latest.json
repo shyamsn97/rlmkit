@@ -1,0 +1,8 @@
+{
+  "agent_id": "root.search-batch-4.check-2",
+  "latest_node_id": "n_fd1f90984bc3",
+  "seq": 8,
+  "type": "done_output",
+  "terminal": true,
+  "result": "NO_MATCH"
+}

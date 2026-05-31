@@ -23,7 +23,13 @@ from rlmflow.runtime.repl import deserialize, serialize
 from rlmflow.tools import get_tool_metadata
 from rlmflow.tools import tool as tool_decorator
 from rlmflow.tools.builtins import DoneSignal
-from rlmflow.tools.context import ToolContext, reset_tool_context, set_tool_context
+from rlmflow.tools.context import reset_tool_context, set_tool_context
+from rlmflow.tools.registry import (
+    LAUNCHER_TOOLS,
+    SHOW_VARS_NAME,
+    partition_tool_defs,
+    public_tool_defs,
+)
 from rlmflow.workspace import BaseWorkspace, Workspace
 
 # Process-global lock guarding ``os.chdir`` in :meth:`Runtime._in_workspace`.
@@ -49,8 +55,6 @@ DEFAULT_MODULES: list[str] = [
     "itertools",
     "functools",
 ]
-
-_LAUNCHER_TOOLS = {"launch_subagent", "launch_subagents"}
 
 
 @dataclass
@@ -167,7 +171,7 @@ class Runtime(ABC):
         fn = self.proxied[resp["proxy"]]
         args = [deserialize(a) for a in resp.get("args", [])]
         kwargs = {k: deserialize(v) for k, v in resp.get("kwargs", {}).items()}
-        token = set_tool_context(self._tool_context())
+        token = set_tool_context(partition_tool_defs(self.tools.values()).context())
         try:
             with self._in_workspace():
                 result = fn(*args, **kwargs)
@@ -204,7 +208,11 @@ class Runtime(ABC):
         """Run ``code`` and return captured stdout."""
         self.prepare_for_execution()
         return self.call(
-            {"cmd": "run", "code": code, "tool_context": self._tool_context_names()}
+            {
+                "cmd": "run",
+                "code": code,
+                "tool_context": partition_tool_defs(self.tools.values()).names(),
+            }
         ).get("output", "")
 
     def start_code(self, code: str) -> tuple[bool, object, bool]:
@@ -219,7 +227,11 @@ class Runtime(ABC):
         self.prepare_for_execution()
         suspended, payload, errored = parse_response(
             self.call(
-                {"cmd": "run", "code": code, "tool_context": self._tool_context_names()}
+                {
+                    "cmd": "run",
+                    "code": code,
+                    "tool_context": partition_tool_defs(self.tools.values()).names(),
+                }
             )
         )
         self.suspended = suspended
@@ -233,7 +245,7 @@ class Runtime(ABC):
                 {
                     "cmd": "resume",
                     "value": send_value,
-                    "tool_context": self._tool_context_names(),
+                    "tool_context": partition_tool_defs(self.tools.values()).names(),
                 }
             )
         )
@@ -348,30 +360,6 @@ class Runtime(ABC):
 
         self.call({"cmd": "inject_show_vars"})
 
-    def _tool_context(self) -> ToolContext:
-        visible: dict[str, Callable] = {}
-        hidden: dict[str, Callable] = {}
-        for name, td in self.tools.items():
-            if td.fn is None:
-                continue
-            if td.hidden:
-                hidden[name] = td.fn
-            else:
-                visible[name] = td.fn
-        return ToolContext(tools=visible, hidden_tools=hidden)
-
-    def _tool_context_names(self) -> dict[str, list[str]]:
-        visible = []
-        hidden = []
-        for name, td in self.tools.items():
-            if td.fn is None:
-                continue
-            if td.hidden:
-                hidden.append(name)
-            else:
-                visible.append(name)
-        return {"visible": visible, "hidden": hidden}
-
     def clone(self, workspace: BaseWorkspace | str | Path | None = None) -> Runtime:
         """Fresh runtime with the same tool registrations.
 
@@ -468,11 +456,11 @@ class Runtime(ABC):
     def _install_tool(self, td: ToolDef) -> None:
         if td.name in self._installed_tools:
             return
-        if td.name == "SHOW_VARS":
+        if td.name == SHOW_VARS_NAME:
             self.inject_show_vars()
             self._installed_tools.add(td.name)
             return
-        if td.name in _LAUNCHER_TOOLS:
+        if td.name in LAUNCHER_TOOLS:
             self.inject_launcher(td.name)
             self._installed_tools.add(td.name)
             return
@@ -503,10 +491,7 @@ class Runtime(ABC):
         return decorator
 
     def get_tool_defs(self, *, include_hidden: bool = False) -> list[ToolDef]:
-        tools = list(self.tools.values())
-        if include_hidden:
-            return tools
-        return [td for td in tools if not td.hidden]
+        return public_tool_defs(self.tools.values(), include_hidden=include_hidden)
 
 
 def parse_response(resp: dict) -> tuple[bool, object, bool]:
