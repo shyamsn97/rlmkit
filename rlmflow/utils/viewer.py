@@ -573,39 +573,14 @@ def _build_graph_figure(
         kids = all_children(eid)
         if not kids:
             return
-        # If there's both a chain child and spawn children: fan the spawns
-        # out symmetrically at depth+1, and put the chain child one row
-        # below on the parent's vertical spine (depth+2) so its label has
-        # its own horizontal slot instead of fighting the spawn labels.
-        if eid in chain_child and spawn_children.get(eid):
-            spawns = list(spawn_children[eid])
-            n_spawn = len(spawns)
-            half = n_spawn // 2
-            left_spawns = spawns[:half]
-            right_spawns = spawns[half:]
-            span = right - left
-            unit = span / max(n_spawn + 1, 2)
-            # Repeated fanouts from the same parent spine can otherwise reuse
-            # the same horizontal slots while earlier child chains are still
-            # descending, causing exact node-on-node collisions. A small
-            # depth-based phase keeps later batches visually distinct without
-            # expanding the graph's vertical range.
-            fanout_phase = 0.0
-            if depth > 2:
-                fanout_phase = ((by_id[eid].seq % 5) + 1) * unit * 0.13
-            for i, cid in enumerate(reversed(left_spawns)):
-                cx = center_x - unit * (i + 1) + fanout_phase
-                place(cid, cx - unit / 2, cx + unit / 2, depth + 1, seen)
-            for i, cid in enumerate(right_spawns):
-                cx = center_x + unit * (i + 1) + fanout_phase
-                place(cid, cx - unit / 2, cx + unit / 2, depth + 1, seen)
-            # Keep the parent trajectory's future layout budget intact. A
-            # recursive run may fan out repeatedly from the same parent; if the
-            # chain child inherits only a narrow center slot, later fanouts get
-            # squeezed into a hairball under the parent spine.
-            place(chain_child[eid], left, right, depth + 2, seen)
-            return
-        # Otherwise: equal-slot tidy tree based on leaf counts.
+        # Tidy tree: partition ``[left, right]`` into one disjoint sub-interval
+        # per child, sized by that child's leaf count, and recurse one row down.
+        # ``all_children`` already slots the same-agent chain child in the
+        # middle, so the agent's own trajectory keeps a near-vertical spine
+        # while spawned child agents fan out to either side. Because every
+        # subtree (including the chain child's future fanouts, which its leaf
+        # count already accounts for) owns a disjoint horizontal band, no two
+        # columns can land on top of each other.
         widths = [leaf_count(k, set()) for k in kids]
         total = sum(widths) or 1
         span = right - left

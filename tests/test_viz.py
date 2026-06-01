@@ -165,21 +165,22 @@ def test_plot_returns_plotly_figure_with_title():
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
-def test_plot_repeated_fanouts_keep_horizontal_span():
+def test_plot_repeated_fanouts_stay_spread_not_squeezed():
+    """Each fanout batch gets its own disjoint, well-spread band.
+
+    The tidy-tree layout gives every subtree a horizontal slot sized by its
+    leaf count, so a later batch lands in a narrower band than an earlier one,
+    but it must never collapse into a hairball — its sibling columns stay at
+    least the same-row minimum gap apart.
+    """
     fig = _build_graph_figure(_multi_batch_fanout_graph())
     node_trace = next(trace for trace in fig.data if getattr(trace, "customdata", None))
     x_by_id = dict(zip(node_trace.customdata, node_trace.x))
 
-    first_span = (
-        max(x_by_id[f"root.batch1_{i}_q"] for i in range(6))
-        - min(x_by_id[f"root.batch1_{i}_q"] for i in range(6))
-    )
-    second_span = (
-        max(x_by_id[f"root.batch2_{i}_q"] for i in range(6))
-        - min(x_by_id[f"root.batch2_{i}_q"] for i in range(6))
-    )
-
-    assert second_span >= first_span * 0.8
+    for batch in ("batch1", "batch2"):
+        xs = sorted(x_by_id[f"root.{batch}_{i}_q"] for i in range(6))
+        for left, right in zip(xs, xs[1:]):
+            assert right - left >= 0.7
 
 
 @pytest.mark.skipif(not PLOTLY_INSTALLED, reason="plotly not installed")
