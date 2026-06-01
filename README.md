@@ -14,12 +14,12 @@ all through the same clean coding interface.
 
 **rlmflow** turns that recursive run into a live execution graph. Every
 query, action, observation, child call, wait, resume, and result is a
-typed state you can inspect, step, fork, replay, resume, and branch into
+typed state you can inspect, step, retrace, resume, fork, and branch into
 new workspaces. It is for people building long-context agents, recursive
 coding agents, and research loops where the execution trace needs to be
 as controllable as the final answer is useful. Each `start` / `step`
-returns a fresh `Graph` snapshot: a recursive structure where every
-`graph[id]` (node *or* agent id) returns a `Graph` rooted at that vertex.
+returns a fresh `Graph` snapshot: a recursive structure where
+`graph[agent_id]` returns the sub-agent graph for that agent.
 
 <p align="center">
   <img src="docs/rlm_animation.gif" alt="rlmflow animation" />
@@ -31,7 +31,7 @@ RLMs delegate subtasks to children, those children can delegate to their
 own children, and results bubble back up. **rlmflow** represents the
 whole run as one recursive type:
 
-- **`Graph`** — one agent, frozen. Carries the agent's run-invariants
+- **`Graph`** — one agent snapshot. Carries the agent's run-invariants
   flat on itself (`agent_id`, `depth`, `query`, `system_prompt`,
   `config`, `workspace`, `runtime`, `model`, `branch_id`,
   `parent_agent_id`, `parent_node_id`), plus its `states` trajectory
@@ -158,6 +158,11 @@ print(graph.result())
 open_viewer(workspace)
 ```
 
+All model calls for a run share one scheduler channel. Normal agent LLM
+turns and `llm_query_batched(...)` both respect the same
+`RLMConfig.llm_max_concurrency` cap, and usage is recorded per request
+rather than read from shared client state.
+
 To let child agents drain work-conservingly after a parent reaches its
 delegation wait (`await launch_subagent(...)` / `await launch_subagents(...)`),
 enable `eager_children`:
@@ -170,6 +175,7 @@ agent = RLMFlow(
         max_depth=2,
         max_iterations=30,
         max_concurrency=8,
+        llm_max_concurrency=4,
         eager_children=True,
     ),
 )
@@ -209,7 +215,7 @@ Nest agents by passing one `RLMFlow` as another's `llm_client`.
 ## Step and inspect
 
 `step(graph) -> graph'` is one atomic graph transition. Every step
-returns a new immutable `Graph`, so the live tree is just `graph.tree()`:
+returns a fresh `Graph` snapshot, so the live tree is just `graph.tree()`:
 
 ```python
 graph = agent.start(query)
@@ -245,9 +251,9 @@ observation. The graph is queryable in plain Python:
 
 ```python
 graph.tree()                                  # ASCII render
-graph["root.scanner_api"]                     # sub-Graph rooted at that agent / node
+graph["root.scanner_api"]                     # sub-Graph rooted at that agent
 graph.agents["root.scanner_api"].states       # state trajectory for one agent
-graph.children                                # list[Graph] for child agents
+graph.children                                # dict[str, Graph] for child agents
 graph.nodes.find("n_abc...")                  # bare Node lookup by id
 graph.nodes.errors()                          # every ErrorOutput across agents
 graph.nodes.results()                         # every DoneOutput across agents
@@ -598,8 +604,11 @@ version.
 
 ## Examples
 
-All examples share flags like `--no-viz`, `--docker-image rlmflow:local`,
-`--max-depth`, and `--max-iterations`. See [`examples/README.md`](examples/README.md).
+Run the offline smoke suite with `python examples/run_examples.py`.
+Add `--include-optional`, `--include-live`, `--include-notebooks`,
+or `--include-sandbox` as needed. Most live examples share flags like
+`--no-viz`, `--docker-image rlmflow:local`, `--max-depth`, and
+`--max-iterations`; see [`examples/README.md`](examples/README.md).
 
 | Example | What it shows |
 |---|---|
@@ -616,6 +625,7 @@ All examples share flags like `--no-viz`, `--docker-image rlmflow:local`,
 | [`best_of_n.py`](examples/best_of_n.py) | Run N independent workspace branches and pick the best result. |
 | [`autoresearch/`](examples/autoresearch/) | Karpathy-style hill-climbing research loop with custom `@tool`s and delegation. |
 | [`graph-features/`](examples/graph-features/) | Offline tour of the `Graph` API: query, navigate, mutate, save/load, replay, fork, render. |
+| [`run_examples.py`](examples/run_examples.py) | Manifest-driven smoke runner for offline, optional, live, sandbox, and notebook examples. |
 | [`view_demo.py`](examples/view_demo.py) | Build synthetic `Graph` snapshots and launch the Gradio viewer. |
 | [`notebooks/coding_agent.ipynb`](examples/notebooks/coding_agent.ipynb) | Build the agent, run the boids task end-to-end, and inspect the workspace/viewer. Requires a live LLM. |
 | [`notebooks/viz_walkthrough.ipynb`](examples/notebooks/viz_walkthrough.ipynb) | Every visualization against the saved fixture: inline tree, Plotly graph, HTML stepper, topology renders (mermaid/dot/d2/sequence), step-indexed timeline, per-state detail, cost & reports, run-vs-run comparison, CLI equivalents. |

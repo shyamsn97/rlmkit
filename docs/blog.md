@@ -13,7 +13,7 @@ pip install rlmflow
 
 ## tldr
 
-**rlmflow** turns [Recursive Language Models](https://alexzhang13.github.io/blog/2025/rlm/) into inspectable execution graphs. It's a Python library for writing RLM agents where every query, action, observation, delegation, wait, resume, and result is a typed, immutable Pydantic state, and a run is the `Graph` of those states plus the agents and edges that connect them.
+**rlmflow** turns [Recursive Language Models](https://alexzhang13.github.io/blog/2025/rlm/) into inspectable execution graphs. It's a Python library for writing RLM agents where every query, action, observation, delegation, wait, resume, and result is a typed Pydantic state, and a run is the recursive `Graph` of those states plus the agents and edges that connect them.
 
 The whole engine is one transition: `step(graph) → graph'`. The graph and the execution are the same data structure — there is no separate "tracing mode" to enable — so the same run renders as a Rich live tree, a Mermaid diagram, a Gantt swimlane, or a Gradio viewer, all from one-line projections of the workspace graph.
 
@@ -61,8 +61,9 @@ strategy becomes the ceiling.
 [Recursive Language Models](https://alexzhang13.github.io/blog/2025/rlm/)
 flip that. The setup is small: an LLM sits in a Python REPL with
 the long context bound **as a variable**, and a single extra
-primitive — **`rlm_delegate`** — lets it spawn a fresh sub-agent with
-its own context window. From there, the model decides for itself
+surface — **`await launch_subagent(...)`** and
+**`await launch_subagents([...])`** — lets it spawn fresh sub-agents with
+their own context windows. From there, the model decides for itself
 how to peek at the context, slice it, regex through it, or hand a
 chunk to a recursive sub-call. Nothing is summarized or delegated
 unless the model chooses to. RAG retrieves; RLMs *investigate*. And
@@ -111,12 +112,13 @@ calls. Each child is an agent with its own little loop: inspect the
 context, run a search, read a passage, maybe delegate again, then
 return.
 
-In a minimal RLM-style implementation, every
-<span class="rlm-hl-del">rlm_delegate(name=name, query=query, context=ctx)</span> call is the
-LLM call: it spins up a fresh sub-LLM with its own REPL — bound to
-`ctx` as `CONTEXT` — runs that sub-LLM's agent loop until it calls
-`done(value)`, and hands the value back as a `str`. A child's REPL
-can call <span class="rlm-hl-del">rlm_delegate</span> again, and so on.
+In rlmflow, every
+<span class="rlm-hl-del">await launch_subagent(query, context=ctx, name=name)</span>
+call spins up a fresh sub-agent with its own REPL — bound to `ctx` as
+`CONTEXT` — runs that sub-agent's loop until it calls `done(value)`,
+and hands the value back as a `str`. A child's REPL can call
+<span class="rlm-hl-del">launch_subagent</span> /
+<span class="rlm-hl-del">launch_subagents</span> again, and so on.
 The parent never sees any of it. Click through:
 
 <style>
@@ -284,9 +286,12 @@ The parent never sees any of it. Click through:
     <h4>1. What the root LLM emits in its REPL block</h4>
     <pre><span class="rlm-hl-frame"># In the root delegate — CONTEXT is the haystack, bound as a variable.</span>
 n = CONTEXT.line_count()
-chunk_0 = <span class="rlm-hl-del">rlm_delegate</span>("chunk_0", "scan first third",  CONTEXT.lines(0, n // 3))
-chunk_1 = <span class="rlm-hl-del">rlm_delegate</span>("chunk_1", "scan middle third", CONTEXT.lines(n // 3, 2 * n // 3))
-chunk_2 = <span class="rlm-hl-del">rlm_delegate</span>("chunk_2", "scan final third",  CONTEXT.lines(2 * n // 3, n))
+results = await <span class="rlm-hl-del">launch_subagents</span>([
+    {"name": "chunk_0", "query": "scan first third",  "context": "\n".join(CONTEXT.lines(0, n // 3))},
+    {"name": "chunk_1", "query": "scan middle third", "context": "\n".join(CONTEXT.lines(n // 3, 2 * n // 3))},
+    {"name": "chunk_2", "query": "scan final third",  "context": "\n".join(CONTEXT.lines(2 * n // 3, n))},
+])
+chunk_0, chunk_1, chunk_2 = results
 done(extract_code([chunk_0, chunk_1, chunk_2]))   # all three are plain str</pre>
     <div class="rlm-slide-nav">
       <label class="rlm-slide-arrow" for="code-phase-4">&larr;</label>
@@ -301,11 +306,13 @@ done(extract_code([chunk_0, chunk_1, chunk_2]))   # all three are plain str</pre
   </div>
 
   <div class="rlm-slide rlm-slide-2">
-    <h4>2. A child's REPL can recursively rlm_delegate(...) too</h4>
-    <pre><span class="rlm-hl-frame"># In rlm_delegate(name="chunk_2", ...) — its sub-LLM is now the one writing REPL.</span>
+    <h4>2. A child's REPL can recursively launch children too</h4>
+    <pre><span class="rlm-hl-frame"># In launch_subagent(name="chunk_2", ...) — its sub-agent is now writing REPL.</span>
 hits   = CONTEXT.grep(r"secret|code|passcode|needle").splitlines()
-cand_a = <span class="rlm-hl-del">rlm_delegate</span>("candidate_a", "Inspect candidate window A.", hits[0])
-cand_b = <span class="rlm-hl-del">rlm_delegate</span>("candidate_b", "Inspect candidate window B.", hits[1])
+cand_a, cand_b = await <span class="rlm-hl-del">launch_subagents</span>([
+    {"name": "candidate_a", "query": "Inspect candidate window A.", "context": hits[0]},
+    {"name": "candidate_b", "query": "Inspect candidate window B.", "context": hits[1]},
+])
 done("candidate code 84721")   # the root never sees this code ran</pre>
     <div class="rlm-slide-nav">
       <label class="rlm-slide-arrow" for="code-phase-1">&larr;</label>
@@ -322,9 +329,9 @@ done("candidate code 84721")   # the root never sees this code ran</pre>
   <div class="rlm-slide rlm-slide-3">
     <h4>3. ...so the call stack nests delegate frames, with no fixed depth</h4>
     <pre><span class="rlm-hl-frame"># Live Python stack while candidate_b's sub-LLM is reasoning:</span>
-<span class="rlm-hl-del">rlm_delegate</span>("root",         "What secret code is hidden in the haystack?", haystack)
-└── <span class="rlm-hl-del">rlm_delegate</span>("chunk_2",      "Scan final third...",         final_third)
-    └── <span class="rlm-hl-del">rlm_delegate</span>("candidate_b", "Inspect candidate window B.", line_77)
+<span class="rlm-hl-del">launch_subagent</span>("root",         "What secret code is hidden in the haystack?", haystack)
+└── <span class="rlm-hl-del">launch_subagent</span>("chunk_2",      "Scan final third...",         final_third)
+    └── <span class="rlm-hl-del">launch_subagent</span>("candidate_b", "Inspect candidate window B.", line_77)
 # 3 LLM agent loops live at once, each with its own messages and CONTEXT.
 # nothing on an inner frame is visible to any frame above it.</pre>
     <div class="rlm-slide-nav">
@@ -341,11 +348,11 @@ done("candidate code 84721")   # the root never sees this code ran</pre>
 
   <div class="rlm-slide rlm-slide-4">
     <h4>4. All the root's REPL sees back is three str</h4>
-    <pre><span class="rlm-hl-frame"># Back in the root delegate — every rlm_delegate(...) above returned a str.</span>
+    <pre><span class="rlm-hl-frame"># Back in the root agent — each awaited child returned a str.</span>
 chunk_0 == "not found"
 chunk_1 == "decoy, no code"
 chunk_2 == "candidate code 84721"
-# 6 hidden <span class="rlm-hl-del">rlm_delegate</span> frames and dozens of LLM iterations
+# 6 hidden <span class="rlm-hl-del">sub-agent</span> frames and dozens of LLM iterations
 # have collapsed into 3 strings. if chunk_2 is wrong, the root has no way
 # to ask which inner sub-LLM screwed up, or what its CONTEXT even was.</pre>
     <div class="rlm-slide-nav">
@@ -362,7 +369,7 @@ chunk_2 == "candidate code 84721"
 </div>
 
 That's the core observability problem with vanilla RLMs: a single
-`rlm_delegate()` call can hide an entire recursive subtree of LLM work,
+awaited child launch can hide an entire recursive subtree of LLM work,
 and **nothing about that subtree survives the return**. Children can
 delegate to children can delegate to children — and all the parent
 ever gets is a `list[str]`. When the answer is wrong, you can't tell
@@ -589,7 +596,7 @@ not a visualization recovered from a log after the fact. It is the
 data model. Every meaningful moment in the run is stored as a typed
 state — the initial query, a model step, a tool result, a paused
 parent, a resumed parent, a final answer, or an error — bound to the
-agent that produced it. The run is the immutable `Graph` of those
+agent that produced it. The run is the recursive `Graph` of those
 states, plus the agents and edges connecting them.
 
 The whole engine is one transition:

@@ -14,6 +14,11 @@ High quality MP4 (1080p, the canonical render)::
 
     manim -qh docs/rlm_animation.py RLMFlowHero
     cp media/videos/rlm_animation/1080p60/RLMFlowHero.mp4 docs/rlm_animation.mp4
+
+GIF for README / PyPI previews::
+
+    ffmpeg -y -i docs/rlm_animation.mp4 \
+      -vf "fps=12,scale=960:-1:flags=lanczos" docs/rlm_animation.gif
 """
 
 from manim import (
@@ -281,7 +286,7 @@ class RLMFlowHero(Scene):
             ),
             (
                 [("root", "S", [1, 2, 3]), ("search", "A", []), ("code", "A", []), ("verify", "A", [])],
-                "rlm_delegate fanout",
+                "launch_subagents fanout",
             ),
             (
                 [
@@ -351,7 +356,7 @@ class RLMFlowHero(Scene):
             active_dot = dot
 
         timeline_footer = Text(
-            "replay · fork · inspect at any node",
+            "retrace · fork · inspect every state",
             font=CODE_FONT,
             font_size=FS_BODY,
             color=WHITE_C,
@@ -369,7 +374,7 @@ class RLMFlowHero(Scene):
         )
 
         code_title = Text(
-            "split work with rlm_delegate, then await the children",
+            "split work with launch_subagents, then verify",
             font=CODE_FONT,
             font_size=FS_BODY,
             color=WHITE_C,
@@ -402,15 +407,15 @@ class RLMFlowHero(Scene):
         code_lines = VGroup(
             Text(">>> chunks = CONTEXT.lines(0, CONTEXT.line_count())", font=CODE_FONT, font_size=FS_SMALL, color=Q_C),
             Text(">>> batches = chunked(chunks, size=500)", font=CODE_FONT, font_size=FS_SMALL, color=Q_C),
-            Text(">>> handles = [", font=CODE_FONT, font_size=FS_SMALL, color=WHITE_C),
-            Text("...   rlm_delegate(", font=CODE_FONT, font_size=FS_SMALL, color=A_C),
-            Text("...     name=f'chunk_{i}',", font=CODE_FONT, font_size=FS_SMALL, color=A_C),
-            Text("...     query='inspect your CONTEXT slice',", font=CODE_FONT, font_size=FS_SMALL, color=A_C),
-            Text("...     context='\\n'.join(batch),", font=CODE_FONT, font_size=FS_SMALL, color=A_C),
-            Text("...   ) for i, batch in enumerate(batches)", font=CODE_FONT, font_size=FS_SMALL, color=A_C),
-            Text("... ]", font=CODE_FONT, font_size=FS_SMALL, color=WHITE_C),
-            Text(">>> results = await rlm_wait(*handles)", font=CODE_FONT, font_size=FS_SMALL, color=S_C),
-            Text(">>> done(combine(results))", font=CODE_FONT, font_size=FS_SMALL, color=R_C),
+            Text(">>> results = await launch_subagents([", font=CODE_FONT, font_size=FS_SMALL, color=S_C),
+            Text("...   {", font=CODE_FONT, font_size=FS_SMALL, color=WHITE_C),
+            Text("...     'name': f'chunk_{i}',", font=CODE_FONT, font_size=FS_SMALL, color=A_C),
+            Text("...     'query': 'inspect your CONTEXT slice',", font=CODE_FONT, font_size=FS_SMALL, color=A_C),
+            Text("...     'context': '\\n'.join(batch),", font=CODE_FONT, font_size=FS_SMALL, color=A_C),
+            Text("...   } for i, batch in enumerate(batches)", font=CODE_FONT, font_size=FS_SMALL, color=A_C),
+            Text("... ])", font=CODE_FONT, font_size=FS_SMALL, color=S_C),
+            Text(">>> final = combine(results)", font=CODE_FONT, font_size=FS_SMALL, color=WHITE_C),
+            Text(">>> done(final)", font=CODE_FONT, font_size=FS_SMALL, color=R_C),
         ).arrange(DOWN, aligned_edge=LEFT, buff=0.08)
         code_lines.move_to(code_box.get_center() + DOWN * 0.12)
 

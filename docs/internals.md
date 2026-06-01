@@ -38,7 +38,7 @@ User-facing topic guides ([control](control.md), [observability](observability.m
   — is a method on this class.
 - **`engine/*`** is pure helpers. Anything in there is a free function
   or pure data with no engine state.
-- **`Graph`** is the immutable data model. Every `start`/`step` returns
+- **`Graph`** is the recursive data model. Every `start`/`step` returns
   a fresh snapshot reloaded from the session.
 - **`Runtime`** runs the REPL. Send/receive a small JSON protocol;
   shipped variants are `LocalRuntime`, `DockerRuntime`, and the
@@ -68,7 +68,7 @@ graph.runtime          # RuntimeRef | None
 graph.parent_agent_id  # str | None
 graph.parent_node_id   # str | None — the ActionNode id that delegated us
 
-graph.states           # tuple[Node, ...]  — this agent's trajectory
+graph.states           # list[Node]  — this agent's trajectory
 graph.children         # dict[str, Graph]  — direct sub-agents
 
 # subtree views
@@ -96,8 +96,8 @@ types under four base classes:
 | `done_output`        | `DoneOutput`        | `CodeObservation` (obs) | terminal answer from `done(...)`                   |
 | `resume_action`      | `ResumeAction`      | `ActionNode`            | "supervisor resumed paused code"                   |
 
-Every leaf in the persisted graph is an observation; intermediate
-action nodes only exist *inside* a single `apply_one` call's writes.
+Persisted graphs contain both action and observation nodes; each
+action is immediately followed by the observation it produced.
 See [`internal/node_model.md`](internal/node_model.md) for the full
 state-machine spec.
 
@@ -211,6 +211,15 @@ model, then writes `LLMOutput`. The action-before-call ordering means
 `graph.states` for the in-progress turn — that's why the
 `CONTINUE_ACTION` nudge gates on `LLMOutput` count, not `LLMAction`
 count.
+
+All model requests route through a shared `LLMChannel`. Agent turns call
+`LLMChannel.call(model, messages)`, and `llm_query_batched(...)` submits
+its prompts to `LLMChannel.batch(...)` instead of creating its own nested
+executor. The channel owns the run-wide LLM concurrency cap
+(`RLMConfig.llm_max_concurrency`, falling back to the normal engine
+concurrency when unset), preserves batch result order, and uses
+per-request `LLMClient.completion(...) -> (text, usage)` so usage
+accounting never reads a racy shared `last_usage`.
 
 #### `step_exec` — exec half
 

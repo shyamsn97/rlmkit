@@ -48,14 +48,14 @@ The workspace is the saved run.
 
 ## Modal, E2B, and Daytona
 
-Remote sandbox examples live under [`examples/sandbox/`](sandbox/). They
-start a small chat agent, so set `OPENAI_API_KEY` plus the provider's
-sandbox credentials. Omit `--message` for an interactive loop:
+Remote sandbox examples live under [`examples/sandbox/`](sandbox/). They run
+a small platformer-building task, so set `OPENAI_API_KEY` plus the provider's
+sandbox credentials:
 
 ```bash
-python examples/sandbox/modal_agent.py --message "What Python version is in the sandbox?"
-python examples/sandbox/e2b_agent.py --message "What Python version is in the sandbox?"
-python examples/sandbox/daytona_agent.py --message "What Python version is in the sandbox?"
+python examples/sandbox/modal_agent.py --model gpt-5 --no-live
+python examples/sandbox/e2b_agent.py --model gpt-5
+python examples/sandbox/daytona_agent.py --model gpt-5
 ```
 
 Install the matching extra first: `rlmflow[modal]`, `rlmflow[e2b]`,
@@ -79,6 +79,10 @@ runtime = DockerRuntime(
 
 ## Other examples
 
+- `run_examples.py` — manifest-driven smoke runner. By default it runs the
+  deterministic/offline examples; use `--include-optional`, `--include-live`,
+  `--include-notebooks`, `--include-sandbox`, or `--all --list` to expand or
+  inspect the suite.
 - `drop_in_llm.py` — shows that `RLMFlow` satisfies `LLMClient`, so you can nest
   agents or swap an agent in anywhere a plain LLM is accepted. No CLI flags.
 - `view_demo.py` — builds fake graph snapshots and opens the state viewer. No LLM or

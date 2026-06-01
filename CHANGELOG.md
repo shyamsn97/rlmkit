@@ -22,6 +22,25 @@ each one is called out under **Breaking** below.
   parallel fanout uses a single `launch_subagents([...])`. The launchers are
   registered as real core tools and compose over `rlm_delegate` / `rlm_wait`, so
   they behave identically on local and remote runtimes.
+- **Shared LLM scheduler channel.** All agent LLM turns and
+  `llm_query_batched(...)` calls now route through one per-run `LLMChannel`,
+  keyed by model/client. `RLMConfig.llm_max_concurrency` controls the global
+  LLM request cap; unsafe clients are serialized behind a per-client lock, and
+  safe clients can run concurrently within the channel limit.
+- **Thread-safe per-request usage accounting.** `LLMClient.completion(...)`
+  returns `(text, LLMUsage)` for each request. `OpenAIClient` and
+  `AnthropicClient` implement it directly from provider response usage, so the
+  engine no longer depends on racy shared `last_usage` reads under nested
+  batching.
+- **Example smoke runner.** `python examples/run_examples.py` runs the
+  deterministic/offline example suite by default, with opt-in flags for
+  optional dependencies, live LLM examples, notebooks, sandbox providers, and
+  manual viewer/interactive checks.
+- **Direct child-writes-file prompt pattern.** The default prompt's multi-file
+  fanout example no longer teaches a `PATH: <path>` answer header. It passes
+  target paths through child `CONTEXT` and demonstrates plain Python
+  `pathlib.Path(...).write_text(...)` writes, either in the parent or directly
+  inside child agents.
 
 ### Breaking
 
@@ -38,6 +57,10 @@ each one is called out under **Breaking** below.
 - **`RLMConfig.async_children` renamed to `eager_children`.** Same semantics
   (work-conserving child drain once a parent is supervising); update config
   literals and any persisted `agent.json` fixtures.
+- **`Node.injected` and `Node.injected_reason` removed.** Injected controller
+  nodes are now stored with the exact same schema as ordinary graph states.
+  `Graph.inject(...)` no longer accepts or persists a reason string; external
+  controllers that need provenance should track it outside the node payload.
 
 ## [0.3.2] — 2026-05-28
 

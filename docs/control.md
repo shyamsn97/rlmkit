@@ -1,8 +1,8 @@
 # Control
 
-`step(graph) -> graph'` is the core transition. `Graph` snapshots are
-immutable, so stepping, rewind, and forking are explicit graph/workspace
-operations.
+`step(graph) -> graph'` is the core transition. Each call returns a fresh
+`Graph` snapshot, so stepping, rewind, and forking are explicit
+graph/workspace operations.
 
 ## Step loop
 
